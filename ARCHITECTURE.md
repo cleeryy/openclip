@@ -52,6 +52,24 @@ Brush JSON (shim-defined schema, MyPaint-compatible params; extra keys
 ignored): `{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,
 "color":"#RRGGBB"}`.
 
+M3 additions (defined 2026-10-15, filters round):
+
+- `nApplyFilter(handle: Long, name: String, paramsJson: String): Boolean`
+  — applies one named filter over the FULL active layer, engine-side,
+  wrapped in a history stroke (undoable like a brush stroke). Returns
+  false + no change on unknown name/params (CI validated). Composite
+  stays unchanged until application succeeds.
+- Filter registry (engine-owned, clean-room, all from scratch):
+  kernel-based: `gaussianBlur` (separable, possible SRC-radius param),
+  `sharpen`, `motionBlur` (angle/length), `radialBlur` (cx, cy, strength);
+  pixelwise: `posterize` (levels), `levels` (in/out/black-point/white);
+  browser le toArray: `chromaticAberration` (shift px), `addNoise`
+  (amount, monochrome), `mosaic` (block size), `gradientMap` (stops
+  array #hex:pos).
+  Each filter test-gated on known pixel invariants in engine tests.
+- params JSON keys are shim-documented engine-owned; unknown keys are
+  ignored, missing keys fall back to defaults documented in headers.
+
 M2 additions (defined 2026-10-15, implemented for M2):
 
 - `nLoadMyb(handle: Long, xml: String): Boolean` — feed a MyPaint `.myb`
