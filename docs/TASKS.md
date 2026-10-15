@@ -16,7 +16,7 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 
 ## M2 — Pinceaux durcis
 - [x] Engine stroke accumulator+stabilisation+pressure curve (stroke.h/stroke.cpp, 5 tests, 25/25 verts)
-- [ ] Import presets MyPaint `.myb` réel + UI de presets (galerie)
+- [x] Import presets MyPaint `.myb` réel + UI de presets (galerie) — lane app (run 38725283977 : build+emulator verts, 4/4 tests ; nLoadMyb shim + PresetGallery + 6 presets clean-room)
 - [ ] Stabilisation/lissage d'entrée (facteur 1–2 trames), courbe de pression éditable, tilt
 - [ ] Qualité : interpolation inter-moves correcte (aujourd'hui chaque move = estampilles isolées), densité d'estampilles
 
