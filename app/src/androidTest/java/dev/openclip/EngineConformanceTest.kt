@@ -316,7 +316,9 @@ class EngineConformanceTest {
                 """{"radius":6,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#0000FF"}"""
             )
             val s0 = EngineHost.nStrokeBegin(handle, 40f, 40f, 1f)
-            EngineHost.nStrokeMove(handle, s0, 60f, 40f, 1f)
+            for (x in 42..60 step 2) {
+                EngineHost.nStrokeMove(handle, s0, x.toFloat(), 40f, 1f)
+            }
             EngineHost.nStrokeEnd(handle, s0)
 
             // Top: full-canvas red layer.
