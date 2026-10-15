@@ -50,6 +50,10 @@ jobs:
           arch: x86_64
           target: default
           profile: pixel_6
+          # Explicit software GPU + bounded RAM: the runner shares 7 GB
+          # between what it runs and the guest; crashes under memory
+          # pressure abort instrumentation ("System has crashed").
+          options: -no-snapshot -memory 2560 -gpu swiftshader_indirect -no-audio
           # Boots must be real: no force-green, no snapshot masking.
           force-avd-creation: true
           disable-animations: true
@@ -60,6 +64,9 @@ jobs:
             # script parser breaks on multi-line loops). Fails honestly.
             boot_deadline=$((SECONDS + 600)); until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && adb shell pm list packages >/dev/null 2>&1; do if [ $SECONDS -ge $boot_deadline ]; then echo "emulator system never became usable" && exit 1; fi; sleep 5; done
             ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+            # Gradle heap bounded for the test attempt so the guest keeps
+            # its memory headroom (crash abatement, not force-green).
+            GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx1024m"
             # Retry is single-line-dash-safe: one tolerated retry, then real
             # failure. No force-green: two consecutive failures fail the job.
             ./gradlew :app:connectedDebugAndroidTest || (echo "connectedDebugAndroidTest failed — retrying once" && ./gradlew :app:connectedDebugAndroidTest)
