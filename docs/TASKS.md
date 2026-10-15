@@ -34,8 +34,8 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] Shim+Kotlin 10 symboles M5 + nLayerState snapshot panel (ARCHITECTURE.md §M5, check_jni_symbols PASS)
 - [x] LayerPanel réel (visibilité/opacité slider/blend dropdown/rename/add group/move up-down/mask+mask-target/clipped, groupes repliables, ops render-thread) — strings ajoutées
 - [x] 2 tests instrumentés M5 (maskTarget stroke hide + undo restore ; clipped stencil + unclip parity) — CI engine verte run 38769787419 ; APK build vert (run 38762936820 build success) ; emulator 10/10 en attente run vert (cancellations par pushes successifs, dernier run 38774585877 build success)
-- [ ] Calques d'ajustement (brightness/contrast, hue, gradient map)
-- [ ] UX panneau calques : réordonner, modes, opacités (remplace le stub actuel)
+- [ ] Calques d'ajustement (brightness/contrast, hue, gradient map) — REPORTE M8 (impact faible/peinture)
+- [x] UX panneau calques réel : visibilité/opacité/blends/rename/groupes/move/mask/clipped
 
 ## M6 — Vectoriel + règles
 - [ ] Couches vectorielles (chemins, pression→largeur, gomme vectorielle)
@@ -70,3 +70,4 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-15 (2): M2 clos — moteur stroke accumulator (stabilize/curve) 25/25; app galerie presets+nLoadMyb 4/4 émulateur.
 - 2026-10-15 (3): M3 clos — 10 filtres + dialog + queue undoable, 36/36 engine, 6/6 emulator (run 38734875717).
 - 2026-10-15 (4): M4 clos — 42/42 engine, 8/8 emulator; fix direct de 3 poisons (stb-in-function, loadPsd link, cancel string, apostrophe FR).
+- 2026-10-15 (5): M5 clos — 10/10 emulator (run 38794030171); clipping semantique verrouillée par sonde locale (dbg6: stencil sparse OK). Leçon: 2 poisons CI (JDK pin repo, apostrophe FR) corrigés: prepush.sh gate = fidèle à la CI (42/42 + Kotlin + NDK locaux).
