@@ -41,7 +41,9 @@ TEST(mask_multiply_hides) {
 TEST(clipped_respects_stencil) {
     Canvas c(8, 8);
     const std::size_t stencil = c.addLayer("stencil");
-    c.layer(stencil).surface.set(2, 2, Pixel{255, 0, 0, 255});
+    c.layer(stencil).visible = false;  // base hidden: stencil truly sparse
+    const std::size_t mid = c.addLayer("mid");
+    c.layer(mid).surface.set(2, 2, Pixel{255, 0, 0, 255});
     const std::size_t clip = c.addLayer("clip");
     c.layer(clip).clipped = true;
     c.layer(clip).surface.set(2, 2, Pixel{0, 0, 255, 255});

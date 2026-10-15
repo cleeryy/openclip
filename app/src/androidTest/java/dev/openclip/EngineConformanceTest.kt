@@ -299,13 +299,18 @@ class EngineConformanceTest {
     }
 
     // M5-10: nSetLayerClipped stencil math on real composite bytes. The
-    // top layer paints the full canvas; when clipped it only survives
-    // where the stencil layer (below) already has painted alpha.
+    // base layer is opaque white by design, so it is hidden first: the
+    // stencil is a transparent layer with a small painted stroke, and the
+    // clipped top layer (full-canvas red) only survives on that stroke.
     @Test
     fun clippedLayerRespectsStencil() {
         val handle = EngineHost.nInit(w, h, 160f)
         try {
-            // Stencil: small blue stroke on the base layer.
+            assertTrue(EngineHost.nSetLayerVisibility(handle, 0, false))
+            // Stencil: small blue stroke on a transparent layer.
+            val stencilLayer = EngineHost.nAddLayer(handle, "stencil")
+            assertTrue(stencilLayer >= 1)
+            EngineHost.nSetActiveLayer(handle, stencilLayer)
             EngineHost.nSetBrush(
                 handle,
                 """{"radius":6,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#0000FF"}"""
@@ -314,9 +319,9 @@ class EngineConformanceTest {
             EngineHost.nStrokeMove(handle, s0, 60f, 40f, 1f)
             EngineHost.nStrokeEnd(handle, s0)
 
-            // Top: full-canvas red layer (white base repainted red).
+            // Top: full-canvas red layer.
             val top = EngineHost.nAddLayer(handle, "top")
-            assertTrue(top >= 1)
+            assertTrue(top > stencilLayer)
             EngineHost.nSetActiveLayer(handle, top)
             EngineHost.nSetBrush(
                 handle,
@@ -331,17 +336,23 @@ class EngineConformanceTest {
             }
             val unclipped = IntArray(w * h)
             assertEquals(w * h, EngineHost.nCompositeInto(handle, unclipped, w, h))
+            // Sanity: the far corner is opaque red before clipping.
+            val far = 200 * w + 200
+            assertTrue("top layer must cover the far corner", (unclipped[far] ushr 24) == 255)
 
             assertTrue(EngineHost.nSetLayerClipped(handle, top, true))
             val clipped = IntArray(w * h)
             assertEquals(w * h, EngineHost.nCompositeInto(handle, clipped, w, h))
             val changed = clipped.indices.count { clipped[it] != unclipped[it] }
             assertTrue("clipping must change composite pixels, got $changed", changed > 100)
-            // The base layer is white everywhere EXCEPT where strokes
-            // painted, but white is itself painted alpha (base layer is
-            // opaque white), so clipping against the full opaque stencil
-            // keeps only pixels where the stencil stack is non-transparent:
-            // unclip restores byte parity with the pre-clip composite.
+            // Far from the stencil the clipped layer contributes nothing:
+            // base hidden + stencil transparent there = fully transparent.
+            assertEquals(0, clipped[far])
+            // On the stencil stroke the clipped red survives (opaque).
+            val on = 40 * w + 50
+            assertTrue("clipped layer must paint on the stencil", (clipped[on] ushr 24) == 255)
+
+            // Unclip restores byte parity with the pre-clip composite.
             assertTrue(EngineHost.nSetLayerClipped(handle, top, false))
             val restored = IntArray(w * h)
             assertEquals(w * h, EngineHost.nCompositeInto(handle, restored, w, h))
