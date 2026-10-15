@@ -40,6 +40,7 @@
 #if defined(__has_include)
 #if __has_include("openclip/document.h")
 #include "openclip/document.h"
+#include "openclip/psd.h"
 #define OPENCLIP_HAS_DOCUMENT_H 1
 #endif
 #endif

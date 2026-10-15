@@ -33,6 +33,7 @@
     <string name="filter_mosaic">Mosaïque</string>
     <string name="filter_gradient_map">Dégradé mappé</string>
     <string name="export_title">Exporter</string>
+    <string name="cancel">Annuler</string>
     <string name="export_apply">Exporter</string>
     <string name="export_hint">Choisissez un format (ora / png / psd)</string>
     <string name="export_ok">Enregistré.</string>
