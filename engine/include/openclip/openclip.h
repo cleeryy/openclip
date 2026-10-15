@@ -10,6 +10,7 @@
 #include "openclip/stroke.h"
 #include "openclip/undo.h"
 #include "openclip/ora.h"
+#include "openclip/filters.h"
 
 #define OPENCLIP_VERSION_MAJOR 1
 #define OPENCLIP_VERSION_MINOR 0

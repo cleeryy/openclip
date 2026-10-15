@@ -11,7 +11,8 @@ SRCS = src/raster/surface.cpp \
        src/stroke/stroke.cpp \
        src/undo/undo.cpp \
        src/io/minizip.cpp \
-       src/io/ora.cpp
+       src/io/ora.cpp \
+       src/filters/filters.cpp
 
 TEST_SRCS = tests/main.cpp \
             tests/test_surface.cpp \
@@ -19,7 +20,8 @@ TEST_SRCS = tests/main.cpp \
             tests/test_brush.cpp \
             tests/test_stroke.cpp \
             tests/test_undo.cpp \
-            tests/test_ora.cpp
+            tests/test_ora.cpp \
+            tests/test_filters.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a
