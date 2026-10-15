@@ -52,6 +52,26 @@ Brush JSON (shim-defined schema, MyPaint-compatible params; extra keys
 ignored): `{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,
 "color":"#RRGGBB"}`.
 
+M5 additions (defined 2026-10-15, layer system round):
+
+- Layer tree control: `nSetLayerVisibility(handle, index, visible: Boolean)`,
+  `nSetLayerOpacity(handle, index, opacity: Float): Boolean`,
+  `nSetLayerBlend(handle, index, name: String): Boolean`,
+  `nSetLayerName(handle, index, name: String): Boolean`,
+  `nAddGroup(handle, name: String): Int`,
+  `nMoveLayer(handle, from: Int, to: Int): Boolean`,
+  `nAppendChild(handle, parent: Int, name: String): Int`.
+- Clipping: `nSetLayerClipped(handle, index, clipped: Boolean): Boolean`
+  — clipped layer composites only where the layer above is already
+  painted (documented in composite order: the clipped layer uses the
+  alpha of the previous layer as its stencil).
+- Masks: `nAddLayerMask(handle, index): Boolean` (full-white mask),
+  `nMaskTarget(handle, index, onMask: Boolean): Boolean` (redirect
+  strokes to the mask; black = hide). Composite multiplies layer alpha
+  by mask alpha each pixel. Mask strokes participate in undo.
+- App: channels for panel state are these exact symbols; no extra
+  engine parsing at the UI site.
+
 M4 additions (defined 2026-10-15, file I/O round):
 
 - `nLoadDocument(handle: Long, path: String): Boolean` — replaces the
