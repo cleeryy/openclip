@@ -52,6 +52,26 @@ Brush JSON (shim-defined schema, MyPaint-compatible params; extra keys
 ignored): `{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,
 "color":"#RRGGBB"}`.
 
+M7 additions (defined 2026-10-16, animation round):
+
+- Frame model: the session canvas becomes one frame of a clip. Frames
+  are full Canvas copies (documented cost; small canvases in tests).
+  Symbols: `nAddFrame(handle): Int` (blank, appended after current),
+  `nDuplicateFrame(handle): Int` (copy of current), `nDeleteFrame(handle,
+  index): Boolean`, `nSetFrame(handle, index): Boolean` (current editing
+  frame; loading a document applies to the current frame),
+  `nFrameCount(handle): Int`, `nFrameCompositeInto(handle, index, pixels,
+  w, h): Int` (app timeline thumbnails and playback pull these).
+- Onion skin: `nSetOnion(handle, previous: Boolean, next: Boolean,
+  strength: Float): Boolean` — nCompositeInto draws previous (tinted)
+  and next frames at `strength` alpha beneath the current frame.
+- App: timeline strip (Thumbnails via nFrameCompositeInto scaled 96px),
+  fps field default 12, play/pause button (app-side timer, no engine
+  loop), onion toggles. Audio track + webm export = M7b post-baseline
+  (documented here) — not this round.
+- Undo: strokes stay per-frame (history resets on nSetFrame — shim
+  documented).
+
 M6 additions (defined 2026-10-15, vector + rulers round):
 
 - Vector layer model (clean-room, no SVG dependency at the engine level):
