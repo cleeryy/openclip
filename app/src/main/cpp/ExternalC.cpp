@@ -15,10 +15,16 @@
  * archive ("ora"); "psd" flattens through a .png payload written at
  * the given path. Loading a document clears the undo history
  * (documented in ARCHITECTURE.md, touchTile/history untouched otherwise).
+ * M5 additions (documented in ARCHITECTURE.md): layer tree control
+ * (nSetLayerVisibility/nSetLayerOpacity/nSetLayerBlend/nSetLayerName/
+ * nAddGroup/nMoveLayer/nAppendChild), clipping (nSetLayerClipped) and
+ * masks (nAddLayerMask full-white, nMaskTarget redirecting strokes to
+ * the mask where ink luminance drives mask alpha: black = hide).
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include <jni.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <new>
@@ -66,6 +72,12 @@ struct Session {
     float stabilize = 0.0f;
     float curve = 0.0f;
     bool eraser = false;
+    // M5: per-session mask-edit target (index + on/off). When on and the
+    // active layer owns a mask, paintStamp resolves dabs to mask alpha:
+    // ink luminance drives mask.a (white = show, black = hide), snaps the
+    // mask tile for undo (history mask flag) and never touches pixels.
+    int maskTarget = -1;
+    bool maskTargetOn = false;
 };
 
 Session* asSession(jlong handle) { return reinterpret_cast<Session*>(handle); }
@@ -124,6 +136,9 @@ bool parseColor(const std::string& s, std::uint8_t& r, std::uint8_t& g,
 }
 
 // Paint one stamp and snapshot every touched engine tile for undo.
+// M5: when the session mask target is armed on the active layer, the dab
+// resolves to mask alpha (ink luminance -> mask.a) on the layer mask,
+// snapshots the mask tile (history mask flag), and never touches pixels.
 bool paintStamp(Session* s, const openclip::Dab& dab) {
     const int t = openclip::kTileSize;
     const int pad = static_cast<int>(dab.radius) + 1;
@@ -136,6 +151,39 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
     const int ty0 = y0 / t, ty1 = (y1 - 1) / t;
     const std::size_t layer = static_cast<std::size_t>(
         s->canvas.activeLayer() < 0 ? 0 : s->canvas.activeLayer());
+    if (layer >= static_cast<std::size_t>(s->canvas.layerCount())) return false;
+    if (s->maskTargetOn && static_cast<int>(layer) == s->maskTarget &&
+        s->canvas.layer(layer).hasMask) {
+        // Ink luminance drives mask alpha (white keeps, black hides);
+        // alpha-erase and eraser flags do not apply to masks.
+        const std::uint8_t lum = static_cast<std::uint8_t>(
+            (0.299f * dab.r + 0.587f * dab.g + 0.114f * dab.b) *
+            std::max(0.0f, std::min(1.0f, dab.opacity)));
+        for (int ty = ty0; ty <= ty1; ++ty)
+            for (int tx = tx0; tx <= tx1; ++tx)
+                s->history.touchTile(s->canvas, layer, tx, ty, true);
+        openclip::Surface& m = s->canvas.layer(layer).mask;
+        const float rad = dab.radius > 0.5f ? dab.radius : 0.5f;
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                const float dx = (x + 0.5f) - dab.x;
+                const float dy = (y + 0.5f) - dab.y;
+                const float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > rad) continue;
+                const float fall = 1.0f - dist / rad;
+                const float sa = fall * dab.opacity;
+                if (sa <= 1e-4f) continue;
+                openclip::Pixel dst = m.get(x, y);
+                const float da = dst.a / 255.0f;
+                const float ta = lum / 255.0f;
+                const float oa = ta * sa + da * (1.0f - sa);
+                const std::uint8_t v = static_cast<std::uint8_t>(
+                    std::max(0.0f, std::min(255.0f, oa * 255.0f + 0.5f)));
+                m.set(x, y, openclip::Pixel{v, v, v, v});
+            }
+        }
+        return true;
+    }
     for (int ty = ty0; ty <= ty1; ++ty)
         for (int tx = tx0; tx <= tx1; ++tx)
             s->history.touchTile(s->canvas, layer, tx, ty);
@@ -240,11 +288,165 @@ Java_dev_openclip_engine_EngineHost_nSetActiveLayer(JNIEnv*, jclass,
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_dev_openclip_engine_EngineHost_nAddLayer(JNIEnv*, jclass, jlong handle,
-                                              jstring) {
+Java_dev_openclip_engine_EngineHost_nAddLayer(JNIEnv* env, jclass,
+                                              jlong handle, jstring jname) {
     Session* s = asSession(handle);
     if (!s) return -1;
-    return static_cast<jint>(s->canvas.addLayer("Layer"));
+    std::string name =
+        jname ? toStd(env, jname) : std::string();
+    if (name.empty()) name = "Layer";
+    return static_cast<jint>(s->canvas.addLayer(name));
+}
+
+// M5 layer-system round (ARCHITECTURE.md "M5 additions"): direct maps
+// onto the engine canvas. Index bounds are checked shim-side; invalid
+// indexes return false/-1 without touching engine state. Blend names go
+// through openclip::blendFromName (bare or "svg:" prefixed); unknown
+// names are rejected (false, layer unchanged) so the panel dropdown can
+// only push engine-known modes.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerVisibility(JNIEnv*, jclass,
+                                                        jlong handle,
+                                                        jint index,
+                                                        jboolean visible) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    s->canvas.layer(static_cast<std::size_t>(index)).visible =
+        (visible == JNI_TRUE);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerOpacity(JNIEnv*, jclass,
+                                                     jlong handle, jint index,
+                                                     jfloat opacity) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    if (opacity < 0.0f || opacity > 1.0f) return JNI_FALSE;
+    s->canvas.layer(static_cast<std::size_t>(index)).opacity = opacity;
+    return JNI_TRUE;
+}
+
+bool knownBlendName(const std::string& n) {
+    return n == "normal" || n == "multiply" || n == "screen" ||
+           n == "overlay" || n == "plus" || n == "add" ||
+           n == "soft-light" || n == "soft_light" || n == "softlight" ||
+           n == "svg:normal" || n == "svg:multiply" || n == "svg:screen" ||
+           n == "svg:overlay" || n == "svg:plus" || n == "svg:soft-light";
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerBlend(JNIEnv* env, jclass,
+                                                    jlong handle, jint index,
+                                                    jstring jname) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    const std::string name = toStd(env, jname);
+    if (name.empty() || !knownBlendName(name)) return JNI_FALSE;
+    s->canvas.layer(static_cast<std::size_t>(index)).blend =
+        openclip::blendFromName(name.c_str());
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerName(JNIEnv* env, jclass,
+                                                  jlong handle, jint index,
+                                                  jstring jname) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    s->canvas.layer(static_cast<std::size_t>(index)).name = toStd(env, jname);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nAddGroup(JNIEnv* env, jclass,
+                                              jlong handle, jstring jname) {
+    Session* s = asSession(handle);
+    if (!s) return -1;
+    std::string name = jname ? toStd(env, jname) : std::string();
+    if (name.empty()) name = "Group";
+    return static_cast<jint>(s->canvas.addGroup(name));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nMoveLayer(JNIEnv*, jclass, jlong handle,
+                                              jint from, jint to) {
+    Session* s = asSession(handle);
+    if (!s || from < 0 || to < 0 ||
+        from >= static_cast<jint>(s->canvas.layerCount()) ||
+        to >= static_cast<jint>(s->canvas.layerCount()) || from == to)
+        return JNI_FALSE;
+    s->canvas.moveLayer(static_cast<std::size_t>(from),
+                        static_cast<std::size_t>(to));
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nAppendChild(JNIEnv* env, jclass,
+                                                 jlong handle, jint parent,
+                                                 jstring jname) {
+    Session* s = asSession(handle);
+    if (!s || parent < 0 ||
+        parent >= static_cast<jint>(s->canvas.layerCount()))
+        return -1;
+    openclip::Layer& p =
+        s->canvas.layer(static_cast<std::size_t>(parent));
+    if (!p.isGroup) return -1;
+    openclip::Layer ch;
+    std::string name = jname ? toStd(env, jname) : std::string();
+    ch.name = name.empty() ? "Layer" : name;
+    ch.surface.resize(s->canvas.width(), s->canvas.height());
+    p.children.push_back(std::move(ch));
+    return static_cast<jint>(p.children.size()) - 1;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerClipped(JNIEnv*, jclass,
+                                                     jlong handle, jint index,
+                                                     jboolean clipped) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    s->canvas.layer(static_cast<std::size_t>(index)).clipped =
+        (clipped == JNI_TRUE);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nAddLayerMask(JNIEnv*, jclass,
+                                                  jlong handle, jint index) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    openclip::Layer& l = s->canvas.layer(static_cast<std::size_t>(index));
+    if (l.isGroup) return JNI_FALSE;
+    l.addMask(s->canvas.width(), s->canvas.height());
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nMaskTarget(JNIEnv*, jclass, jlong handle,
+                                                jint index, jboolean onMask) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    if (onMask == JNI_TRUE &&
+        !s->canvas.layer(static_cast<std::size_t>(index)).hasMask)
+        return JNI_FALSE;  // cannot arm a target without a mask
+    s->maskTarget = index;
+    s->maskTargetOn = (onMask == JNI_TRUE);
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jlong JNICALL

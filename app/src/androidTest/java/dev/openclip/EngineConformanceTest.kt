@@ -248,4 +248,109 @@ class EngineConformanceTest {
             EngineHost.nDispose(handle)
         }
     }
+
+    // M5-9: addLayerMask + maskTarget redirect. A black stroke onto the
+    // armed mask hides the painted layer where it lands (composite bytes
+    // change); undo restores the exact pre-stroke composite.
+    @Test
+    fun maskTargetStrokeHidesAndUndoRestores() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#204080"}"""
+            )
+            val sid = EngineHost.nStrokeBegin(handle, 96f, 64f, 1f)
+            for (x in 100..150 step 5) {
+                EngineHost.nStrokeMove(handle, sid, x.toFloat(), 64f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+            val painted = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, painted, w, h))
+            assertTrue(painted.any { it != -1 })
+
+            assertTrue(EngineHost.nAddLayerMask(handle, 0))
+            assertTrue(EngineHost.nMaskTarget(handle, 0, true))
+            // Black ink erases the mask where the stroke lands.
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#000000"}"""
+            )
+            val mid = EngineHost.nStrokeBegin(handle, 110f, 64f, 1f)
+            for (x in 112..150 step 4) {
+                EngineHost.nStrokeMove(handle, mid, x.toFloat(), 64f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, mid)
+            val masked = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, masked, w, h))
+            val hidden = masked.indices.count { masked[it] != painted[it] }
+            assertTrue("mask stroke must hide composite pixels, got $hidden", hidden > 20)
+
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue(
+                "undo must restore the pre-mask composite exactly",
+                undone.contentEquals(painted)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // M5-10: nSetLayerClipped stencil math on real composite bytes. The
+    // top layer paints the full canvas; when clipped it only survives
+    // where the stencil layer (below) already has painted alpha.
+    @Test
+    fun clippedLayerRespectsStencil() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            // Stencil: small blue stroke on the base layer.
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":6,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#0000FF"}"""
+            )
+            val s0 = EngineHost.nStrokeBegin(handle, 40f, 40f, 1f)
+            EngineHost.nStrokeMove(handle, s0, 60f, 40f, 1f)
+            EngineHost.nStrokeEnd(handle, s0)
+
+            // Top: full-canvas red layer (white base repainted red).
+            val top = EngineHost.nAddLayer(handle, "top")
+            assertTrue(top >= 1)
+            EngineHost.nSetActiveLayer(handle, top)
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":40,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000"}"""
+            )
+            for (yy in 0..h step 16) {
+                val s = EngineHost.nStrokeBegin(handle, 0f, yy.toFloat(), 1f)
+                for (x in 0..w step 16) {
+                    EngineHost.nStrokeMove(handle, s, x.toFloat(), yy.toFloat(), 1f)
+                }
+                EngineHost.nStrokeEnd(handle, s)
+            }
+            val unclipped = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, unclipped, w, h))
+
+            assertTrue(EngineHost.nSetLayerClipped(handle, top, true))
+            val clipped = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, clipped, w, h))
+            val changed = clipped.indices.count { clipped[it] != unclipped[it] }
+            assertTrue("clipping must change composite pixels, got $changed", changed > 100)
+            // The base layer is white everywhere EXCEPT where strokes
+            // painted, but white is itself painted alpha (base layer is
+            // opaque white), so clipping against the full opaque stencil
+            // keeps only pixels where the stencil stack is non-transparent:
+            // unclip restores byte parity with the pre-clip composite.
+            assertTrue(EngineHost.nSetLayerClipped(handle, top, false))
+            val restored = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, restored, w, h))
+            assertTrue(
+                "unclip must restore the pre-clip composite exactly",
+                restored.contentEquals(unclipped)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
 }

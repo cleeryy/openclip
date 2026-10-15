@@ -20,10 +20,24 @@ inline Pixel scalePixel(const Pixel& p, float f) {
     return q;
 }
 
+// M5 clipping stencil: a clipped layer at index li composites only
+// where the previous layer is already painted (ARCHITECTURE.md: "the
+// clipped layer uses the alpha of the previous layer as its stencil" —
+// the layer directly below in bottom-to-top order). Falls back to the
+// running target alpha when there is no previous raster layer (bottom
+// of the stack, or the previous entry is a group whose composited
+// alpha is not directly addressable).
+inline bool stencilPainted(const std::vector<Layer>& layers, std::size_t li,
+                           const Surface& out, int x, int y) {
+    if (li > 0 && !layers[li - 1].isGroup)
+        return layers[li - 1].surface.get(x, y).a != 0;
+    return out.get(x, y).a != 0;
+}
+
 // Composite `layers` (document order, bottom-to-top) onto `out` (w x h).
-// M5 rules: a clipped layer skips any pixel where the running target
-// (already composited output = the stencil of everything below it) has
-// zero alpha; a layer with a mask multiplies its alpha by mask.a/255.
+// M5 rules: a clipped layer skips any pixel where its stencil (above)
+// has zero painted alpha; a layer with a mask multiplies its alpha by
+// mask.a/255.
 void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                    int h) {
     for (std::size_t li = 0; li < layers.size(); ++li) {
@@ -34,7 +48,8 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                 // Children blend directly into the target with their own
                 // modes; the group's opacity multiplies each child note
                 // (OpenRaster pass-through semantics approximation).
-                for (const auto& child : l.children) {
+                for (std::size_t ci = 0; ci < l.children.size(); ++ci) {
+                    const auto& child = l.children[ci];
                     if (!child.visible || child.opacity <= 0.0f) continue;
                     Surface tmp;
                     tmp.resize(w, h);
@@ -43,7 +58,9 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                     // then blend onto out so order stays correct.
                     for (int y = 0; y < h; ++y) {
                         for (int x = 0; x < w; ++x) {
-                            if (child.clipped && out.get(x, y).a == 0) continue;
+                            if (child.clipped &&
+                                !stencilPainted(l.children, ci, out, x, y))
+                                continue;
                             Pixel s = child.surface.get(x, y);
                             if (s.a == 0) continue;
                             if (child.hasMask) {
@@ -93,7 +110,8 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
         }
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
-                if (l.clipped && out.get(x, y).a == 0) continue;
+                if (l.clipped && !stencilPainted(layers, li, out, x, y))
+                    continue;
                 Pixel s = l.surface.get(x, y);
                 if (s.a == 0) continue;
                 if (l.hasMask) {

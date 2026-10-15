@@ -31,4 +31,16 @@ object EngineHost {
     // M4 additions (documented in ARCHITECTURE.md)
     external fun nLoadDocument(handle: Long, path: String): Boolean
     external fun nSaveDocument(handle: Long, path: String, format: String): Boolean
+
+    // M5 additions (documented in ARCHITECTURE.md): layer tree, clipping, masks
+    external fun nSetLayerVisibility(handle: Long, index: Int, visible: Boolean): Boolean
+    external fun nSetLayerOpacity(handle: Long, index: Int, opacity: Float): Boolean
+    external fun nSetLayerBlend(handle: Long, index: Int, name: String): Boolean
+    external fun nSetLayerName(handle: Long, index: Int, name: String): Boolean
+    external fun nAddGroup(handle: Long, name: String): Int
+    external fun nMoveLayer(handle: Long, from: Int, to: Int): Boolean
+    external fun nAppendChild(handle: Long, parent: Int, name: String): Int
+    external fun nSetLayerClipped(handle: Long, index: Int, clipped: Boolean): Boolean
+    external fun nAddLayerMask(handle: Long, index: Int): Boolean
+    external fun nMaskTarget(handle: Long, index: Int, onMask: Boolean): Boolean
 }
