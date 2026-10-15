@@ -52,6 +52,27 @@ Brush JSON (shim-defined schema, MyPaint-compatible params; extra keys
 ignored): `{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,
 "color":"#RRGGBB"}`.
 
+M4 additions (defined 2026-10-15, file I/O round):
+
+- `nLoadDocument(handle: Long, path: String): Boolean` — replaces the
+  session canvas with a parsed document. Formats auto-detected by
+  extension: `.ora` (full OpenRaster round trip incl. layer groups),
+  `.png` (single flattened layer), `.psd` (import: flattened composite
+  baseline; layer parse as far as RGB8 records support — engine lane
+  documents actual depth in its report; no fidelity promises beyond
+  that in M4).
+- `nSaveDocument(handle: Long, path: String, format: String): Boolean`
+  — `ora` | `png` (full composite render) | `psd` (basic flattened
+  layer plus per-layer PSD records if feasible in round scope). File
+  path is a real filesystem path (app resolves SAF URIs via
+  DocumentFile + temp directory copy; engine never touches Android
+  APIs).
+- No false success: returns false with error surfaced via existing
+  string channel on parse failure. Existing object state left untouched
+  when loading fails.
+- touchTile/history untouched: loading a document resets undo history
+  (documented in shim).
+
 M3 additions (defined 2026-10-15, filters round):
 
 - `nApplyFilter(handle: Long, name: String, paramsJson: String): Boolean`
