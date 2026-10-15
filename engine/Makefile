@@ -8,6 +8,7 @@ SRCS = src/raster/surface.cpp \
        src/raster/canvas.cpp \
        src/blend/blend.cpp \
        src/brush/brush.cpp \
+       src/stroke/stroke.cpp \
        src/undo/undo.cpp \
        src/io/minizip.cpp \
        src/io/ora.cpp
@@ -16,6 +17,7 @@ TEST_SRCS = tests/main.cpp \
             tests/test_surface.cpp \
             tests/test_blend.cpp \
             tests/test_brush.cpp \
+            tests/test_stroke.cpp \
             tests/test_undo.cpp \
             tests/test_ora.cpp
 

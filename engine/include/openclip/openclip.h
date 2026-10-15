@@ -7,6 +7,7 @@
 #include "openclip/blend.h"
 #include "openclip/canvas.h"
 #include "openclip/brush.h"
+#include "openclip/stroke.h"
 #include "openclip/undo.h"
 #include "openclip/ora.h"
 

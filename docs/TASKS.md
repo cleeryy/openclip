@@ -15,6 +15,7 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
   - [x] Job `emulator` CI (reactivecircus android-emulator-runner, API 34 x86_64, master/tags pushes) gate `publish` via `needs: [build, emulator]`
 
 ## M2 — Pinceaux durcis
+- [x] Engine stroke accumulator+stabilisation+pressure curve (stroke.h/stroke.cpp, 5 tests, 25/25 verts)
 - [ ] Import presets MyPaint `.myb` réel + UI de presets (galerie)
 - [ ] Stabilisation/lissage d'entrée (facteur 1–2 trames), courbe de pression éditable, tilt
 - [ ] Qualité : interpolation inter-moves correcte (aujourd'hui chaque move = estampilles isolées), densité d'estampilles
