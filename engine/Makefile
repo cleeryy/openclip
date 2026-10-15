@@ -24,7 +24,8 @@ TEST_SRCS = tests/main.cpp \
             tests/test_undo.cpp \
             tests/test_ora.cpp \
             tests/test_filters.cpp \
-            tests/test_document.cpp
+            tests/test_document.cpp \
+            tests/test_layers.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a

@@ -14,6 +14,7 @@ class Canvas;
 struct TileSnap {
     std::size_t layer = 0;
     int tx = 0, ty = 0;
+    bool mask = false;  // M5: snapshot targets the layer mask, not pixels
     std::vector<std::uint8_t> before;
     std::vector<std::uint8_t> after;
 };
@@ -29,7 +30,9 @@ public:
 
     void beginStroke();
     // Record one tile touched by the in-progress stroke. Captures "before".
-    void touchTile(Canvas& c, std::size_t layer, int tx, int ty);
+    // mask=true snapshots the layer's mask tile (M5 mask strokes).
+    void touchTile(Canvas& c, std::size_t layer, int tx, int ty,
+                   bool mask = false);
     void endStroke(Canvas& c);
     void cancelStroke(Canvas& c);  // restore "before", drop stroke
 

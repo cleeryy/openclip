@@ -20,13 +20,26 @@ struct Layer {
     BlendMode blend = BlendMode::Normal;
     Surface surface;
 
+    // M5: per-layer alpha mask (straight alpha in mask.a; rgb ignored).
+    // Composite multiplies layer alpha by mask.a/255 per pixel when set.
+    Surface mask;
+    bool hasMask = false;
+    // M5: clip to the stencil below (composites only where the running
+    // target already has painted alpha; see compositeInto).
+    bool clipped = false;
+
     // Group support (M4, OpenRaster round trip).
     bool isGroup = false;
     std::vector<Layer> children;              // empty for raster layers
     bool passThrough = true;                  // groups only: children blend
                                               // straight into the target
 
-    // Recursive size sync (groups: children surfaces get sized too).
+    // Attach a full-white (fully showing) mask sized w x h.
+    void addMask(int w, int h);
+    void clearMask();
+
+    // Recursive size sync (groups: children surfaces get sized too;
+    // an attached mask is resized alongside the layer surface).
     void resize(int w, int h);
 };
 

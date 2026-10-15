@@ -21,9 +21,13 @@ inline Pixel scalePixel(const Pixel& p, float f) {
 }
 
 // Composite `layers` (document order, bottom-to-top) onto `out` (w x h).
+// M5 rules: a clipped layer skips any pixel where the running target
+// (already composited output = the stencil of everything below it) has
+// zero alpha; a layer with a mask multiplies its alpha by mask.a/255.
 void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                    int h) {
-    for (const auto& l : layers) {
+    for (std::size_t li = 0; li < layers.size(); ++li) {
+        const auto& l = layers[li];
         if (!l.visible || l.opacity <= 0.0f) continue;
         if (l.isGroup) {
             if (l.passThrough) {
@@ -39,8 +43,24 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                     // then blend onto out so order stays correct.
                     for (int y = 0; y < h; ++y) {
                         for (int x = 0; x < w; ++x) {
+                            if (child.clipped && out.get(x, y).a == 0) continue;
                             Pixel s = child.surface.get(x, y);
                             if (s.a == 0) continue;
+                            if (child.hasMask) {
+                                const std::uint8_t ma = child.mask.get(x, y).a;
+                                if (ma == 0) continue;
+                                if (ma != 255) {
+                                    s.r = static_cast<std::uint8_t>(
+                                        (int)s.r * ma / 255);
+                                    s.g = static_cast<std::uint8_t>(
+                                        (int)s.g * ma / 255);
+                                    s.b = static_cast<std::uint8_t>(
+                                        (int)s.b * ma / 255);
+                                    s.a = static_cast<std::uint8_t>(
+                                        (int)s.a * ma / 255);
+                                }
+                                if (s.a == 0) continue;
+                            }
                             s = scalePixel(s, l.opacity * child.opacity);
                             Pixel d = out.get(x, y);
                             Pixel r;
@@ -73,8 +93,20 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
         }
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
+                if (l.clipped && out.get(x, y).a == 0) continue;
                 Pixel s = l.surface.get(x, y);
                 if (s.a == 0) continue;
+                if (l.hasMask) {
+                    const std::uint8_t ma = l.mask.get(x, y).a;
+                    if (ma == 0) continue;
+                    if (ma != 255) {
+                        s.r = static_cast<std::uint8_t>((int)s.r * ma / 255);
+                        s.g = static_cast<std::uint8_t>((int)s.g * ma / 255);
+                        s.b = static_cast<std::uint8_t>((int)s.b * ma / 255);
+                        s.a = static_cast<std::uint8_t>((int)s.a * ma / 255);
+                    }
+                    if (s.a == 0) continue;
+                }
                 s = scalePixel(s, l.opacity);
                 Pixel d = out.get(x, y);
                 Pixel r;
@@ -87,8 +119,33 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
 
 }  // namespace
 
+void Layer::addMask(int w, int h) {
+    mask.resize(w, h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            mask.set(x, y, Pixel{255, 255, 255, 255});
+    hasMask = true;
+}
+
+void Layer::clearMask() {
+    hasMask = false;
+    mask.resize(0, 0);
+}
+
 void Layer::resize(int w, int h) {
     if (surface.width() != w || surface.height() != h) surface.resize(w, h);
+    if (hasMask && (mask.width() != w || mask.height() != h)) {
+        // Keep the intersection, white-fill the rest (grow case).
+        Surface grown(w, h);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                grown.set(x, y, Pixel{255, 255, 255, 255});
+        const int cw = mask.width() < w ? mask.width() : w;
+        const int ch = mask.height() < h ? mask.height() : h;
+        for (int y = 0; y < ch; ++y)
+            for (int x = 0; x < cw; ++x) grown.set(x, y, mask.get(x, y));
+        mask = std::move(grown);
+    }
     for (auto& ch : children) ch.resize(w, h);
 }
 
