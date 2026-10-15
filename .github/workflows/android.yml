@@ -56,6 +56,17 @@ jobs:
           emulator-boot-timeout: 600
           script: |
             adb shell wm density 420
+            # Boot gate: real readiness, not wishful timing. Fails the job if
+            # the system never becomes usable (no force-green).
+            boot_deadline=$((SECONDS + 600))
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] \
+                  && adb shell pm list packages >/dev/null 2>&1; do
+              if [ $SECONDS -ge $boot_deadline ]; then
+                echo "emulator system never became usable within 600s — failing"
+                exit 1
+              fi
+              sleep 5
+            done
             ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
             # Retry is single-line-dash-safe: one tolerated retry, then real
             # failure. No force-green: two consecutive failures fail the job.
