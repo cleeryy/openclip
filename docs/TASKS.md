@@ -71,3 +71,4 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-15 (3): M3 clos — 10 filtres + dialog + queue undoable, 36/36 engine, 6/6 emulator (run 38734875717).
 - 2026-10-15 (4): M4 clos — 42/42 engine, 8/8 emulator; fix direct de 3 poisons (stb-in-function, loadPsd link, cancel string, apostrophe FR).
 - 2026-10-15 (5): M5 clos — 10/10 emulator (run 38794030171); clipping semantique verrouillée par sonde locale (dbg6: stencil sparse OK). Leçon: 2 poisons CI (JDK pin repo, apostrophe FR) corrigés: prepush.sh gate = fidèle à la CI (42/42 + Kotlin + NDK locaux).
+- 2026-10-15 (6): M6 clos — vector layers + rulers, 13/13 emulator (run 38815184126); engine 55/55 (a65b39f). CI emulator-resources fix (bound RAM + swiftshader_indirect) a supprimé les crashes system (run 38813808271 vert).
