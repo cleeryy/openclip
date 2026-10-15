@@ -8,9 +8,9 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] Squelette moteur C++ host-testable (tuiles, surface RGBA8, blend, brush, undo, ORA/PNG) — 19/19 tests locaux
 - [x] App Compose skeleton (EngineHost JNI, EngineSurface, panneaux UI)
 - [x] CI build/test/publish (engine.yml + android.yml, release APK sur tags)
-- [ ] **CI verte** : corriger segfault suite de tests sur runner GitHub Actions
-- [ ] **CI Android verte** : gradle assembleDebug + check symboles JNI passe sur runner (fix `ToolPalette` import → fait, voir runs suivants)
-- [ ] Fonctionnel : APK installable qui dessine (test émulateur CI = gate "conforme")
+- [x] CI engine verte sur master (run 38717447431 ; UB saveOra corrigée)
+- [x] CI Android verte sur master (run 38717535678 ; NDK + script check corrigés, APK réel en artefact)
+- [ ] Fonctionnel : APK installable qui dessine (test émulateur CI = gate "conforme") — où on est
 
 ## M2 — Pinceaux durcis
 - [ ] Import presets MyPaint `.myb` réel + UI de presets (galerie)
@@ -52,7 +52,7 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [ ] Matériaux libres : packaging + navigateur
 
 ## CI/CD — pérenne
-- [ ] CI engine verte sur master
-- [ ] CI android verte sur master (assembleDebug symboles check)
+- [x] CI engine verte sur master
+- [x] CI android verte sur master (assembleDebug + symboles check réels)
 - [ ] Instrumented test émulateur (conforme = démarre + dessin + undo)
 - [ ] Release pipeline tags v* → APKs sur GitHub Releases
