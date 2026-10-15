@@ -43,7 +43,7 @@ private sealed class FilterParam {
 
     // Numeric JSON param, shown as a slider (int = stepped to integers).
     data class Num(
-        val key: String,
+        override val key: String,
         val min: Float,
         val max: Float,
         val default: Float,
@@ -51,10 +51,10 @@ private sealed class FilterParam {
     ) : FilterParam()
 
     // Boolean JSON param, shown as a toggle chip.
-    data class Toggle(val key: String, val default: Boolean) : FilterParam()
+    data class Toggle(override val key: String, val default: Boolean) : FilterParam()
 
     // Free-text JSON param (gradientMap stops), shown as a text field.
-    data class Text(val key: String, val default: String) : FilterParam()
+    data class Text(override val key: String, val default: String) : FilterParam()
 }
 
 private data class FilterSpec(
