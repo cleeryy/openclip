@@ -465,6 +465,134 @@ class EngineConformanceTest {
             EngineHost.nDispose(handle)
         }
     }
+    // M7-14: frames — addFrame grows the clip, thumbnails see each
+    // frame, deleteFrame shrinks back to one.
+    @Test
+    fun framesAddCountThumbnailDelete() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertEquals(1, EngineHost.nFrameCount(handle))
+            assertEquals(1, EngineHost.nAddFrame(handle))
+            assertEquals(2, EngineHost.nFrameCount(handle))
+            val dup = EngineHost.nDuplicateFrame(handle)
+            assertEquals(2, dup)
+            assertEquals(3, EngineHost.nFrameCount(handle))
+            // Each frame composites to exactly one white base layer.
+            for (i in 0 until 3) {
+                val px = IntArray(w * h)
+                assertEquals(w * h, EngineHost.nFrameCompositeInto(handle, i, px, w, h))
+                assertTrue("frame $i must be blank white", px.all { it == -1 })
+            }
+            // Out-of-range indexes are refused, state untouched.
+            assertFalse(EngineHost.nSetFrame(handle, 9))
+            assertFalse(EngineHost.nDeleteFrame(handle, 9))
+            assertEquals(3, EngineHost.nFrameCount(handle))
+            // Delete the middle frame; the current index clamps, history
+            // semantics stay valid (undo of nothing = false).
+            assertTrue(EngineHost.nSetFrame(handle, 2))
+            assertTrue(EngineHost.nDeleteFrame(handle, 1))
+            assertEquals(2, EngineHost.nFrameCount(handle))
+            assertFalse(EngineHost.nUndo(handle))
+            // The last frame can never be deleted.
+            assertTrue(EngineHost.nDeleteFrame(handle, 1))
+            assertEquals(1, EngineHost.nFrameCount(handle))
+            assertFalse(EngineHost.nDeleteFrame(handle, 0))
+            assertEquals(1, EngineHost.nFrameCount(handle))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // M7-15: frame switch isolation — a stroke on frame 1 never stains
+    // frame 0 (full Canvas copies, per-frame history reset).
+    @Test
+    fun frameSwitchIsolatesStrokes() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertEquals(1, EngineHost.nAddFrame(handle))
+            assertTrue(EngineHost.nSetFrame(handle, 1))
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
+            )
+            val sid = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+            for (x in 70..170 step 5) {
+                EngineHost.nStrokeMove(handle, sid, x.toFloat(), 128f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+            val onFrame1 = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, onFrame1, w, h))
+            assertTrue(onFrame1.any { it != -1 })
+
+            assertTrue(EngineHost.nSetFrame(handle, 0))
+            val onFrame0 = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, onFrame0, w, h))
+            assertTrue("frame 0 must stay blank white", onFrame0.all { it == -1 })
+            // History reset on switch: nothing to undo on frame 0.
+            assertFalse(EngineHost.nUndo(handle))
+
+            // Back on frame 1 the stroke is still there and undoable.
+            assertTrue(EngineHost.nSetFrame(handle, 1))
+            val back = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, back, w, h))
+            assertTrue(back.contentEquals(onFrame1))
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue("undo on frame 1 must restore white", undone.all { it == -1 })
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // M7-16: onion skin — the next frame's paint shows through the
+    // current (transparent-base) frame at strength once armed.
+    @Test
+    fun onionNextGhostVisibleInComposite() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertTrue(EngineHost.nSetLayerVisibility(handle, 0, false))
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000"}"""
+            )
+            val dup = EngineHost.nDuplicateFrame(handle)
+            assertEquals(1, dup)
+            // Frame 1 keeps a big red patch; frame 0 stays empty.
+            for (yy in 96..160 step 32) {
+                val s = EngineHost.nStrokeBegin(handle, 96f, yy.toFloat(), 1f)
+                for (x in 96..160 step 8) {
+                    EngineHost.nStrokeMove(handle, s, x.toFloat(), yy.toFloat(), 1f)
+                }
+                EngineHost.nStrokeEnd(handle, s)
+            }
+            assertTrue(EngineHost.nSetFrame(handle, 0))
+            val plain = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, plain, w, h))
+            assertTrue("empty frame must stay transparent", plain.all { it == 0 })
+
+            assertTrue(EngineHost.nSetOnion(handle, false, true, 1.0f))
+            val ghost = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, ghost, w, h))
+            val added = ghost.indices.count { ghost[it] != plain[it] }
+            assertTrue("onion next must add ghost pixels, got $added", added > 100)
+            // Ghost is tinted: not pure opaque red, but visible alpha.
+            val probe = ghost[128 * w + 128]
+            assertTrue("ghost pixel must carry alpha", (probe ushr 24) > 0)
+            assertTrue("ghost pixel must not be plain white", probe != -1)
+
+            // Disarming restores the exact transparent frame.
+            assertTrue(EngineHost.nSetOnion(handle, false, false, 0.3f))
+            val restored = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, restored, w, h))
+            assertTrue(
+                "disarmed onion must restore the plain composite",
+                restored.contentEquals(plain)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
 }
 
 private fun IntArray.contentNotEquals(other: IntArray): Boolean {

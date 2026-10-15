@@ -54,4 +54,15 @@ object EngineHost {
     external fun nVectorEraser(handle: Long, index: Int, on: Boolean, pathJson: String): Boolean
     external fun nUndoVector(handle: Long, index: Int): Boolean
     external fun nSetRulers(handle: Long, kindsJson: String): Boolean
+
+    // M7 additions (ARCHITECTURE.md): frames + onion skin. fps stays
+    // app-side (default 12, no engine symbol); timeline thumbnails and
+    // playback pull nFrameCompositeInto per frame index.
+    external fun nAddFrame(handle: Long): Int
+    external fun nDuplicateFrame(handle: Long): Int
+    external fun nDeleteFrame(handle: Long, index: Int): Boolean
+    external fun nSetFrame(handle: Long, index: Int): Boolean
+    external fun nFrameCount(handle: Long): Int
+    external fun nFrameCompositeInto(handle: Long, index: Int, pixels: IntArray, width: Int, height: Int): Int
+    external fun nSetOnion(handle: Long, previous: Boolean, next: Boolean, strength: Float): Boolean
 }
