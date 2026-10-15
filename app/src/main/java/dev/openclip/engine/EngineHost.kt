@@ -46,4 +46,12 @@ object EngineHost {
     // Panel introspection: compact JSON snapshot of the top-level layer
     // list (names, groups, visibility, opacity, blend, mask, clipped).
     external fun nLayerState(handle: Long): String
+
+    // M6 additions (ARCHITECTURE.md): vector layers + rulers.
+    external fun nAddVectorLayer(handle: Long, name: String): Int
+    external fun nSetVectorMode(handle: Long, index: Int, on: Boolean): Boolean
+    external fun nAppendVectorPath(handle: Long, index: Int, pathJson: String): Int
+    external fun nVectorEraser(handle: Long, index: Int, on: Boolean, pathJson: String): Boolean
+    external fun nUndoVector(handle: Long, index: Int): Boolean
+    external fun nSetRulers(handle: Long, kindsJson: String): Boolean
 }

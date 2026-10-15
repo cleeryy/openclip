@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <new>
 #include <string>
 #include <vector>
@@ -39,6 +40,7 @@
 #include "openclip/ora.h"
 #include "openclip/surface.h"
 #include "openclip/undo.h"
+#include "openclip/vector.h"
 
 // M4: optional engine document API. When the parallel engine lane lands
 // engine/include/openclip/document.h, the shim prefers loadDocument /
@@ -79,6 +81,16 @@ struct Session {
     // mask tile for undo (history mask flag) and never touches pixels.
     int maskTarget = -1;
     bool maskTargetOn = false;
+
+    // M6 vector layers: per-layer path history (append/erase snapshots).
+    std::map<std::size_t, openclip::VectorHistory> vectorHistories;
+
+    // M6 rulers (shim transforms input before stamping; ARCHITECTURE.md).
+    struct RulEllipse { float cx = 0, cy = 0, rx = 1, ry = 1; };
+    bool symX = false, symY = false;
+    float symXAt = 0, symYAt = 0;
+    std::vector<RulEllipse> ellipses;
+    std::vector<std::pair<openclip::Vec2, openclip::Vec2>> lines;
 };
 
 Session* asSession(jlong handle) { return reinterpret_cast<Session*>(handle); }
@@ -203,6 +215,54 @@ bool stampResolved(Session* s, const openclip::Dab& d) {
                   : openclip::dabFromPressure(s->brush, d.x, d.y, d.pressure,
                                               s->r, s->g, s->b);
     return paintStamp(s, stamped);
+}
+
+// M6 rulers: project one input point to the active ruler (ellipse
+// boundary of the first ellipse; nearest point on the first line) and
+// emit stamps at the transformed point plus its symmetry mirrors.
+void rulerStamp(Session* s, float x, float y, float pressure) {
+    float px = x, py = y;
+    if (!s->ellipses.empty()) {
+        const auto& e = s->ellipses.front();
+        const float dx = (px - e.cx) / e.rx;
+        const float dy = (py - e.cy) / e.ry;
+        const float t = std::atan2(dy, dx);
+        px = e.cx + e.rx * std::cos(t);
+        py = e.cy + e.ry * std::sin(t);
+    } else if (!s->lines.empty()) {
+        const auto& seg = s->lines.front();  // nearest point on segment
+        const float ax = seg.first.x, ay = seg.first.y;
+        const float bxD = seg.second.x - ax, byD = seg.second.y - ay;
+        const float len2 = bxD * bxD + byD * byD;
+        float t = len2 > 0 ? ((px - ax) * bxD + (py - ay) * byD) / len2 : 0;
+        t = std::max(0.0f, std::min(1.0f, t));
+        px = ax + t * bxD;
+        py = ay + t * byD;
+    }
+    const std::vector<openclip::Dab> base = openclip::interpolateStamps(
+        s->brush, px, py, pressure, px, py, pressure, s->r, s->g, s->b);
+    for (const auto& d : base) stampResolved(s, d);
+    if (s->symX) {
+        const float mx = 2 * s->symXAt - px;
+        for (const auto& d : openclip::interpolateStamps(
+                 s->brush, mx, py, pressure, mx, py, pressure, s->r, s->g,
+                 s->b))
+            stampResolved(s, d);
+    }
+    if (s->symY) {
+        const float my = 2 * s->symYAt - py;
+        for (const auto& d : openclip::interpolateStamps(
+                 s->brush, px, my, pressure, px, my, pressure, s->r, s->g,
+                 s->b))
+            stampResolved(s, d);
+    }
+    if (s->symX && s->symY) {  // quadrant mirror
+        const float mx = 2 * s->symXAt - px, my = 2 * s->symYAt - py;
+        for (const auto& d : openclip::interpolateStamps(
+                 s->brush, mx, my, pressure, mx, my, pressure, s->r, s->g,
+                 s->b))
+            stampResolved(s, d);
+    }
 }
 
 }  // namespace
@@ -533,10 +593,9 @@ Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
     Session* s = asSession(handle);
     if (!s) return 0;
     s->history.beginStroke();
-    const std::vector<openclip::Dab> dabs = openclip::interpolateStamps(
-        s->brush, x, y, pressure, x, y, pressure, s->r, s->g, s->b);
-    for (const auto& d : dabs) stampResolved(s, d);
-    // M1: stroke ids are cosmetic (single render thread); M2 tracks them.
+    rulerStamp(s, x, y, pressure);
+    // M6: rulers transform input here. Stroke ids are cosmetic (single
+    // render thread).
     static jlong nextStrokeId = 1;
     return nextStrokeId++;
 }
@@ -580,11 +639,9 @@ Java_dev_openclip_engine_EngineHost_nStrokeMove(JNIEnv*, jclass, jlong handle,
                                                 jfloat y, jfloat pressure) {
     Session* s = asSession(handle);
     if (!s) return;
-    // Single-input-point M1 move: record the point stamps directly.
-    // Input interpolation across consecutive moves is the app's job in M1.
-    const std::vector<openclip::Dab> dabs = openclip::interpolateStamps(
-        s->brush, x, y, pressure, x, y, pressure, s->r, s->g, s->b);
-    for (const auto& d : dabs) stampResolved(s, d);
+    // M6: rulers transform input before stamping; app-side interpolation
+    // of consecutive moves stays the app's job until M2 stabilization.
+    rulerStamp(s, x, y, pressure);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -733,4 +790,141 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_openclip_engine_EngineHost_nRedo(JNIEnv*, jclass, jlong handle) {
     Session* s = asSession(handle);
     return s ? static_cast<jboolean>(s->history.redo(s->canvas)) : JNI_FALSE;
+}
+
+// ---- M6 vector layers + rulers (symbols per ARCHITECTURE.md) ----
+
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nAddVectorLayer(JNIEnv* env, jclass,
+                                                    jlong handle,
+                                                    jstring name) {
+    Session* s = asSession(handle);
+    if (!s) return -1;
+    const std::string nm = toStd(env, name);
+    const int idx = static_cast<int>(s->canvas.addLayer(nm.empty() ? "vector"
+                                                                  : nm));
+    if (idx >= 0 && idx < static_cast<int>(s->canvas.layerCount()))
+        s->canvas.layer(static_cast<std::size_t>(idx)).isVector = true;
+    return idx;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetVectorMode(JNIEnv*, jclass,
+                                                   jlong handle, jint index,
+                                                   jboolean on) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 || index >= static_cast<int>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    s->canvas.layer(static_cast<std::size_t>(index)).isVector = (on == JNI_TRUE);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nAppendVectorPath(JNIEnv* env, jclass,
+                                                      jlong handle, jint index,
+                                                      jstring pathJson) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 || index >= static_cast<int>(s->canvas.layerCount()))
+        return -1;
+    const std::string j = toStd(env, pathJson);
+    if (j.empty()) return -1;
+    std::string kind = jsonStr(j, "kind");
+    kind = (kind == "eraser-stroke") ? "eraser-stroke" : "stroke";
+    openclip::VectorHistory& h = s->vectorHistories[static_cast<std::size_t>(index)];
+    std::string err;
+    const int n = openclip::appendVectorPath(
+        s->canvas, h, static_cast<std::size_t>(index), j,
+        1.0f + 3.0f * s->curve, kind, err);
+    return n;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nVectorEraser(JNIEnv* env, jclass,
+                                                  jlong handle, jint index,
+                                                  jboolean /*on*/,
+                                                  jstring pathJson) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 || index >= static_cast<int>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    const std::string j = toStd(env, pathJson);
+    if (j.empty()) return JNI_FALSE;
+    openclip::VectorHistory& h = s->vectorHistories[static_cast<std::size_t>(index)];
+    std::string err;
+    return openclip::eraseVectorPaths(s->canvas, h,
+                                      static_cast<std::size_t>(index), j,
+                                      err) > 0
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nUndoVector(JNIEnv*, jclass, jlong handle,
+                                                jint index) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 || index >= static_cast<int>(s->canvas.layerCount()))
+        return JNI_FALSE;
+    auto it = s->vectorHistories.find(static_cast<std::size_t>(index));
+    if (it == s->vectorHistories.end()) return JNI_FALSE;
+    return openclip::undoVectorPath(s->canvas, it->second,
+                                    static_cast<std::size_t>(index))
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
+                                               jlong handle, jstring kindsJson) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string j = toStd(env, kindsJson);
+    // Reset then parse per ARCHITECTURE.md kinds (lenient M6 parser).
+    s->symX = s->symY = false;
+    s->ellipses.clear();
+    s->lines.clear();
+    if (j.empty()) return JNI_TRUE;  // clearing is a valid no-op state
+    if (j.find("\"symmetryX\"") != std::string::npos) {
+        s->symXAt = static_cast<float>(jsonNum(j, "symmetryX", 0.0));
+        s->symX = true;
+    }
+    if (j.find("\"symmetryY\"") != std::string::npos) {
+        s->symYAt = static_cast<float>(jsonNum(j, "symmetryY", 0.0));
+        s->symY = true;
+    }
+    const std::size_t ell = j.find("\"ellipse\"");
+    if (ell != std::string::npos) {
+        Session::RulEllipse e;
+        e.cx = static_cast<float>(jsonNum(j, "cx", 0));
+        e.cy = static_cast<float>(jsonNum(j, "cy", 0));
+        e.rx = static_cast<float>(jsonNum(j, "rx", 1));
+        e.ry = static_cast<float>(jsonNum(j, "ry", 1));
+        if (e.cx != 0 || e.cy != 0) s->ellipses.push_back(e);
+    }
+    const std::size_t per = j.find("\"perspective\"");
+    if (per != std::string::npos) {
+        // First segment only in M6: scan the bracket body and take the
+        // first four numbers as {x1,y1,x2,y2}.
+        const std::size_t open = j.find('[', per + 12);
+        if (open != std::string::npos) {
+            std::vector<float> vals;
+            std::size_t p = open + 1;
+            int depth = 0;
+            while (p < j.size() && vals.size() < 4) {
+                const char c = j[p];
+                if (c == '{') ++depth;
+                else if (c == '}') { if (depth > 0) --depth; }
+                else if ((c >= '0' && c <= '9') || c == '-' || c == '.') {
+                    const char* b = j.c_str() + p;
+                    char* e = nullptr;
+                    const float v = static_cast<float>(std::strtod(b, &e));
+                    if (e != b) { vals.push_back(v); p += (e - b); continue; }
+                }
+                ++p;
+            }
+            if (vals.size() >= 4)
+                s->lines.emplace_back(
+                    openclip::Vec2{vals[0], vals[1]},
+                    openclip::Vec2{vals[2], vals[3]});
+        }
+    }
+    return JNI_TRUE;
 }

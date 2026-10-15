@@ -50,6 +50,9 @@
     <string name="layer_rename">Rename layer…</string>
     <string name="layer_rename_hint">Layer name</string>
     <string name="layer_add_group">Add group</string>
+    <string name="layer_add_vector">+ Vector</string>
+    <string name="rulers_title">Rulers</string>
+    <string name="vector_undo">Vector undo</string>
     <string name="layer_move_up">Move up</string>
     <string name="layer_move_down">Move down</string>
     <string name="layer_add_mask">Add mask</string>

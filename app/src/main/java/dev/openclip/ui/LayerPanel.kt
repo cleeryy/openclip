@@ -197,6 +197,35 @@ fun LayerPanel(
                 surface.layerOp { addGroup("Group") }
                 refresh()
             }) { Text(stringResource(R.string.layer_add_group)) }
+            // M6: vector layer button — layers added this way rasterize
+            // their stored paths at composite time (engine contract).
+            Button(onClick = {
+                surface.layerOp { addVectorLayer("Vector") }
+                refresh()
+            }) { Text(stringResource(R.string.layer_add_vector)) }
+        }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // M6 rulers: symmetry X/Y row toggles (engine transforms
+            // input at the shim before stamping).
+            var symX by remember { mutableStateOf(false) }
+            var symY by remember { mutableStateOf(false) }
+            Button(onClick = {
+                symX = !symX
+                when (symX) {
+                    true -> surface.setRulers("""{"symmetryX":${surface.canvasWidth() / 2f}}""")
+                    else -> surface.setRulers(if (symY) """{"symmetryY":${surface.canvasHeight() / 2f}}""" else "")
+                }
+            }) { Text(if (symX) "⇋X" else "⇋x") }
+            Button(onClick = {
+                symY = !symY
+                when (symY) {
+                    true -> surface.setRulers("""{"symmetryY":${surface.canvasHeight() / 2f}}""")
+                    else -> surface.setRulers(if (symX) """{"symmetryX":${surface.canvasWidth() / 2f}}""" else "")
+                }
+            }) { Text(if (symY) "⇋Y" else "⇋y") }
         }
     }
 

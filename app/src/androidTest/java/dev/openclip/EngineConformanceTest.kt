@@ -366,4 +366,109 @@ class EngineConformanceTest {
             EngineHost.nDispose(handle)
         }
     }
+
+    // M6: vector layer — appended paths rasterize into the composite and
+    // per-layer vector undo removes the last path's contribution.
+    @Test
+    fun vectorLayerAppendAndUndo() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val vi = EngineHost.nAddVectorLayer(handle, "vector")
+            assertTrue("addVectorLayer must return a valid index", vi >= 0)
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            assertTrue(EngineHost.nSetVectorMode(handle, vi, true))
+            assertTrue(EngineHost.nSetActiveLayer(handle, vi) >= 0)
+            assertTrue(
+                EngineHost.nAppendVectorPath(
+                    handle, vi,
+                    """{"pts":[{"x":80,"y":80},{"x":160,"y":160}]}"""
+                ) >= 0
+            )
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            val changed = after.indices.count { after[it] != before[it] }
+            assertTrue(
+                "vector path must modify composite pixels, got $changed",
+                changed > 0
+            )
+            assertTrue("vector undo should pop one path", EngineHost.nUndoVector(handle, vi))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue(
+                "vector undo must restore the pre-path composite",
+                undone.contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // M6: rulers — symmetryX mirrors every stamp across a vertical line.
+    @Test
+    fun rulerSymmetryMirrorsStrokes() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            // Canvas is w x h = 256x256 (test fixture); mirror at 128.
+            assertTrue(EngineHost.nSetRulers(handle, """{"symmetryX":128.0}"""))
+            val sid = EngineHost.nStrokeBegin(handle, 48f, 128f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            val cx = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, cx, w, h))
+            fun painted(x: Int, y: Int): Boolean = cx[y * w + x] != 0xFFFFFFFF.toInt()
+            assertTrue("left point must be painted", painted(48, 128))
+            assertTrue(
+                "mirror point (208) must be painted by symmetry",
+                painted(208, 128)
+            )
+            assertTrue(
+                "a point equidistant on the other side must stay empty",
+                !painted(64, 128)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // M6: vector eraser removes an intersecting path (path-level erase).
+    @Test
+    fun vectorEraserRemovesIntersectingPath() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val vi = EngineHost.nAddVectorLayer(handle, "vec")
+            EngineHost.nSetActiveLayer(handle, vi)
+            val px0 = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, px0, w, h))
+            assertTrue(
+                EngineHost.nAppendVectorPath(
+                    handle, vi,
+                    """{"pts":[{"x":40,"y":40},{"x":120,"y":40}]}"""
+                ) >= 0
+            )
+            val px1 = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, px1, w, h))
+            assertTrue(px1.contentNotEquals(px0))
+            // Erase along a line crossing the path in the middle.
+            assertTrue(
+                EngineHost.nVectorEraser(
+                    handle, vi, true,
+                    """{"pts":[{"x":0,"y":40},{"x":200,"y":40}]}"""
+                )
+            )
+            val px2 = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, px2, w, h))
+            assertTrue(
+                "after erasing the only path, composite must return to pre-path",
+                px2.contentEquals(px0)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+}
+
+private fun IntArray.contentNotEquals(other: IntArray): Boolean {
+    if (size != other.size) return true
+    for (i in indices) if (this[i] != other[i]) return true
+    return false
 }

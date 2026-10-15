@@ -43,4 +43,8 @@
     <string name="import_doc">Ouvrir un document…</string>
     <string name="import_failed">Échec de l’ouverture.</string>
     <string name="import_ok">Ouvert.</string>
+    <string name="layer_add_group">Ajouter un groupe</string>
+    <string name="layer_add_vector">+ Vectoriel</string>
+    <string name="rulers_title">Règles</string>
+    <string name="vector_undo">Annuler (vectoriel)</string>
 </resources>

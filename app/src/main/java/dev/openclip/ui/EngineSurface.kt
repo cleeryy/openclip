@@ -129,6 +129,33 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun layerOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
+    // M6 vector layers + rulers (thin wrappers over the exact symbols).
+    fun addVectorLayer(name: String) =
+        if (handle != 0L) EngineHost.nAddVectorLayer(handle, name)
+            .also { if (it >= 0) needsComposite = true } else -1
+
+    fun setVectorMode(index: Int, on: Boolean) =
+        if (handle != 0L) EngineHost.nSetVectorMode(handle, index, on)
+            .also { if (it) needsComposite = true } else false
+
+    fun appendVectorPath(index: Int, pathJson: String) =
+        if (handle != 0L) EngineHost.nAppendVectorPath(handle, index, pathJson)
+            .also { if (it >= 0) needsComposite = true } else -1
+
+    fun vectorEraser(index: Int, pathJson: String) =
+        if (handle != 0L) EngineHost.nVectorEraser(handle, index, true, pathJson)
+            .also { if (it) needsComposite = true } else false
+
+    fun undoVectorPath(index: Int) =
+        if (handle != 0L) EngineHost.nUndoVector(handle, index)
+            .also { if (it) needsComposite = true } else false
+
+    fun setRulers(kindsJson: String) =
+        if (handle != 0L) EngineHost.nSetRulers(handle, kindsJson) else false
+
+    fun canvasWidth(): Int = engineWidth
+    fun canvasHeight(): Int = engineHeight
+
     fun moveLayer(from: Int, to: Int) =
         if (handle != 0L) EngineHost.nMoveLayer(handle, from, to)
             .also { if (it) needsComposite = true } else false
