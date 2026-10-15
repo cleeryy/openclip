@@ -52,6 +52,18 @@ Brush JSON (shim-defined schema, MyPaint-compatible params; extra keys
 ignored): `{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,
 "color":"#RRGGBB"}`.
 
+M2 additions (defined 2026-10-15, implemented for M2):
+
+- `nLoadMyb(handle: Long, xml: String): Boolean` — feed a MyPaint `.myb`
+  document straight to the engine's `parseMyb`; returns false with the
+  brush unchanged when malformed.
+- New JSON keys, shim-defined semantics (no JNI change):
+  `"stabilize"` 0..1 (exponential input smoothing before stamping),
+  `"curve"` 0..1 (pressure exponent mapping, 0 = linear, 1 = heavy
+  quadratic), `"mode"` `"brush"` | `"eraser"`. Eraser semantics stay
+  documented in the shim: M2 erases toward canvas background, not layer
+  alpha, until M5 adds alpha-erase.
+
 Engine owns document truth; the app never caches swapped pixels.
 Layers, filters, selection, vector, animation extend the same pattern
 with explicit additions to `include/openclip/` only.
