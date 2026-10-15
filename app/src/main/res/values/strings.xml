@@ -32,4 +32,14 @@
     <string name="filter_add_noise">Add noise</string>
     <string name="filter_mosaic">Mosaic</string>
     <string name="filter_gradient_map">Gradient map</string>
+    <string name="export_title">Export</string>
+    <string name="export_apply">Export</string>
+    <string name="export_hint">Pick a format (ora / png / psd)</string>
+    <string name="export_ok">Saved.</string>
+    <string name="export_failed">Save failed.</string>
+    <string name="exporting">Exporting…</string>
+    <string name="file_menu">File</string>
+    <string name="import_doc">Open document…</string>
+    <string name="import_failed">Open failed.</string>
+    <string name="import_ok">Opened.</string>
 </resources>

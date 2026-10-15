@@ -186,4 +186,66 @@ class EngineConformanceTest {
             EngineHost.nDispose(handle)
         }
     }
+
+    // M4: document save/load via the real filesystem (cacheDir on the
+    // emulator, no SAF interaction in CI). ORA round trip keeps the
+    // composite pixel-parity; a corrupt document is refused and the
+    // canvas stays untouched.
+    @Test
+    fun documentLoadSaveOraRoundTrip() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#204080"}"""
+            )
+            val sid = EngineHost.nStrokeBegin(handle, 96f, 64f, 1f)
+            for (x in 100..150 step 5) {
+                EngineHost.nStrokeMove(handle, sid, x.toFloat(), 64f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+
+            val dir = androidx.test.platform.app.InstrumentationRegistry
+                .getInstrumentation().targetContext.cacheDir
+            val ora = java.io.File(dir, "roundtrip.ora")
+            assertTrue(EngineHost.nSaveDocument(handle, ora.absolutePath, "ora"))
+            assertTrue(ora.length() > 0)
+
+            assertTrue(EngineHost.nLoadDocument(handle, ora.absolutePath))
+            val reloaded = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, reloaded, w, h))
+            assertTrue(
+                "ORA round trip must preserve composite pixels",
+                before.contentEquals(reloaded)
+            )
+            ora.delete()
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    @Test
+    fun documentLoadRejectsGarbage() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            val dir = androidx.test.platform.app.InstrumentationRegistry
+                .getInstrumentation().targetContext.cacheDir
+            val bad = java.io.File(dir, "garbage.ora")
+            bad.writeText("definitely not an ORA file")
+            assertFalse(EngineHost.nLoadDocument(handle, bad.absolutePath))
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            assertTrue(
+                "failed load must leave the canvas untouched",
+                before.contentEquals(after)
+            )
+            bad.delete()
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
 }

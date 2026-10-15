@@ -47,6 +47,8 @@ private const val DEFAULT_INK = "#141414"
 fun ToolPalette(
     surface: EngineSurface,
     initialColor: String = DEFAULT_INK,
+    onFileClicked: () -> Unit = {},
+    onImportClicked: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var isBrush by remember { mutableStateOf(true) }
@@ -67,7 +69,11 @@ fun ToolPalette(
     )
 
     LaunchedEffect(surface) {
+        // Chain: MainActivity may already observe stroke changes to
+        // refresh panels; wrap, don't clobber.
+        val prev = surface.onStrokeChanged
         surface.onStrokeChanged = {
+            prev?.invoke()
             canUndo = true
             canRedo = false
         }
@@ -108,6 +114,12 @@ fun ToolPalette(
             }
             Button(onClick = { showFilters = true }) {
                 Text(stringResource(R.string.filters), modifier = Modifier.padding(2.dp))
+            }
+            Button(onClick = onImportClicked) {
+                Text(stringResource(R.string.import_doc))
+            }
+            Button(onClick = onFileClicked) {
+                Text(stringResource(R.string.file_menu))
             }
         }
         if (showFilters) {

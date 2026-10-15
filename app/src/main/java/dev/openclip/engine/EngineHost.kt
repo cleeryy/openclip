@@ -27,4 +27,8 @@ object EngineHost {
 
     // M3 additions (documented in ARCHITECTURE.md)
     external fun nApplyFilter(handle: Long, name: String, paramsJson: String): Boolean
+
+    // M4 additions (documented in ARCHITECTURE.md)
+    external fun nLoadDocument(handle: Long, path: String): Boolean
+    external fun nSaveDocument(handle: Long, path: String, format: String): Boolean
 }

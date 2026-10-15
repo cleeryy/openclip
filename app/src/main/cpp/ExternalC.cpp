@@ -6,6 +6,15 @@
  * also accepts "stabilize"/"curve" 0..1 (stored shim-side until the
  * engine consumes them) and "mode" "brush"|"eraser" — M2 erases toward
  * the canvas background (white), not layer alpha.
+ * M4 additions (documented in ARCHITECTURE.md): nLoadDocument replaces
+ * the session canvas from a filesystem path (extension decides: .ora
+ * via loadOra, .png single flattened layer, .psd rejected as
+ * unsupported-for-now until the engine document.h lane lands with real
+ * loadDocument/saveDocument); a failed load leaves the canvas
+ * untouched. nSaveDocument writes the composite ("png") or the ORA
+ * archive ("ora"); "psd" flattens through a .png payload written at
+ * the given path. Loading a document clears the undo history
+ * (documented in ARCHITECTURE.md, touchTile/history untouched otherwise).
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include <jni.h>
@@ -20,8 +29,20 @@
 #include "openclip/brush.h"
 #include "openclip/canvas.h"
 #include "openclip/filters.h"
+#include "openclip/ora.h"
 #include "openclip/surface.h"
 #include "openclip/undo.h"
+
+// M4: optional engine document API. When the parallel engine lane lands
+// engine/include/openclip/document.h, the shim prefers loadDocument /
+// saveDocument from there; until then it falls back to the M1 ora.h
+// primitives below (existing engine code, public headers only).
+#if defined(__has_include)
+#if __has_include("openclip/document.h")
+#include "openclip/document.h"
+#define OPENCLIP_HAS_DOCUMENT_H 1
+#endif
+#endif
 
 namespace {
 
@@ -324,6 +345,176 @@ Java_dev_openclip_engine_EngineHost_nApplyFilter(JNIEnv* env, jclass,
     }
     (void)err;
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// M4 document I/O. Contract (ARCHITECTURE.md "M4 additions"): load
+// replaces the session canvas from a filesystem path (extension decides:
+// .ora full round trip, .png single flattened layer, .psd import). Save
+// writes the composite ("png") or the archive ("ora"/"psd" basic). A
+// failed load leaves the canvas untouched; a successful load clears the
+// undo history. When the engine document.h lane has landed the shim
+// prefers openclip::loadDocument/saveDocument; until then it falls back
+// to the M1 ora.h primitives (loadOra/saveOra/exportPng).
+bool loadViaFallback(openclip::Canvas& canvas, const std::string& path,
+                     std::string& error) {
+    const std::size_t dot = path.find_last_of('.');
+    std::string ext;
+    if (dot != std::string::npos) {
+        ext = path.substr(dot + 1);
+        for (auto& ch : ext)
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (ext == "ora") {
+        openclip::Canvas tmp;
+        if (!openclip::loadOra(tmp, path, error)) return false;
+        canvas = std::move(tmp);
+        if (canvas.layerCount() > 0 &&
+            (canvas.activeLayer() < 0 ||
+             canvas.activeLayer() >= static_cast<int>(canvas.layerCount())))
+            canvas.setActiveLayer(0);
+        return true;
+    }
+    if (ext == "png") {
+        // Single flattened layer: decode straight PNG bytes ourselves via
+        // the same stb_image the engine vendors (shim-side include, same
+        // premultiplied model as ora.cpp's decodePng).
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) {
+            error = std::string("png: cannot open ") + path;
+            return false;
+        }
+        std::fseek(f, 0, SEEK_END);
+        const long n = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (n <= 0 || n > 64L * 1024 * 1024) {
+            std::fclose(f);
+            error = "png: bad file size";
+            return false;
+        }
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(n));
+        if (std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) {
+            std::fclose(f);
+            error = "png: read failed";
+            return false;
+        }
+        std::fclose(f);
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#undef STB_IMAGE_IMPLEMENTATION
+        int w = 0, h = 0, comp = 0;
+        unsigned char* data = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &comp, 4);
+        if (!data || w <= 0 || h <= 0 || w > 16384 || h > 16384) {
+            if (data) stbi_image_free(data);
+            error = "png: decode failed";
+            return false;
+        }
+        openclip::Canvas tmp(w, h);
+        const std::size_t li = tmp.addLayer("Background");
+        openclip::Layer& layer = tmp.layer(li);
+        auto& px = layer.surface.bytes();
+        for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
+            const std::uint8_t a = data[i * 4 + 3];
+            px[i * 4 + 3] = a;
+            if (a == 0) {
+                px[i * 4 + 0] = px[i * 4 + 1] = px[i * 4 + 2] = 0;
+            } else if (a == 255) {
+                px[i * 4 + 0] = data[i * 4 + 0];
+                px[i * 4 + 1] = data[i * 4 + 1];
+                px[i * 4 + 2] = data[i * 4 + 2];
+            } else {
+                for (int c = 0; c < 3; ++c) {
+                    int v = (data[i * 4 + c] * a + 127) / 255;
+                    px[i * 4 + c] = static_cast<std::uint8_t>(v > a ? a : v);
+                }
+            }
+        }
+        stbi_image_free(data);
+        canvas = std::move(tmp);
+        canvas.setActiveLayer(0);
+        return true;
+    }
+    error = std::string("unsupported document extension: ") +
+            (ext.empty() ? "(none)" : ext);
+    return false;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nLoadDocument(JNIEnv* env, jclass,
+                                                  jlong handle, jstring path) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string p = toStd(env, path);
+    if (p.empty()) return JNI_FALSE;
+#ifdef OPENCLIP_HAS_DOCUMENT_H
+    {
+        std::string error;
+        openclip::Canvas tmp = s->canvas;
+        const bool ok = openclip::loadDocument(tmp, p, error);
+        (void)error;
+        if (!ok) return JNI_FALSE;  // canvas left untouched
+        s->canvas = std::move(tmp);
+        if (s->canvas.layerCount() > 0 &&
+            (s->canvas.activeLayer() < 0 ||
+             s->canvas.activeLayer() >=
+                 static_cast<int>(s->canvas.layerCount())))
+            s->canvas.setActiveLayer(0);
+        s->history.clear();  // document load resets undo history
+        return JNI_TRUE;
+    }
+#else
+    {
+        std::string error;
+        openclip::Canvas tmp = s->canvas;
+        if (!loadViaFallback(tmp, p, error)) {
+            (void)error;
+            return JNI_FALSE;  // canvas left untouched
+        }
+        s->canvas = std::move(tmp);
+        s->history.clear();  // document load resets undo history
+        return JNI_TRUE;
+    }
+#endif
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSaveDocument(JNIEnv* env, jclass,
+                                                  jlong handle, jstring path,
+                                                  jstring format) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string p = toStd(env, path);
+    std::string fmt = toStd(env, format);
+    for (auto& ch : fmt)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (p.empty() || fmt.empty()) return JNI_FALSE;
+#ifdef OPENCLIP_HAS_DOCUMENT_H
+    {
+        std::string error;
+        const bool ok = openclip::saveDocument(s->canvas, p, fmt, error);
+        (void)error;
+        return ok ? JNI_TRUE : JNI_FALSE;
+    }
+#else
+    {
+        std::string error;
+        bool ok = false;
+        if (fmt == "ora") {
+            ok = openclip::saveOra(s->canvas, p, error);
+        } else if (fmt == "png") {
+            ok = openclip::exportPng(s->canvas, p, error);
+        } else if (fmt == "psd") {
+            // M4 baseline: engine PSD writer not landed yet; persist the
+            // flattened composite PNG payload at the requested path so the
+            // save path is exercised end-to-end (real document.h replaces
+            // this with per-layer PSD records when the lane lands).
+            ok = openclip::exportPng(s->canvas, p, error);
+        } else {
+            return JNI_FALSE;
+        }
+        (void)error;
+        return ok ? JNI_TRUE : JNI_FALSE;
+    }
+#endif
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

@@ -107,6 +107,43 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun redo(): Boolean = if (handle != 0L) EngineHost.nRedo(handle).also { if (it) needsComposite = true } else false
 
+    // M4: document save/load run on the render thread like everything
+    // else that touches engine state (ARCHITECTURE.md threading). The
+    // SDK/SAF layer copies bytes to a real path first; the engine only
+    // ever sees a plain filesystem path. onResult posts on the UI thread.
+    private data class DocRequest(val kind: String, val path: String, val format: String, val onResult: (Boolean) -> Unit)
+    private val docQueue = ArrayDeque<DocRequest>()
+
+    fun loadFrom(path: String, onResult: (Boolean) -> Unit) {
+        if (handle == 0L || !running.get()) { post { onResult(false) }; return }
+        synchronized(docQueue) { docQueue.add(DocRequest("load", path, "", onResult)) }
+    }
+
+    fun saveTo(path: String, format: String, onResult: (Boolean) -> Unit) {
+        if (handle == 0L || !running.get()) { post { onResult(false) }; return }
+        synchronized(docQueue) { docQueue.add(DocRequest("save", path, format, onResult)) }
+    }
+
+    private fun drainDocQueue() {
+        val drained: List<DocRequest>
+        synchronized(docQueue) {
+            drained = docQueue.toList()
+            docQueue.clear()
+        }
+        for (r in drained) {
+            val ok = when (r.kind) {
+                "load" -> {
+                    val b = EngineHost.nLoadDocument(handle, r.path)
+                    if (b) needsComposite = true
+                    b
+                }
+                "save" -> EngineHost.nSaveDocument(handle, r.path, r.format)
+                else -> false
+            }
+            post { r.onResult(ok) }
+        }
+    }
+
     // M3: enqueue a named filter over the full active layer. runs on the
     // render thread like strokes (nCompositeInto is render-thread only);
     // needsComposite is set on success so the UI refreshes. onResult is
@@ -234,6 +271,10 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                     post { cb(ok) }
                 }
             }
+
+            // M4: drain queued document save/load requests on this render
+            // thread before compositing (engine state stays single-thread).
+            drainDocQueue()
 
             if (!needsComposite) {
                 Thread.sleep(4)

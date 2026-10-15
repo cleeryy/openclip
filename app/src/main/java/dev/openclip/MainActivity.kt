@@ -4,10 +4,13 @@
 // comes with the M5 tool work.
 package dev.openclip
 
+import android.content.Context
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Box
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,10 +25,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import dev.openclip.R
 import dev.openclip.ui.ColorPicker
 import dev.openclip.ui.EngineSurface
+import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ToolPalette
@@ -50,6 +57,52 @@ class MainActivity : ComponentActivity() {
         val canvas = remember { mutableStateOf<EngineSurface?>(null) }
         val refreshKey = remember { mutableStateOf(0) }
         val inkColor = remember { mutableStateOf("#141414") }
+        val status = remember { mutableStateOf("") }
+        val showExport = remember { mutableStateOf(false) }
+        val exportFormat = remember { mutableStateOf("ora") }
+        val ctx = LocalContext.current
+
+        // M4: SAF bridge. Files go through cacheDir copies so the engine
+        // keeps seeing plain filesystem paths only (no Android IO inside
+        // the engine).
+        val openDoc = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            if (uri != null && canvas.value != null) {
+                val name = queryDisplayName(ctx, uri) ?: "imported.ora"
+                val dst = java.io.File(ctx.cacheDir, name)
+                copyTo(ctx, uri, dst)
+                canvas.value?.loadFrom(dst.absolutePath) { ok ->
+                    status.value = if (ok)
+                        ctx.getString(R.string.import_ok) + " " + name
+                    else ctx.getString(R.string.import_failed)
+                    refreshKey.value++
+                }
+            }
+        }
+
+        val createDoc = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream")
+        ) { uri: Uri? ->
+            if (uri != null && canvas.value != null) {
+                val fmt = exportFormat.value
+                val ext = if (fmt == "ora") ".ora" else if (fmt == "psd") ".psd" else ".png"
+                val dst = java.io.File(
+                    ctx.cacheDir, "export${System.currentTimeMillis()}$ext"
+                )
+                canvas.value?.saveTo(dst.absolutePath, fmt) { ok ->
+                    if (ok) {
+                        copyFromTo(ctx, dst, uri)
+                        dst.delete()
+                        status.value = ctx.getString(R.string.export_ok)
+                    } else {
+                        status.value = ctx.getString(R.string.export_failed)
+                    }
+                }
+            } else if (uri != null) {
+                status.value = ctx.getString(R.string.export_failed)
+            }
+        }
 
         Column(
             Modifier
@@ -57,10 +110,11 @@ class MainActivity : ComponentActivity() {
                 .systemBarsPadding()
         ) {
             AndroidView(
-                factory = { ctx ->
-                    EngineSurface(ctx).also { s ->
-                        s.start(dpi)
-                        canvas.value = s
+                factory = { c ->
+                    EngineSurface(c).also { cv ->
+                        cv.start(dpi)
+                        cv.onStrokeChanged = { refreshKey.value++ }
+                        canvas.value = cv
                     }
                 },
                 modifier = Modifier
@@ -72,6 +126,10 @@ class MainActivity : ComponentActivity() {
                 ToolPalette(
                     surface = surface,
                     initialColor = inkColor.value,
+                    onFileClicked = {
+                        showExport.value = true
+                    },
+                    onImportClicked = { openDoc.launch(arrayOf("*/*")) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(4.dp)
@@ -87,6 +145,12 @@ class MainActivity : ComponentActivity() {
                             .width(300.dp)
                             .padding(4.dp)
                     )
+                    PresetGallery(
+                        surface = surface,
+                        modifier = Modifier
+                            .requiredWidth(220.dp)
+                            .padding(4.dp)
+                    )
                     LayerPanel(
                         surface = surface,
                         refreshKey = refreshKey.value,
@@ -94,14 +158,55 @@ class MainActivity : ComponentActivity() {
                             .requiredWidth(170.dp)
                             .padding(4.dp)
                     )
-                    PresetGallery(
-                        surface = surface,
-                        modifier = Modifier
-                            .width(220.dp)
-                            .padding(4.dp)
+                }
+                if (status.value.isNotEmpty()) {
+                    androidx.compose.material3.Text(
+                        status.value,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(4.dp)
+                    )
+                }
+                if (showExport.value) {
+                    ExportDialog(
+                        onDismiss = { showExport.value = false },
+                        onExport = { fmt, _ ->
+                            exportFormat.value = fmt
+                            showExport.value = false
+                            createDoc.launch(
+                                "openclip-${System.currentTimeMillis()}"
+                            )
+                        },
+                        resultLine = status.value
                     )
                 }
             }
         }
+    }
+
+    private fun queryDisplayName(ctx: Context, uri: Uri): String? = try {
+        ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(
+                android.provider.OpenableColumns.DISPLAY_NAME
+            )
+            (if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null)
+        } ?: uri.lastPathSegment
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun copyTo(ctx: Context, uri: Uri, dst: java.io.File) {
+        ctx.contentResolver.openInputStream(uri)?.use { i ->
+            dst.outputStream().use { o -> i.copyTo(o) }
+        }
+    }
+
+    private fun copyFromTo(ctx: Context, src: java.io.File, uri: Uri) {
+        ctx.contentResolver.openOutputStream(uri)?.use { o ->
+            src.inputStream().use { i -> i.copyTo(o) }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
     }
 }

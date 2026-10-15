@@ -32,4 +32,14 @@
     <string name="filter_add_noise">Ajouter du bruit</string>
     <string name="filter_mosaic">Mosaïque</string>
     <string name="filter_gradient_map">Dégradé mappé</string>
+    <string name="export_title">Exporter</string>
+    <string name="export_apply">Exporter</string>
+    <string name="export_hint">Choisissez un format (ora / png / psd)</string>
+    <string name="export_ok">Enregistré.</string>
+    <string name="export_failed">Échec de l'enregistrement.</string>
+    <string name="exporting">En cours…</string>
+    <string name="file_menu">Fichier</string>
+    <string name="import_doc">Ouvrir un document…</string>
+    <string name="import_failed">Échec de l'ouverture.</string>
+    <string name="import_ok">Ouvert.</string>
 </resources>
