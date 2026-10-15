@@ -71,6 +71,12 @@ M5 additions (defined 2026-10-15, layer system round):
   by mask alpha each pixel. Mask strokes participate in undo.
 - App: channels for panel state are these exact symbols; no extra
   engine parsing at the UI site.
+- Panel snapshot: `nLayerState(handle): String` — compact JSON
+  `{"active":Int,"maskTarget":Int,
+  "layers":[{"self":{name,visible,opacity,blend,group,mask,clipped},
+  "children":[{...}]}, ...]}` (top-level document order, children for
+  groups). Read-only introspection for the Compose LayerPanel; the
+  engine stays the single source of truth.
 
 M4 additions (defined 2026-10-15, file I/O round):
 

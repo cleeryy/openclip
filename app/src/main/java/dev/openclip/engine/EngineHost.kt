@@ -43,4 +43,7 @@ object EngineHost {
     external fun nSetLayerClipped(handle: Long, index: Int, clipped: Boolean): Boolean
     external fun nAddLayerMask(handle: Long, index: Int): Boolean
     external fun nMaskTarget(handle: Long, index: Int, onMask: Boolean): Boolean
+    // Panel introspection: compact JSON snapshot of the top-level layer
+    // list (names, groups, visibility, opacity, blend, mask, clipped).
+    external fun nLayerState(handle: Long): String
 }

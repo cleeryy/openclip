@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 #include <string>
@@ -447,6 +448,82 @@ Java_dev_openclip_engine_EngineHost_nMaskTarget(JNIEnv*, jclass, jlong handle,
     s->maskTarget = index;
     s->maskTargetOn = (onMask == JNI_TRUE);
     return JNI_TRUE;
+}
+
+// M5 panel introspection (documented in ARCHITECTURE.md "M5 additions",
+// "App: channels for panel state are these exact symbols"): a compact
+// JSON snapshot of the top-level layer list so the Compose LayerPanel
+// renders names/groups without caching engine truth. Escapes only the
+// JSON-significant characters of engine-owned names.
+void appendJsonStr(std::string& out, const std::string& s) {
+    out += '"';
+    for (char ch : s) {
+        switch (ch) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (ch >= 0 && ch < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof buf, "\\u%04x", ch);
+                    out += buf;
+                } else {
+                    out += ch;
+                }
+        }
+    }
+    out += '"';
+}
+
+void appendLayerJson(std::string& out, const openclip::Layer& l,
+                     bool isGroup) {
+    out += "{\"name\":";
+    appendJsonStr(out, l.name);
+    out += ",\"visible\":";
+    out += l.visible ? "true" : "false";
+    char obuf[32];
+    std::snprintf(obuf, sizeof obuf, "%g", l.opacity);
+    out += ",\"opacity\":";
+    out += obuf;
+    out += ",\"blend\":";
+    appendJsonStr(out, openclip::blendToName(l.blend));
+    out += ",\"group\":";
+    out += isGroup ? "true" : "false";
+    out += ",\"mask\":";
+    out += l.hasMask ? "true" : "false";
+    out += ",\"clipped\":";
+    out += l.clipped ? "true" : "false";
+    out += "}";
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_openclip_engine_EngineHost_nLayerState(JNIEnv* env, jclass,
+                                                jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return env->NewStringUTF("{\"active\":0,\"layers\":[]}");
+    std::string out = "{\"active\":";
+    out += std::to_string(s->canvas.activeLayer());
+    out += ",\"maskTarget\":";
+    out += std::to_string(s->maskTargetOn ? s->maskTarget : -1);
+    out += ",\"layers\":[";
+    for (std::size_t i = 0; i < s->canvas.layerCount(); ++i) {
+        if (i > 0) out += ",";
+        out += "{\"children\":[";
+        const openclip::Layer& l = s->canvas.layer(i);
+        if (l.isGroup) {
+            for (std::size_t k = 0; k < l.children.size(); ++k) {
+                if (k > 0) out += ",";
+                appendLayerJson(out, l.children[k], false);
+            }
+        }
+        out += "],\"self\":";
+        appendLayerJson(out, l, l.isGroup);
+        out += "}";
+    }
+    out += "]}";
+    return env->NewStringUTF(out.c_str());
 }
 
 extern "C" JNIEXPORT jlong JNICALL

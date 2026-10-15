@@ -93,11 +93,60 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         if (handle != 0L) EngineHost.nSetBrush(handle, json)
     }
 
-    // M2: feed a .myb document to the engine; false = malformed, brush kept.
+    // M5: feed a .myb document to the engine; false = malformed, brush kept.
     fun loadMyb(xml: String): Boolean =
         if (handle != 0L) EngineHost.nLoadMyb(handle, xml) else false
 
-    fun addLayer() = if (handle != 0L) EngineHost.nAddLayer(handle, "Layer") else -1
+    // M5 layer system: thin wrappers; the engine owns truth, the panel
+    // pushes through these exact symbols. Each op marks the composite
+    // dirty on success so the SurfaceView re-renders.
+    fun addLayerNamed(name: String) =
+        if (handle != 0L) EngineHost.nAddLayer(handle, name) else -1
+
+    fun addLayer() = addLayerNamed("Layer")
+
+    fun addGroup(name: String) =
+        if (handle != 0L) EngineHost.nAddGroup(handle, name) else -1
+
+    fun layerState(): String =
+        if (handle != 0L) EngineHost.nLayerState(handle)
+        else "{\"active\":0,\"maskTarget\":-1,\"layers\":[]}"
+
+    fun setLayerVisibility(index: Int, visible: Boolean) =
+        if (handle != 0L) EngineHost.nSetLayerVisibility(handle, index, visible)
+            .also { if (it) needsComposite = true } else false
+
+    fun setLayerOpacity(index: Int, opacity: Float) =
+        if (handle != 0L) EngineHost.nSetLayerOpacity(handle, index, opacity)
+            .also { if (it) needsComposite = true } else false
+
+    fun setLayerBlend(index: Int, name: String) =
+        if (handle != 0L) EngineHost.nSetLayerBlend(handle, index, name)
+            .also { if (it) needsComposite = true } else false
+
+    fun setLayerName(index: Int, name: String) =
+        if (handle != 0L) EngineHost.nSetLayerName(handle, index, name) else false
+
+    fun layerOp(op: () -> Unit) = runOnEngine(op)
+
+    fun moveLayer(from: Int, to: Int) =
+        if (handle != 0L) EngineHost.nMoveLayer(handle, from, to)
+            .also { if (it) needsComposite = true } else false
+
+    fun appendChild(parent: Int, name: String) =
+        if (handle != 0L) EngineHost.nAppendChild(handle, parent, name)
+            .also { if (it >= 0) needsComposite = true } else -1
+
+    fun setLayerClipped(index: Int, clipped: Boolean) =
+        if (handle != 0L) EngineHost.nSetLayerClipped(handle, index, clipped)
+            .also { if (it) needsComposite = true } else false
+
+    fun addLayerMask(index: Int) =
+        if (handle != 0L) EngineHost.nAddLayerMask(handle, index)
+            .also { if (it) needsComposite = true } else false
+
+    fun maskTarget(index: Int, onMask: Boolean) =
+        if (handle != 0L) EngineHost.nMaskTarget(handle, index, onMask) else false
 
     fun layerCount() = if (handle != 0L) EngineHost.nLayerCount(handle) else 0
 
@@ -111,6 +160,31 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     // else that touches engine state (ARCHITECTURE.md threading). The
     // SDK/SAF layer copies bytes to a real path first; the engine only
     // ever sees a plain filesystem path. onResult posts on the UI thread.
+    // M5: every layer op funnels through runOnEngine so panel actions
+    // (visibility/opacity/blend/rename/move/mask/clip) execute on the
+    // render thread like strokes and filters — never on the UI thread.
+    private data class EngineOp(val run: () -> Unit)
+    private val engineQueue = ArrayDeque<EngineOp>()
+
+    private fun runOnEngine(op: () -> Unit) {
+        if (handle == 0L || !running.get()) return
+        synchronized(engineQueue) { engineQueue.add(EngineOp(op)) }
+    }
+
+    private fun drainEngineQueue() {
+        val drained: List<EngineOp>
+        synchronized(engineQueue) {
+            drained = engineQueue.toList()
+            engineQueue.clear()
+        }
+        for (op in drained) {
+            try {
+                op.run()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private data class DocRequest(val kind: String, val path: String, val format: String, val onResult: (Boolean) -> Unit)
     private val docQueue = ArrayDeque<DocRequest>()
 
@@ -275,6 +349,8 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             // M4: drain queued document save/load requests on this render
             // thread before compositing (engine state stays single-thread).
             drainDocQueue()
+            // M5: drain queued panel ops on this render thread too.
+            drainEngineQueue()
 
             if (!needsComposite) {
                 Thread.sleep(4)

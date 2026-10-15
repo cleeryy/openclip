@@ -43,4 +43,18 @@
     <string name="import_doc">Open document…</string>
     <string name="import_failed">Open failed.</string>
     <string name="import_ok">Opened.</string>
+    <string name="layer_visible">Visible</string>
+    <string name="layer_hidden">Hidden</string>
+    <string name="layer_opacity">Layer opacity</string>
+    <string name="layer_blend">Blend</string>
+    <string name="layer_rename">Rename layer…</string>
+    <string name="layer_rename_hint">Layer name</string>
+    <string name="layer_add_group">Add group</string>
+    <string name="layer_move_up">Move up</string>
+    <string name="layer_move_down">Move down</string>
+    <string name="layer_add_mask">Add mask</string>
+    <string name="layer_mask_target">Edit mask</string>
+    <string name="layer_clipped">Clip to below</string>
+    <string name="layer_children">Children</string>
+    <string name="ok">OK</string>
 </resources>
