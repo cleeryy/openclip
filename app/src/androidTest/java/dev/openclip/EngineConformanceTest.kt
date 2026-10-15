@@ -325,11 +325,11 @@ class EngineConformanceTest {
             EngineHost.nSetActiveLayer(handle, top)
             EngineHost.nSetBrush(
                 handle,
-                """{"radius":40,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000"}"""
+                """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000"}"""
             )
-            for (yy in 0..h step 16) {
+            for (yy in 0..h step 32) {
                 val s = EngineHost.nStrokeBegin(handle, 0f, yy.toFloat(), 1f)
-                for (x in 0..w step 16) {
+                for (x in 0..w step 32) {
                     EngineHost.nStrokeMove(handle, s, x.toFloat(), yy.toFloat(), 1f)
                 }
                 EngineHost.nStrokeEnd(handle, s)
