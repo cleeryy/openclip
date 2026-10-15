@@ -30,7 +30,10 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [ ] Export PNG/JPEG avec EXIF, dialog d'export (échelle)
 
 ## M5 — Couches complètes
-- [ ] Groupes de calques + clipping + masques + alpha lock
+- [x] Moteur groupes/masques (Layer.mask+hasMask/clipped, compositeInto mask×alpha + stencil previous-layer, history mask tiles) — 48/48 tests locaux (6 nouveaux test_layers.cpp)
+- [x] Shim+Kotlin 10 symboles M5 + nLayerState snapshot panel (ARCHITECTURE.md §M5, check_jni_symbols PASS)
+- [x] LayerPanel réel (visibilité/opacité slider/blend dropdown/rename/add group/move up-down/mask+mask-target/clipped, groupes repliables, ops render-thread) — strings ajoutées
+- [x] 2 tests instrumentés M5 (maskTarget stroke hide + undo restore ; clipped stencil + unclip parity) — CI engine verte run 38769787419 ; APK build vert (run 38762936820 build success) ; emulator 10/10 en attente run vert (cancellations par pushes successifs, dernier run 38774585877 build success)
 - [ ] Calques d'ajustement (brightness/contrast, hue, gradient map)
 - [ ] UX panneau calques : réordonner, modes, opacités (remplace le stub actuel)
 
