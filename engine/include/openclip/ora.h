@@ -18,6 +18,9 @@ bool loadOra(Canvas& c, const std::string& path, std::string& error);
 // Export composited canvas to PNG file.
 bool exportPng(const Canvas& c, const std::string& path, std::string& error);
 
+// Import a PNG file as a single flattened layer (document helpers).
+bool loadPngInto(Canvas& c, const std::string& path, std::string& error);
+
 }  // namespace openclip
 
 #endif
