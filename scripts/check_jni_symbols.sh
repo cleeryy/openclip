@@ -30,9 +30,8 @@ kt_missing_in_shim=0
 while IFS= read -r sym; do
   grep -q "Java_dev_openclip_engine_EngineHost_${sym}(" "$SHIM" \
     || { echo "MISMATCH: $sym declared in Kotlin but missing in shim"; kt_missing_in_shim=1; }
-  grep -q "[\` ]${sym}(" $DOC 2>/dev/null || \
-  grep -q "${sym}" "$DOC" || \
-    { echo "MISMATCH: $sym not documented in ARCHITECTURE.md"; kt_missing_in_shim=1; }
+  grep -qF "${sym}" "$DOC" \
+    || { echo "MISMATCH: $sym not documented in ARCHITECTURE.md"; kt_missing_in_shim=1; }
 done <<< "$kt_all"
 
 shim_missing_in_kt=0
@@ -49,7 +48,7 @@ if [ "${1:-}" != "--source-mode" ]; then
   [ "${#sos[@]}" -gt 0 ] || { echo "PASS(source-only): no built .so found to cross-check"; exit 0; }
   for so in "${sos[@]}"; do
     while IFS= read -r sym; do
-      nm -gD "$so" 2>/dev/null | grep -q "Java_dev_openclip_engine_EngineHost_${sym}[(" \
+      nm -D "$so" 2>/dev/null | grep -qF "Java_dev_openclip_engine_EngineHost_${sym}" \
         || { echo "MISMATCH: $sym not exported in $so"; exit 1; }
     done <<< "$kt_all"
   done
