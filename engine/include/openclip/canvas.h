@@ -10,6 +10,7 @@
 
 #include "openclip/blend.h"
 #include "openclip/surface.h"
+#include "openclip/vector.h"
 
 namespace openclip {
 
@@ -27,6 +28,13 @@ struct Layer {
     // M5: clip to the stencil below (composites only where the running
     // target already has painted alpha; see compositeInto).
     bool clipped = false;
+
+    // M6: vector layer state. isVector layers store resolution-
+    // independent paths (vectorData) and rasterize them at composite
+    // time into a temp surface that flows through the same
+    // blend/opacity/mask/clip path as a normal raster layer.
+    bool isVector = false;
+    std::vector<VectorPath> vectorData;
 
     // Group support (M4, OpenRaster round trip).
     bool isGroup = false;

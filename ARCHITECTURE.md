@@ -52,6 +52,29 @@ Brush JSON (shim-defined schema, MyPaint-compatible params; extra keys
 ignored): `{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,
 "color":"#RRGGBB"}`.
 
+M6 additions (defined 2026-10-15, vector + rulers round):
+
+- Vector layer model (clean-room, no SVG dependency at the engine level):
+  `struct VectorPath { std::vector<openclip::Vec2> pts; std::vector<float>
+  widthProfile; std::string kind; /* stroke|eraser-stroke */ }` stored per
+  Layer as `std::vector<VectorPath> vectorData` (Layer::isVector=true,
+  rests in a normal raster-blend pipeline by rasterizing with the same
+  blend/opacity semantics at composite time).
+- Symbols: `nAddVectorLayer(handle, name): Int`,
+  `nSetVectorMode(handle, index, on: Boolean): Boolean`,
+  `nVectorEraser(handle, index, /*bool*/ on, pathJson): Boolean`,
+  `nAppendVectorPath(handle, index, pathJson): Int` (pts [{"x":..,"y":..,
+  "p":..}], pressure→width via same PointCurve), `nUndoVector(handle,
+  index): Boolean` (per-path undo stack per vector layer).
+- Rulers (engine-owned overlays computed at composite time, drawn into
+  the raster frame): `nSetRulers(handle, kindsJson): Boolean` with kinds
+  `{"symmetryX":1.0|"symmetryY":..|"perspective":[[{x:..,y:..},...]]|
+  "ellipse":[{cx,cy,rx,ry}]}` — strokes mirrored/snap to the active
+  ruler(s) by the SHIM before stamping (single place where input is
+  transformed).
+- App: vector layer panel entry + ruler toggle row; pressure→width is
+  mapped by the engine curve, not by the UI.
+
 M5 additions (defined 2026-10-15, layer system round):
 
 - Layer tree control: `nSetLayerVisibility(handle, index, visible: Boolean)`,

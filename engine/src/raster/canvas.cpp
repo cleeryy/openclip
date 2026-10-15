@@ -2,12 +2,48 @@
 #include "openclip/canvas.h"
 
 #include "openclip/blend.h"
+#include "openclip/vector.h"
 
 #include <utility>
 
 namespace openclip {
 
 namespace {
+
+// M6: source pixel for one layer at (x, y): vector layers rasterize
+// their paths into a pre-built cache (one entry per layer in the list
+// being composited, nullptr for non-vector layers).
+inline Pixel layerPixel(const Layer& l, const Surface* vecTmp, int x, int y) {
+    if (l.isVector && !l.vectorData.empty() && vecTmp)
+        return vecTmp->get(x, y);
+    return l.surface.get(x, y);
+}
+
+// Rasterize one vector layer's paths into tmp when it contributes.
+// Session ink is opaque black (M6 baseline; per-path color is M7+ work).
+inline const Surface* rasterizeForComposite(const Layer& l, Surface& tmp,
+                                            int w, int h) {
+    if (!l.isVector || l.vectorData.empty()) return nullptr;
+    tmp.resize(w, h);
+    rasterizeVectorPaths(l.vectorData, tmp, 0, 0, 0);
+    return &tmp;
+}
+
+// M6: pre-rasterize every vector layer of a flat list into scratch
+// (aligned 1:1 with layers; empty Surface for non-vector entries). The
+// returned pointer vector stays valid while scratch is alive. This keeps
+// the stencil query vector-aware without per-pixel rasterization.
+inline std::vector<const Surface*> rasterizeAllVectors(
+    const std::vector<Layer>& layers, std::vector<Surface>& scratch, int w,
+    int h) {
+    scratch.clear();
+    scratch.resize(layers.size());
+    std::vector<const Surface*> ptrs(layers.size(), nullptr);
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        ptrs[i] = rasterizeForComposite(layers[i], scratch[i], w, h);
+    }
+    return ptrs;
+}
 
 // Scale a premultiplied pixel by a 0..1 factor (rounded).
 inline Pixel scalePixel(const Pixel& p, float f) {
@@ -20,17 +56,13 @@ inline Pixel scalePixel(const Pixel& p, float f) {
     return q;
 }
 
-// M5 clipping stencil: a clipped layer at index li composites only
-// where the previous layer is already painted (ARCHITECTURE.md: "the
-// clipped layer uses the alpha of the previous layer as its stencil" —
-// the layer directly below in bottom-to-top order). Falls back to the
-// running target alpha when there is no previous raster layer (bottom
-// of the stack, or the previous entry is a group whose composited
-// alpha is not directly addressable).
-inline bool stencilPainted(const std::vector<Layer>& layers, std::size_t li,
-                           const Surface& out, int x, int y) {
+// M5 clipping stencil (M6: vector-aware — the stencil layer's
+// rasterized pixels are consulted when it is a vector layer).
+inline bool stencilPainted(const std::vector<Layer>& layers,
+                           const std::vector<const Surface*>& vecCache,
+                           std::size_t li, const Surface& out, int x, int y) {
     if (li > 0 && !layers[li - 1].isGroup)
-        return layers[li - 1].surface.get(x, y).a != 0;
+        return layerPixel(layers[li - 1], vecCache[li - 1], x, y).a != 0;
     return out.get(x, y).a != 0;
 }
 
@@ -38,8 +70,13 @@ inline bool stencilPainted(const std::vector<Layer>& layers, std::size_t li,
 // M5 rules: a clipped layer skips any pixel where its stencil (above)
 // has zero painted alpha; a layer with a mask multiplies its alpha by
 // mask.a/255.
+// M6: vector layers rasterize once per compositeInto call into a temp
+// surface and flow through the same blend/opacity/mask/clip path.
 void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                    int h) {
+    std::vector<Surface> vecScratch;
+    const std::vector<const Surface*> vecCache =
+        rasterizeAllVectors(layers, vecScratch, w, h);
     for (std::size_t li = 0; li < layers.size(); ++li) {
         const auto& l = layers[li];
         if (!l.visible || l.opacity <= 0.0f) continue;
@@ -48,20 +85,29 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                 // Children blend directly into the target with their own
                 // modes; the group's opacity multiplies each child note
                 // (OpenRaster pass-through semantics approximation).
+                // M6: pass-through vector children rasterize on demand
+                // into childVec (isolated groups recurse through
+                // compositeInto and are covered by that level's cache).
+                // The stencil below is vector-aware via childVecCache.
+                std::vector<Surface> childVecScratch;
+                const std::vector<const Surface*> childVecCache =
+                    rasterizeAllVectors(l.children, childVecScratch, w, h);
                 for (std::size_t ci = 0; ci < l.children.size(); ++ci) {
                     const auto& child = l.children[ci];
                     if (!child.visible || child.opacity <= 0.0f) continue;
                     Surface tmp;
                     tmp.resize(w, h);
                     tmp.clear();
+                    const Surface* childTmp = childVecCache[ci];
                     // Empty workspace for one child's premultiplied data,
                     // then blend onto out so order stays correct.
                     for (int y = 0; y < h; ++y) {
                         for (int x = 0; x < w; ++x) {
                             if (child.clipped &&
-                                !stencilPainted(l.children, ci, out, x, y))
+                                !stencilPainted(l.children, childVecCache,
+                                                ci, out, x, y))
                                 continue;
-                            Pixel s = child.surface.get(x, y);
+                            Pixel s = layerPixel(child, childTmp, x, y);
                             if (s.a == 0) continue;
                             if (child.hasMask) {
                                 const std::uint8_t ma = child.mask.get(x, y).a;
@@ -108,11 +154,12 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
             }
             continue;
         }
+        const Surface* vecTmp = vecCache[li];
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
-                if (l.clipped && !stencilPainted(layers, li, out, x, y))
+                if (l.clipped && !stencilPainted(layers, vecCache, li, out, x, y))
                     continue;
-                Pixel s = l.surface.get(x, y);
+                Pixel s = layerPixel(l, vecTmp, x, y);
                 if (s.a == 0) continue;
                 if (l.hasMask) {
                     const std::uint8_t ma = l.mask.get(x, y).a;

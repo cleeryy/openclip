@@ -14,7 +14,8 @@ SRCS = src/raster/surface.cpp \
        src/io/ora.cpp \
        src/io/psd.cpp \
        src/io/document.cpp \
-       src/filters/filters.cpp
+       src/filters/filters.cpp \
+       src/raster/vector.cpp
 
 TEST_SRCS = tests/main.cpp \
             tests/test_surface.cpp \
@@ -25,7 +26,8 @@ TEST_SRCS = tests/main.cpp \
             tests/test_ora.cpp \
             tests/test_filters.cpp \
             tests/test_document.cpp \
-            tests/test_layers.cpp
+            tests/test_layers.cpp \
+            tests/test_vector.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a
