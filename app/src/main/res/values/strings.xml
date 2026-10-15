@@ -9,6 +9,11 @@
     <string name="remove_layer">Remove layer</string>
     <string name="undo">Undo</string>
     <string name="redo">Redo</string>
+    <string name="stabilize">Stabilize %1$d%%</string>
+    <string name="curve">Pressure curve %1$d%%</string>
+    <string name="presets">Presets</string>
+    <string name="import_preset">Import .myb</string>
+    <string name="preset_invalid">Invalid brush file — kept current brush</string>
     <string name="red">Red %1$d</string>
     <string name="green">Green %1$d</string>
     <string name="blue">Blue %1$d</string>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- OpenClip M2 bundled preset (clean-room, written from scratch).
+     Uses the nested <value base_value="..."/> form. -->
+<brush>
+  <setting name="radius">
+    <value base_value="3.0"/>
+  </setting>
+  <setting name="hardness">
+    <value base_value="0.9"/>
+  </setting>
+  <setting name="opaque">
+    <value base_value="0.8"/>
+  </setting>
+</brush>

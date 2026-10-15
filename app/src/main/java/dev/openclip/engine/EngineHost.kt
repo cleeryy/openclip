@@ -19,8 +19,9 @@ object EngineHost {
     external fun nUndo(handle: Long): Boolean
     external fun nRedo(handle: Long): Boolean
 
-    // M1 additions (documented in ARCHITECTURE.md)
+    // M2 additions (documented in ARCHITECTURE.md)
     external fun nLayerCount(handle: Long): Int
     external fun nSetActiveLayer(handle: Long, index: Int): Int
     external fun nAddLayer(handle: Long, name: String): Int
+    external fun nLoadMyb(handle: Long, xml: String): Boolean
 }

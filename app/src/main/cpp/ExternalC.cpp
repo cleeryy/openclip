@@ -1,6 +1,11 @@
 /*
  * OpenClip M1 — JNI shim implementing the frozen contract from
  * ARCHITECTURE.md on top of the engine public headers only.
+ * M2 additions (documented in ARCHITECTURE.md): nLoadMyb feeds a .myb
+ * document to openclip::parseMyb keeping the session color; nSetBrush
+ * also accepts "stabilize"/"curve" 0..1 (stored shim-side until the
+ * engine consumes them) and "mode" "brush"|"eraser" — M2 erases toward
+ * the canvas background (white), not layer alpha.
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include <jni.h>
@@ -32,6 +37,12 @@ struct Session {
     openclip::History history;
     openclip::BrushParams brush;
     std::uint8_t r = 20, g = 20, b = 20;
+    // M2 shim-side brush state (engine takes over when its M2 lane lands):
+    // stabilize = input smoothing 0..1, curve = pressure exponent 0..1,
+    // eraser = paint toward canvas background instead of ink color.
+    float stabilize = 0.0f;
+    float curve = 0.0f;
+    bool eraser = false;
 };
 
 Session* asSession(jlong handle) { return reinterpret_cast<Session*>(handle); }
@@ -109,6 +120,19 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
     return true;
 }
 
+// M2 eraser semantics: paint toward the canvas background (white), not
+// layer alpha, until M5 adds alpha-erase. Resolves one session-colored
+// dab and paints it.
+bool stampResolved(Session* s, const openclip::Dab& d) {
+    static const std::uint8_t kBg = 255;
+    const openclip::Dab stamped =
+        s->eraser ? openclip::dabFromPressure(s->brush, d.x, d.y, d.pressure,
+                                              kBg, kBg, kBg)
+                  : openclip::dabFromPressure(s->brush, d.x, d.y, d.pressure,
+                                              s->r, s->g, s->b);
+    return paintStamp(s, stamped);
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -146,8 +170,34 @@ Java_dev_openclip_engine_EngineHost_nSetBrush(JNIEnv* env, jclass,
         static_cast<float>(jsonNum(j, "opaque", s->brush.opaque));
     s->brush.spacing =
         static_cast<float>(jsonNum(j, "spacing", s->brush.spacing));
+    // M2 shim-side keys: clamp defensively, ignore out-of-range garbage.
+    const float stab =
+        static_cast<float>(jsonNum(j, "stabilize", s->stabilize));
+    s->stabilize = stab < 0.0f ? 0.0f : (stab > 1.0f ? 1.0f : stab);
+    const float curve = static_cast<float>(jsonNum(j, "curve", s->curve));
+    s->curve = curve < 0.0f ? 0.0f : (curve > 1.0f ? 1.0f : curve);
+    const std::string mode = jsonStr(j, "mode");
+    if (mode == "eraser")
+        s->eraser = true;
+    else if (mode == "brush")
+        s->eraser = false;
     const std::string color = jsonStr(j, "color");
     if (!color.empty()) parseColor(color, s->r, s->g, s->b);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nLoadMyb(JNIEnv* env, jclass,
+                                             jlong handle, jstring xml) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string doc = toStd(env, xml);
+    if (doc.empty()) return JNI_FALSE;
+    openclip::BrushParams parsed;
+    std::string error;
+    if (!openclip::parseMyb(doc, parsed, error)) return JNI_FALSE;
+    // Success: adopt the parsed params, keep the session color.
+    s->brush = parsed;
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -183,9 +233,7 @@ Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
     s->history.beginStroke();
     const std::vector<openclip::Dab> dabs = openclip::interpolateStamps(
         s->brush, x, y, pressure, x, y, pressure, s->r, s->g, s->b);
-    for (const auto& d : dabs)
-        paintStamp(s, openclip::dabFromPressure(s->brush, d.x, d.y,
-                                                d.pressure, s->r, s->g, s->b));
+    for (const auto& d : dabs) stampResolved(s, d);
     // M1: stroke ids are cosmetic (single render thread); M2 tracks them.
     static jlong nextStrokeId = 1;
     return nextStrokeId++;
@@ -234,9 +282,7 @@ Java_dev_openclip_engine_EngineHost_nStrokeMove(JNIEnv*, jclass, jlong handle,
     // Input interpolation across consecutive moves is the app's job in M1.
     const std::vector<openclip::Dab> dabs = openclip::interpolateStamps(
         s->brush, x, y, pressure, x, y, pressure, s->r, s->g, s->b);
-    for (const auto& d : dabs)
-        paintStamp(s, openclip::dabFromPressure(s->brush, d.x, d.y,
-                                                d.pressure, s->r, s->g, s->b));
+    for (const auto& d : dabs) stampResolved(s, d);
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- OpenClip M2 bundled preset (clean-room, written from scratch). -->
+<brush>
+  <setting name="radius" base_value="40.0"/>
+  <setting name="hardness" base_value="0.0"/>
+  <setting name="opaque" base_value="0.25"/>
+</brush>

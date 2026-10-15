@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.openclip.engine.EngineHost
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -88,6 +89,42 @@ class EngineConformanceTest {
                 "undo must restore the blank canvas exactly",
                 undone.contentEquals(before)
             )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // e. M2: nLoadMyb accepts a minimal valid document, rejects garbage
+    // without throwing, and leaves the brush usable afterwards.
+    @Test
+    fun loadMybAcceptsValidRejectsMalformed() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val valid = "<brush>" +
+                "<setting name=\"radius\" base_value=\"12.5\"/>" +
+                "<setting name=\"hardness\" base_value=\"0.3\"/>" +
+                "<setting name=\"opaque\" base_value=\"0.9\"/>" +
+                "</brush>"
+            assertTrue(EngineHost.nLoadMyb(handle, valid))
+
+            assertFalse(EngineHost.nLoadMyb(handle, "not xml at all"))
+            assertFalse(EngineHost.nLoadMyb(handle, "<brush></brush>"))
+            assertFalse(EngineHost.nLoadMyb(handle, ""))
+            assertFalse(
+                EngineHost.nLoadMyb(
+                    handle,
+                    "<brush><setting name=\"radius\" base_value=\"big\"/></brush>"
+                )
+            )
+
+            // Brush still paints after the rejections.
+            val strokeId = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+            EngineHost.nStrokeMove(handle, strokeId, 120f, 128f, 1f)
+            EngineHost.nStrokeEnd(handle, strokeId)
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            assertTrue(after.any { it != -1 })
+            assertTrue(EngineHost.nUndo(handle))
         } finally {
             EngineHost.nDispose(handle)
         }

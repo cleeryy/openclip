@@ -27,6 +27,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import dev.openclip.ui.ColorPicker
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.LayerPanel
+import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ToolPalette
 
 class MainActivity : ComponentActivity() {
@@ -91,6 +92,12 @@ class MainActivity : ComponentActivity() {
                         refreshKey = refreshKey.value,
                         modifier = Modifier
                             .requiredWidth(170.dp)
+                            .padding(4.dp)
+                    )
+                    PresetGallery(
+                        surface = surface,
+                        modifier = Modifier
+                            .width(220.dp)
                             .padding(4.dp)
                     )
                 }

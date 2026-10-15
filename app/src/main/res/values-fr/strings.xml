@@ -9,6 +9,11 @@
     <string name="remove_layer">Supprimer le calque</string>
     <string name="undo">Annuler</string>
     <string name="redo">Rétablir</string>
+    <string name="stabilize">Stabilisation %1$d%%</string>
+    <string name="curve">Courbe de pression %1$d%%</string>
+    <string name="presets">Préréglages</string>
+    <string name="import_preset">Importer .myb</string>
+    <string name="preset_invalid">Fichier de pinceau invalide — pinceau actuel conservé</string>
     <string name="red">Rouge %1$d</string>
     <string name="green">Vert %1$d</string>
     <string name="blue">Bleu %1$d</string>

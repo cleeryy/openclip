@@ -37,6 +37,10 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     private val running = AtomicBoolean(false)
     private var needsComposite = true
 
+    // M2: invoked (posted to the UI thread) at each stroke end so panels
+    // can refresh real undo/redo state. Null = no listener.
+    var onStrokeChanged: (() -> Unit)? = null
+
     init {
         // Phase 1: canvas lives at fixed reference resolution and is
         // letterboxed into the view; pan/zoom comes with the M5 tool work.
@@ -79,6 +83,10 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         if (handle != 0L) EngineHost.nSetBrush(handle, json)
     }
 
+    // M2: feed a .myb document to the engine; false = malformed, brush kept.
+    fun loadMyb(xml: String): Boolean =
+        if (handle != 0L) EngineHost.nLoadMyb(handle, xml) else false
+
     fun addLayer() = if (handle != 0L) EngineHost.nAddLayer(handle, "Layer") else -1
 
     fun layerCount() = if (handle != 0L) EngineHost.nLayerCount(handle) else 0
@@ -109,6 +117,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                 enqueue(event, pressure, MotionEvent.ACTION_UP)
                 EngineHost.nStrokeEnd(handle, strokeId)
                 strokeId = 0
+                notifyStrokeChanged()
             }
         }
         requestParentDisallowInterceptTouchEvent()
@@ -131,6 +140,13 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             }
             queue.add(QueuedPoint(event.getX(0), event.getY(0), pressure, action))
         }
+    }
+
+    private fun notifyStrokeChanged() {
+        val cb = onStrokeChanged ?: return
+        // Called from the render thread; the listener posts to UI itself
+        // if it needs Compose state. SurfaceView.post is UI-thread safe.
+        post { cb() }
     }
 
     private fun requestParentDisallowInterceptTouchEvent() {
@@ -169,6 +185,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                         if (pt.action == MotionEvent.ACTION_UP) {
                             EngineHost.nStrokeEnd(handle, strokeId)
                             strokeId = 0
+                            notifyStrokeChanged()
                         }
                     }
                 }
