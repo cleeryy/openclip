@@ -37,9 +37,9 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [ ] Calques d'ajustement (brightness/contrast, hue, gradient map) — REPORTE M8 (impact faible/peinture)
 - [x] UX panneau calques réel : visibilité/opacité/blends/rename/groupes/move/mask/clipped
 
-## M6 — Vectoriel + règles
-- [ ] Couches vectorielles (chemins, pression→largeur, gomme vectorielle)
-- [ ] Règles : perspective 1/2/3 pts, symétrie, ellipse
+## M6 — Vectoriel + règles (clos: app 13/13 run 38815184126, engine 55/55 commit a65b39f)
+- [x] Couches vectorielles (chemins resamplés 8px, pression→largeur via PointCurve, gomme vectorielle par intersection, undo path-level)
+- [x] Règles M6: symétrie X/Y, ellipse (projection), segment/perspective à 1 segment (3-point perspective → M9)
 
 ## M7 — Animation
 - [ ] Timeline UI, frames, onion skin, lecture fps réel
@@ -72,3 +72,4 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-15 (4): M4 clos — 42/42 engine, 8/8 emulator; fix direct de 3 poisons (stb-in-function, loadPsd link, cancel string, apostrophe FR).
 - 2026-10-15 (5): M5 clos — 10/10 emulator (run 38794030171); clipping semantique verrouillée par sonde locale (dbg6: stencil sparse OK). Leçon: 2 poisons CI (JDK pin repo, apostrophe FR) corrigés: prepush.sh gate = fidèle à la CI (42/42 + Kotlin + NDK locaux).
 - 2026-10-15 (6): M6 clos — vector layers + rulers, 13/13 emulator (run 38815184126); engine 55/55 (a65b39f). CI emulator-resources fix (bound RAM + swiftshader_indirect) a supprimé les crashes system (run 38813808271 vert).
+- 2026-10-16: M6 clos — vector layers + rulers, 13/13 emulator (run 38815184126). Fix CI stabilité émulateur (RAM bornée + swiftshader_indirect, run 38813808271 vert).
