@@ -45,17 +45,14 @@ done <<< "$(c_syms)"
 [ "$kt_missing_in_shim" -eq 0 ] && [ "$shim_missing_in_kt" -eq 0 ] || exit 1
 
 if [ "${1:-}" != "--source-mode" ]; then
-  found=0
-  for so in "$REPO"/app/build/intermediates/cxx/*/obj/*/libopenclip.so \
-            "$REPO"/app/build/intermediates/cmake/*/obj/*/libopenclip.so; do
-    [ -f "$so" ] || continue
-    found=1
+  mapfile -t sos < <(find "$REPO/app/build" -name 'libopenclip.so' 2>/dev/null)
+  [ "${#sos[@]}" -gt 0 ] || { echo "PASS(source-only): no built .so found to cross-check"; exit 0; }
+  for so in "${sos[@]}"; do
     while IFS= read -r sym; do
       nm -gD "$so" 2>/dev/null | grep -q "Java_dev_openclip_engine_EngineHost_${sym}[(" \
         || { echo "MISMATCH: $sym not exported in $so"; exit 1; }
     done <<< "$kt_all"
   done
-  [ "$found" -eq 1 ] || { echo "PASS(source-only): no built .so found to cross-check"; exit 0; }
 fi
 
 echo "PASS: Kotlin/shim(ARCHITECTURE.md) JNI contract consistent"
