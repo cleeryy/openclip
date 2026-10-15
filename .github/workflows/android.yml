@@ -57,17 +57,9 @@ jobs:
           script: |
             adb shell wm density 420
             ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
-            # One tolerated retry (attempts: 2): a flaky emulator boot may
-            # fail once, but two consecutive failures fail the job for real.
-            attempt=1
-            until ./gradlew :app:connectedDebugAndroidTest; do
-              if [ "$attempt" -ge 2 ]; then
-                echo "connectedDebugAndroidTest failed twice — failing the job"
-                exit 1
-              fi
-              echo "connectedDebugAndroidTest failed (attempt $attempt) — retrying once"
-              attempt=$((attempt + 1))
-            done
+            # Retry is single-line-dash-safe: one tolerated retry, then real
+            # failure. No force-green: two consecutive failures fail the job.
+            ./gradlew :app:connectedDebugAndroidTest || (echo "connectedDebugAndroidTest failed — retrying once" && ./gradlew :app:connectedDebugAndroidTest)
       - name: Upload instrumented test reports
         if: always()
         uses: actions/upload-artifact@v4
