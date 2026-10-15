@@ -37,6 +37,10 @@ import dev.openclip.R
 import kotlin.math.roundToInt
 
 private sealed class FilterParam {
+    // All param kinds share a JSON key (resolved via the base class so
+    // generic maps/by-name lookups compile without smart casts).
+    abstract val key: String
+
     // Numeric JSON param, shown as a slider (int = stepped to integers).
     data class Num(
         val key: String,

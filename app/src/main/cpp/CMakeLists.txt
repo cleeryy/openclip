@@ -12,9 +12,10 @@ set(ENGINE_SRC_DIR ${ENGINE_DIR}/src)
 file(GLOB ENGINE_SOURCES
      ${ENGINE_SRC_DIR}/blend/*.cpp
      ${ENGINE_SRC_DIR}/brush/*.cpp
-     ${ENGINE_SRC_DIR}/common/*.cpp
+     ${ENGINE_SRC_DIR}/filters/*.cpp
      ${ENGINE_SRC_DIR}/io/*.cpp
      ${ENGINE_SRC_DIR}/raster/*.cpp
+     ${ENGINE_SRC_DIR}/stroke/*.cpp
      ${ENGINE_SRC_DIR}/undo/*.cpp)
 
 add_library(openclip SHARED
