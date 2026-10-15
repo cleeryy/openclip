@@ -64,3 +64,4 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 ## Journal de progression
 - 2026-10-15: M1 clos — CI engine + android vertes; gate émulateur (run 38721366608, 3/3).
 - M2 lancé (2 lanes) : engine=stroke accumulator+stabilisation+pressure curve ; app=galerie MyPaint presets (SAF)+contrôles stabilize/curve+undo/redo état.
+- 2026-10-15 (2): M2 clos — moteur stroke accumulator (stabilize/curve) 25/25; app galerie presets+nLoadMyb 4/4 émulateur.
