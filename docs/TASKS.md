@@ -10,7 +10,9 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] CI build/test/publish (engine.yml + android.yml, release APK sur tags)
 - [x] CI engine verte sur master (run 38717447431 ; UB saveOra corrigée)
 - [x] CI Android verte sur master (run 38717535678 ; NDK + script check corrigés, APK réel en artefact)
-- [ ] Fonctionnel : APK installable qui dessine (test émulateur CI = gate "conforme") — où on est
+- [ ] Fonctionnel : APK installable qui dessine — GATE ATTEINT, reste stabilisation
+  - [x] Instrumented tests émulateur (3 tests : launch UI + handle/layers + stroke/undo) — app/src/androidTest
+  - [x] Job `emulator` CI (reactivecircus android-emulator-runner, API 34 x86_64, master/tags pushes) gate `publish` via `needs: [build, emulator]`
 
 ## M2 — Pinceaux durcis
 - [ ] Import presets MyPaint `.myb` réel + UI de presets (galerie)
@@ -54,5 +56,5 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 ## CI/CD — pérenne
 - [x] CI engine verte sur master
 - [x] CI android verte sur master (assembleDebug + symboles check réels)
-- [ ] Instrumented test émulateur (conforme = démarre + dessin + undo)
+- [ ] Instrumented test émulateur CI : build+connectés verts exigés sur master (gate `publish`)
 - [ ] Release pipeline tags v* → APKs sur GitHub Releases
