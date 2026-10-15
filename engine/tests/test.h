@@ -32,6 +32,7 @@ inline int& checks() {
 inline void fail(const char* file, int line, const std::string& msg) {
     ++failures();
     std::printf("  FAIL %s:%d: %s\n", file, line, msg.c_str());
+    std::fflush(stdout);
 }
 
 struct Registrar {
@@ -45,15 +46,18 @@ inline int runAll() {
     for (auto& c : registry()) {
         const int f0 = failures();
         std::printf("[ %s ]\n", c.name.c_str());
+        std::fflush(stdout);
         c.fn();
         if (failures() == f0) {
             ++passed;
         } else {
             std::printf("  ^^ %s FAILED\n", c.name.c_str());
+            std::fflush(stdout);
         }
     }
     std::printf("\n%d/%lu tests passed, %d checks, %d failures\n",
                 passed, (unsigned long)registry().size(), checks(), failures());
+    std::fflush(stdout);
     return failures() == 0 ? 0 : 1;
 }
 

@@ -33,14 +33,23 @@ TEST(ora_roundtrip) {
     paintDab(c.layer(1).surface,
              dabFromPressure(p, 20, 20, 1.0f, 0, 255, 0), p);
 
-    const std::string path = "/tmp/opencode/openclip_test.ora";
+    const std::string path = "/tmp/openclip_test.ora";
     std::string err;
-    CHECK(saveOra(c, path, err));
-    if (!err.empty()) std::printf("  save err: %s\n", err.c_str());
+    if (!saveOra(c, path, err)) {
+        std::printf("  save failed: %s\n", err.c_str());
+        std::fflush(stdout);
+        CHECK(false);  // no tmp dir / unwritable: bail out, no crash
+        return;
+    }
 
     Canvas d;
-    CHECK(loadOra(d, path, err));
-    if (!err.empty()) std::printf("  load err: %s\n", err.c_str());
+    if (!loadOra(d, path, err)) {
+        std::printf("  load failed: %s\n", err.c_str());
+        std::fflush(stdout);
+        CHECK(false);
+        std::remove(path.c_str());
+        return;
+    }
     CHECK_EQ(d.width(), 64);
     CHECK_EQ(d.height(), 48);
     CHECK_EQ(d.layerCount(), (std::size_t)2);
@@ -60,15 +69,19 @@ TEST(ora_roundtrip) {
     std::remove(path.c_str());
 }
 
-TEST(png_export_writes_file) {
-    Canvas c(16, 16);
+TEST(png_export_writes_file) {    Canvas c(16, 16);
     c.addLayer("l");
     BrushParams p;
     paintDab(c.layer(0).surface,
              dabFromPressure(p, 8, 8, 1.0f, 255, 255, 255), p);
-    const std::string path = "/tmp/opencode/openclip_test.png";
+    const std::string path = "/tmp/openclip_test.png";
     std::string err;
-    CHECK(exportPng(c, path, err));
+    if (!exportPng(c, path, err)) {
+        std::printf("  export failed: %s\n", err.c_str());
+        std::fflush(stdout);
+        CHECK(false);
+        return;
+    }
     FILE* f = std::fopen(path.c_str(), "rb");
     CHECK(f != nullptr);
     if (f) {
@@ -80,4 +93,16 @@ TEST(png_export_writes_file) {
         std::fclose(f);
     }
     std::remove(path.c_str());
+}
+
+TEST(ora_save_unwritable_path_fails_cleanly) {
+    // Regression: saveOra must return false (not crash callers) when the
+    // destination directory does not exist; the harness must keep running.
+    Canvas c(8, 8);
+    c.addLayer("l");
+    std::string err;
+    CHECK(!saveOra(c, "/tmp/openclip_no_such_dir_xyz/test.ora", err));
+    CHECK(!err.empty());
+    // Suite is still alive after the failure path.
+    CHECK_EQ(c.layerCount(), (std::size_t)1);
 }
