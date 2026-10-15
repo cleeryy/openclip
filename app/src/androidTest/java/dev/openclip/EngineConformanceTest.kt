@@ -129,4 +129,61 @@ class EngineConformanceTest {
             EngineHost.nDispose(handle)
         }
     }
+
+    // f. M3: nApplyFilter rejects an unknown name (false, composite
+    // unchanged, no crash), and a known cheap filter (posterize) returns
+    // true and modifies the composite over a painted stroke.
+    @Test
+    fun applyFilterRejectsUnknown() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            assertFalse(EngineHost.nApplyFilter(handle, "nonexistent", "{}"))
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            assertTrue(
+                "unknown filter must leave the composite unchanged",
+                after.contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    @Test
+    fun applyFilterKnownPosterizeModifiesComposite() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#804020"}"""
+            )
+            val strokeId = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+            for (x in 70..170 step 5) {
+                EngineHost.nStrokeMove(handle, strokeId, x.toFloat(), 128f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, strokeId)
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            assertTrue(EngineHost.nApplyFilter(handle, "posterize", """{"levels":2}"""))
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            val changed = after.indices.count { after[it] != before[it] }
+            assertTrue(
+                "posterize must modify composite pixels, got $changed",
+                changed > 0
+            )
+            // The filter application is undoable like a stroke.
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue(
+                "undo must restore the pre-filter composite exactly",
+                undone.contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
 }

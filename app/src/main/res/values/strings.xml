@@ -17,4 +17,19 @@
     <string name="red">Red %1$d</string>
     <string name="green">Green %1$d</string>
     <string name="blue">Blue %1$d</string>
+    <string name="filters">Filters</string>
+    <string name="filter_apply">Apply</string>
+    <string name="filter_cancel">Cancel</string>
+    <string name="filter_applied">Filter applied</string>
+    <string name="filter_failed">Unknown filter — canvas unchanged</string>
+    <string name="filter_gaussian_blur">Gaussian blur</string>
+    <string name="filter_sharpen">Sharpen</string>
+    <string name="filter_motion_blur">Motion blur</string>
+    <string name="filter_radial_blur">Radial blur</string>
+    <string name="filter_posterize">Posterize</string>
+    <string name="filter_levels">Levels</string>
+    <string name="filter_chromatic_aberration">Chromatic aberration</string>
+    <string name="filter_add_noise">Add noise</string>
+    <string name="filter_mosaic">Mosaic</string>
+    <string name="filter_gradient_map">Gradient map</string>
 </resources>

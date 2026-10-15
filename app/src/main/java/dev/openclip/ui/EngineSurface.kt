@@ -24,6 +24,15 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         val action: Int
     )
 
+    // M3: a named filter application request. Processed on the render
+    // thread only (ARCHITECTURE.md threading); the result is posted back
+    // to the caller on the UI thread.
+    private data class FilterRequest(
+        val name: String,
+        val paramsJson: String,
+        val onResult: (Boolean) -> Unit
+    )
+
     companion object {
         private const val DEFAULT_BRUSH =
             """{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
@@ -34,6 +43,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     private var handle: Long = 0
     private var strokeId = 0L
     private val queue = ArrayDeque<QueuedPoint>()
+    private val filterQueue = ArrayDeque<FilterRequest>()
     private val running = AtomicBoolean(false)
     private var needsComposite = true
 
@@ -96,6 +106,20 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     fun undo(): Boolean = if (handle != 0L) EngineHost.nUndo(handle).also { if (it) needsComposite = true } else false
 
     fun redo(): Boolean = if (handle != 0L) EngineHost.nRedo(handle).also { if (it) needsComposite = true } else false
+
+    // M3: enqueue a named filter over the full active layer. runs on the
+    // render thread like strokes (nCompositeInto is render-thread only);
+    // needsComposite is set on success so the UI refreshes. onResult is
+    // posted on the UI thread (SurfaceView.post is UI-thread safe).
+    fun applyFilter(name: String, paramsJson: String, onResult: (Boolean) -> Unit) {
+        if (handle == 0L || !running.get()) {
+            post { onResult(false) }
+            return
+        }
+        synchronized(filterQueue) {
+            filterQueue.add(FilterRequest(name, paramsJson, onResult))
+        }
+    }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (handle == 0L || !running.get()) return false
@@ -188,6 +212,26 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                             notifyStrokeChanged()
                         }
                     }
+                }
+            }
+
+            // M3: drain queued filter requests onto the engine in order,
+            // on this same render thread, before compositing.
+            val filters: List<FilterRequest>
+            synchronized(filterQueue) {
+                filters = filterQueue.toList()
+                filterQueue.clear()
+            }
+            if (filters.isNotEmpty() && handle != 0L) {
+                for (req in filters) {
+                    val ok = try {
+                        EngineHost.nApplyFilter(handle, req.name, req.paramsJson)
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (ok) needsComposite = true
+                    val cb = req.onResult
+                    post { cb(ok) }
                 }
             }
 

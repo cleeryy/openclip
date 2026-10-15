@@ -17,4 +17,19 @@
     <string name="red">Rouge %1$d</string>
     <string name="green">Vert %1$d</string>
     <string name="blue">Bleu %1$d</string>
+    <string name="filters">Filtres</string>
+    <string name="filter_apply">Appliquer</string>
+    <string name="filter_cancel">Annuler</string>
+    <string name="filter_applied">Filtre appliqué</string>
+    <string name="filter_failed">Filtre inconnu — calque inchangé</string>
+    <string name="filter_gaussian_blur">Flou gaussien</string>
+    <string name="filter_sharpen">Accentuation</string>
+    <string name="filter_motion_blur">Flou de mouvement</string>
+    <string name="filter_radial_blur">Flou radial</string>
+    <string name="filter_posterize">Postérisation</string>
+    <string name="filter_levels">Niveaux</string>
+    <string name="filter_chromatic_aberration">Aberration chromatique</string>
+    <string name="filter_add_noise">Ajouter du bruit</string>
+    <string name="filter_mosaic">Mosaïque</string>
+    <string name="filter_gradient_map">Dégradé mappé</string>
 </resources>

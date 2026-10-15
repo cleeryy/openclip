@@ -19,6 +19,7 @@
 #include "openclip/blend.h"
 #include "openclip/brush.h"
 #include "openclip/canvas.h"
+#include "openclip/filters.h"
 #include "openclip/surface.h"
 #include "openclip/undo.h"
 
@@ -291,6 +292,38 @@ Java_dev_openclip_engine_EngineHost_nStrokeEnd(JNIEnv*, jclass, jlong handle,
     Session* s = asSession(handle);
     if (!s) return;
     s->history.endStroke(s->canvas);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nApplyFilter(JNIEnv* env, jclass,
+                                                 jlong handle, jstring name,
+                                                 jstring paramsJson) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string fname = toStd(env, name);
+    const std::string params = toStd(env, paramsJson);
+    // M3 contract: full active layer, undoable like a brush stroke.
+    openclip::History& h = s->history;
+    h.beginStroke();
+    const std::size_t layer = static_cast<std::size_t>(
+        s->canvas.activeLayer() < 0 ? 0 : s->canvas.activeLayer());
+    if (layer >= s->canvas.layerCount()) {
+        h.cancelStroke(s->canvas);
+        return JNI_FALSE;
+    }
+    openclip::Layer& ly = s->canvas.layer(layer);
+    for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
+        for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
+            h.touchTile(s->canvas, layer, tx, ty);
+    std::string err;
+    const bool ok = openclip::applyFilter(ly.surface, fname, params, err);
+    if (ok) {
+        h.endStroke(s->canvas);
+    } else {
+        h.cancelStroke(s->canvas);  // failed filters leave no undo residue
+    }
+    (void)err;
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

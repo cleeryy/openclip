@@ -24,4 +24,7 @@ object EngineHost {
     external fun nSetActiveLayer(handle: Long, index: Int): Int
     external fun nAddLayer(handle: Long, name: String): Int
     external fun nLoadMyb(handle: Long, xml: String): Boolean
+
+    // M3 additions (documented in ARCHITECTURE.md)
+    external fun nApplyFilter(handle: Long, name: String, paramsJson: String): Boolean
 }

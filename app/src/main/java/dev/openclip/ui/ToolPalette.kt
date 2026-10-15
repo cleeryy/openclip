@@ -2,6 +2,7 @@
 // (radius/hardness/opaque/spacing + M2 keys stabilize/curve, mode), and
 // undo/redo buttons whose enabled state is tracked from engine returns
 // and refreshed after each stroke via EngineSurface.onStrokeChanged.
+// M3 adds a "Filtres" button opening the filter dialog (FilterDialog.kt).
 package dev.openclip.ui
 
 import androidx.compose.foundation.layout.Arrangement
@@ -58,6 +59,8 @@ fun ToolPalette(
     // clears redo; tap results update both (false = stack exhausted).
     var canUndo by remember { mutableStateOf(false) }
     var canRedo by remember { mutableStateOf(false) }
+    // M3: filter dialog visibility.
+    var showFilters by remember { mutableStateOf(false) }
 
     fun pushBrush() = surface.setBrush(
         BrushState(inkColor, isBrush, radius, opaque, stabilize, curve).toJson()
@@ -103,6 +106,12 @@ fun ToolPalette(
             ) {
                 Text(stringResource(R.string.redo), modifier = Modifier.padding(2.dp))
             }
+            Button(onClick = { showFilters = true }) {
+                Text(stringResource(R.string.filters), modifier = Modifier.padding(2.dp))
+            }
+        }
+        if (showFilters) {
+            FilterDialog(surface = surface, onDismiss = { showFilters = false })
         }
         Text(
             stringResource(R.string.opacity, (opaque * 100).toInt()),
