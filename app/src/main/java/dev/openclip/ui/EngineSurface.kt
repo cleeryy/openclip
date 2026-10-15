@@ -127,7 +127,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     fun setLayerName(index: Int, name: String) =
         if (handle != 0L) EngineHost.nSetLayerName(handle, index, name) else false
 
-    fun layerOp(op: () -> Unit) = runOnEngine(op)
+    fun layerOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
     fun moveLayer(from: Int, to: Int) =
         if (handle != 0L) EngineHost.nMoveLayer(handle, from, to)
@@ -166,9 +166,9 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     private data class EngineOp(val run: () -> Unit)
     private val engineQueue = ArrayDeque<EngineOp>()
 
-    private fun runOnEngine(op: () -> Unit) {
+    private fun runOnEngine(op: EngineSurface.() -> Unit) {
         if (handle == 0L || !running.get()) return
-        synchronized(engineQueue) { engineQueue.add(EngineOp(op)) }
+        synchronized(engineQueue) { engineQueue.add(EngineOp { op() }) }
     }
 
     private fun drainEngineQueue() {
