@@ -47,4 +47,15 @@
     <string name="layer_add_vector">+ Vectoriel</string>
     <string name="rulers_title">Règles</string>
     <string name="vector_undo">Annuler (vectoriel)</string>
+    <string name="timeline">Chronologie</string>
+    <string name="frame_add">+ Image</string>
+    <string name="frame_duplicate">Dupliquer</string>
+    <string name="frame_delete">Supprimer</string>
+    <string name="timeline_play">Lecture</string>
+    <string name="timeline_pause">Pause</string>
+    <string name="timeline_fps">IPS %1$d</string>
+    <string name="onion">Pelure</string>
+    <string name="onion_prev">Préc.</string>
+    <string name="onion_next">Suiv.</string>
+    <string name="onion_strength">Intensité %1$d%%</string>
 </resources>

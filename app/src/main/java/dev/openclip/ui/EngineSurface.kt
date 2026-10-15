@@ -153,6 +153,83 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     fun setRulers(kindsJson: String) =
         if (handle != 0L) EngineHost.nSetRulers(handle, kindsJson) else false
 
+    // M7 frames + onion skin (thin wrappers over the exact M7 symbols;
+    // fps stays app-side — no engine symbol — the timeline owns it).
+    fun frameCount() = if (handle != 0L) EngineHost.nFrameCount(handle) else 0
+
+    fun addFrame() =
+        if (handle != 0L) EngineHost.nAddFrame(handle)
+            .also { if (it >= 0) needsComposite = true } else -1
+
+    fun duplicateFrame() =
+        if (handle != 0L) EngineHost.nDuplicateFrame(handle)
+            .also { if (it >= 0) needsComposite = true } else -1
+
+    fun deleteFrame(index: Int) =
+        if (handle != 0L) EngineHost.nDeleteFrame(handle, index)
+            .also { if (it) needsComposite = true } else false
+
+    fun setFrame(index: Int) =
+        if (handle != 0L) EngineHost.nSetFrame(handle, index)
+            .also { if (it) needsComposite = true } else false
+
+    fun frameOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
+
+    fun setOnion(previous: Boolean, next: Boolean, strength: Float) {
+        if (handle == 0L || !running.get()) return
+        synchronized(engineQueue) {
+            engineQueue.add(
+                EngineOp {
+                    if (EngineHost.nSetOnion(handle, previous, next, strength))
+                        needsComposite = true
+                }
+            )
+        }
+    }
+
+    // M7 thumbnails: pulled on the render thread (engine state stays
+    // single-thread), full-canvas nFrameCompositeInto downscaled to 96px
+    // wide app-side, result posted on the UI thread. Null = no engine.
+    private data class ThumbRequest(val index: Int, val onResult: (Bitmap?) -> Unit)
+    private val thumbQueue = ArrayDeque<ThumbRequest>()
+
+    fun pullFrameThumbnail(index: Int, onResult: (Bitmap?) -> Unit) {
+        if (handle == 0L || !running.get()) { post { onResult(null) }; return }
+        synchronized(thumbQueue) { thumbQueue.add(ThumbRequest(index, onResult)) }
+    }
+
+    private fun drainThumbQueue() {
+        val drained: List<ThumbRequest>
+        synchronized(thumbQueue) {
+            drained = thumbQueue.toList()
+            thumbQueue.clear()
+        }
+        for (req in drained) {
+            val bmp: Bitmap? = try {
+                val px = IntArray(engineWidth * engineHeight)
+                val n = EngineHost.nFrameCompositeInto(
+                    handle, req.index, px, engineWidth, engineHeight
+                )
+                if (n <= 0) {
+                    null
+                } else {
+                    val full = Bitmap.createBitmap(
+                        engineWidth, engineHeight, Bitmap.Config.ARGB_8888
+                    )
+                    full.setPixels(px, 0, engineWidth, 0, 0, engineWidth, engineHeight)
+                    val tw = 96
+                    val th = (96f * engineHeight / engineWidth).toInt().coerceAtLeast(1)
+                    val small = Bitmap.createScaledBitmap(full, tw, th, true)
+                    full.recycle()
+                    small
+                }
+            } catch (_: Exception) {
+                null
+            }
+            post { req.onResult(bmp) }
+        }
+    }
+
     fun canvasWidth(): Int = engineWidth
     fun canvasHeight(): Int = engineHeight
 
@@ -378,6 +455,9 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             drainDocQueue()
             // M5: drain queued panel ops on this render thread too.
             drainEngineQueue()
+            // M7: drain queued thumbnail pulls (frame composites for the
+            // timeline strip; engine stays render-thread only).
+            drainThumbQueue()
 
             if (!needsComposite) {
                 Thread.sleep(4)

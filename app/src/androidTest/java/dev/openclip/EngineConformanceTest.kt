@@ -593,6 +593,44 @@ class EngineConformanceTest {
             EngineHost.nDispose(handle)
         }
     }
+    // M7-17: timeline thumbnail parity — every frame index the strip
+    // would pull composites to a non-white frame exactly where the
+    // stroke landed; thumbnails for empty frames stay blank white.
+    // (Frame-switch isolation itself is covered by M7-15 above.)
+    @Test
+    fun timelineThumbnailsMatchFrameCount() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertEquals(1, EngineHost.nAddFrame(handle))
+            assertEquals(2, EngineHost.nFrameCount(handle))
+            assertTrue(EngineHost.nSetFrame(handle, 1))
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
+            )
+            val sid = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+            for (x in 70..170 step 5) {
+                EngineHost.nStrokeMove(handle, sid, x.toFloat(), 128f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+
+            // The strip pulls one thumbnail per frame index: frame 0 is
+            // untouched, frame 1 carries the stroke.
+            val t0 = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nFrameCompositeInto(handle, 0, t0, w, h))
+            assertTrue("thumbnail 0 must stay blank white", t0.all { it == -1 })
+            val t1 = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nFrameCompositeInto(handle, 1, t1, w, h))
+            val changed = t1.indices.count { t1[it] != t0[it] }
+            assertTrue("thumbnail 1 must show the stroke, got $changed", changed > 50)
+
+            // Bad indexes are refused with the documented -2 code.
+            val junk = IntArray(w * h)
+            assertEquals(-2, EngineHost.nFrameCompositeInto(handle, 7, junk, w, h))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
 }
 
 private fun IntArray.contentNotEquals(other: IntArray): Boolean {

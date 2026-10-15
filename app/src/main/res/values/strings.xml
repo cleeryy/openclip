@@ -59,5 +59,16 @@
     <string name="layer_mask_target">Edit mask</string>
     <string name="layer_clipped">Clip to below</string>
     <string name="layer_children">Children</string>
+    <string name="timeline">Timeline</string>
+    <string name="frame_add">+ Frame</string>
+    <string name="frame_duplicate">Duplicate</string>
+    <string name="frame_delete">Delete</string>
+    <string name="timeline_play">Play</string>
+    <string name="timeline_pause">Pause</string>
+    <string name="timeline_fps">FPS %1$d</string>
+    <string name="onion">Onion</string>
+    <string name="onion_prev">Prev</string>
+    <string name="onion_next">Next</string>
+    <string name="onion_strength">Strength %1$d%%</string>
     <string name="ok">OK</string>
 </resources>

@@ -35,6 +35,7 @@ import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.PresetGallery
+import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 
 class MainActivity : ComponentActivity() {
@@ -159,6 +160,15 @@ class MainActivity : ComponentActivity() {
                             .padding(4.dp)
                     )
                 }
+                // M7: timeline strip — full width under the panels so the
+                // thumbnails stay tappable on small screens.
+                TimelineStrip(
+                    surface = surface,
+                    refreshKey = refreshKey.value,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(4.dp)
+                )
                 if (status.value.isNotEmpty()) {
                     androidx.compose.material3.Text(
                         status.value,
