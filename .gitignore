@@ -15,7 +15,6 @@ out/
 .gradle/
 app/build/
 engine/obj/
-local.properties
 LOCAL.properties
 .ccls-cache/
 
