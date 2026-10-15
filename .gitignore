@@ -1,0 +1,25 @@
+# Commercial artifacts / Celsys-owned content — NEVER commit
+*.xapk
+*.apk
+.apk-extra/
+extracted/
+pre/
+apk-dec/
+base_dec/
+csp/
+
+# Build
+build/
+out/
+.cxx/
+.gradle/
+app/build/
+engine/obj/
+LOCAL.properties
+.ccls-cache/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.opencode/

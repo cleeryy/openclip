@@ -1,0 +1,58 @@
+# Architecture
+
+## Constraints
+
+1. Clean-room: no code, assets, formats or binaries derived from
+   Clip Studio Paint / Celsys. Open formats only: OpenRaster (`.ora`),
+   PSD (interchange), MyPaint brush (`.myb`), glTF for 3D reference.
+2. The engine must stay host-buildable (Linux + C++17) so it can be
+   developed and tested without an Android device or NDK.
+3. GPL-3.0-or-later for all first-party code. Vendored third-party
+   single-file utilities must be permissively licensed and logged in
+   `engine/third_party/README.md` with source and license.
+
+## Module boundaries
+
+```
+app/     Kotlin + Compose; owns input (MotionEvent/stylus), UI panels, SAF file IO
+         talks to engine ONLY through the JNI boundary below.
+engine/  C++17, no Android/JNI types in sources.
+  include/openclip/   public headers = the contract
+  src/raster          tiles (0x100 px), surface model, color (RGBA8 now, RGBA16F later)
+  src/blend           blend-mode kernel, normal|multiply|screen|overlay|add|soft-light|...
+  src/brush           stamp-based brush engine + MyPaint .myb parser + pressure curve
+  src/undo            command history (stroke-level)
+  src/io              OpenRaster read/write (vendored miniz for zip), PNG via stb_image
+  tests/              assert-based harness, no external framework
+```
+
+## JNI boundary (Phase 1, frozen)
+
+Class: `dev.openclip.engine.EngineHost` (Kotlin object with `System.loadLibrary("openclip")`)
+Symbol prefix: `Java_dev_openclip_engine_EngineHost_`
+
+- `nInit(width: Int, height: Int, dpi: Float): Long` → canvas handle
+- `nDispose(handle: Long)`
+- `nSetBrush(handle: Long, json: String)` → MyPaint-compatible brush descriptor
+- `nStrokeBegin(handle: Long, x: Float, y: Float, pressure: Float): Long` (stroke id)
+- `nStrokeMove(handle: Long, strokeId: Long, x: Float, y: Float, pressure: Float)`
+- `nStrokeEnd(handle: Long, strokeId: Long)`
+- `nCompositeInto(handle: Long, pixels: IntArray, width: Int, height: Int)` — full-canvas composite into an ARGB int array for the SurfaceView blit (Phase 1; Phase 2 swaps to AHB/GL image)
+- `nUndo(handle: Long): Boolean` / `nRedo(handle: Long): Boolean`
+
+Engine owns document truth; the app never caches swapped pixels.
+Layers, filters, selection, vector, animation extend the same pattern
+with explicit additions to `include/openclip/` only.
+
+## Threading
+
+App: input on UI thread → collection into a lock-free stroke queue →
+engine strokes processed on a dedicated render thread
+(`HandlerThread` in app). `nCompositeInto` is called on the render
+thread only; results posted to SurfaceView.
+
+## Validation ownership
+
+- engine: `make && make test` green on Linux (CI: ci-engine.yml)
+- app: CI build of debug APK (android.yml); engine JNI symbols must
+  resolve (CI runs `check_jni_symbols.sh`)
