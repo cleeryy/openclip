@@ -26,7 +26,9 @@ GPL-3.0-or-later. See [LICENSE](LICENSE).
 ## Build
 
 - Engine (host): `cd engine && make && make test`
-- App: requires Android SDK 34+ / NDK; see `.github/workflows/`.
+- App: `./gradlew :app:assembleDebug` (Android SDK 34 + NDK r26+, Gradle
+  wrapper is checked in; see `.github/workflows/`)
+- JNI contract consistency check: `bash scripts/check_jni_symbols.sh --source-mode`
 
 ## Roadmap
 

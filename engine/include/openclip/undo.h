@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// OpenClip M1 engine — stroke-level command history (tile snapshots).
+#ifndef OPENCLIP_UNDO_H
+#define OPENCLIP_UNDO_H
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+namespace openclip {
+
+class Canvas;
+
+struct TileSnap {
+    std::size_t layer = 0;
+    int tx = 0, ty = 0;
+    std::vector<std::uint8_t> before;
+    std::vector<std::uint8_t> after;
+};
+
+struct StrokeCommand {
+    std::vector<TileSnap> tiles;
+};
+
+// Bounded stroke-level undo/redo stack over Canvas tile snapshots.
+class History {
+public:
+    explicit History(std::size_t maxStrokes = 64) : max_(maxStrokes) {}
+
+    void beginStroke();
+    // Record one tile touched by the in-progress stroke. Captures "before".
+    void touchTile(Canvas& c, std::size_t layer, int tx, int ty);
+    void endStroke(Canvas& c);
+    void cancelStroke(Canvas& c);  // restore "before", drop stroke
+
+    bool canUndo() const { return !done_.empty(); }
+    bool canRedo() const { return !undone_.empty(); }
+    bool undo(Canvas& c);
+    bool redo(Canvas& c);
+    void clear();
+
+private:
+    std::size_t max_;
+    StrokeCommand cur_;
+    bool open_ = false;
+    std::vector<StrokeCommand> done_, undone_;
+};
+
+}  // namespace openclip
+
+#endif

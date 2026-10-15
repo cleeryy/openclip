@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenClip</string>
+    <string name="brush">Brush</string>
+    <string name="eraser">Eraser</string>
+    <string name="opacity">Opacity %1$d%%</string>
+    <string name="layers">Layers</string>
+    <string name="add_layer">Add layer</string>
+    <string name="remove_layer">Remove layer</string>
+    <string name="undo">Undo</string>
+    <string name="redo">Redo</string>
+    <string name="red">Red %1$d</string>
+    <string name="green">Green %1$d</string>
+    <string name="blue">Blue %1$d</string>
+</resources>

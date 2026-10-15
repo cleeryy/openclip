@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenClip</string>
+    <string name="brush">Pinceau</string>
+    <string name="eraser">Gomme</string>
+    <string name="opacity">Opacité %1$d%%</string>
+    <string name="layers">Calques</string>
+    <string name="add_layer">Ajouter un calque</string>
+    <string name="remove_layer">Supprimer le calque</string>
+    <string name="undo">Annuler</string>
+    <string name="redo">Rétablir</string>
+    <string name="red">Rouge %1$d</string>
+    <string name="green">Vert %1$d</string>
+    <string name="blue">Bleu %1$d</string>
+</resources>

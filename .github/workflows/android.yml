@@ -1,0 +1,49 @@
+name: android
+on:
+  push:
+    branches: ["master", "main"]
+    tags: ["v*"]
+  pull_request:
+    paths: ["app/**", ".github/workflows/android.yml", "engine/**"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug
+      - name: JNI symbols cross-check (built libraries)
+        run: bash scripts/check_jni_symbols.sh
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclip-debug
+          path: app/build/outputs/apk/debug/*.apk
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build release APK (debug-signed, installable)
+        run: ./gradlew :app:assembleRelease
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk
+          generate_release_notes: true

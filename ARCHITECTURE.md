@@ -40,6 +40,18 @@ Symbol prefix: `Java_dev_openclip_engine_EngineHost_`
 - `nCompositeInto(handle: Long, pixels: IntArray, width: Int, height: Int)` — full-canvas composite into an ARGB int array for the SurfaceView blit (Phase 1; Phase 2 swaps to AHB/GL image)
 - `nUndo(handle: Long): Boolean` / `nRedo(handle: Long): Boolean`
 
+M1 additions (recorded after the fact here, per the rules above, then
+implemented):
+
+- `nLayerCount(handle: Long): Int`
+- `nSetActiveLayer(handle: Long, index: Int): Int`
+- `nAddLayer(handle: Long, name: String): Int` (name reserved, layers are
+  auto-named in M1)
+
+Brush JSON (shim-defined schema, MyPaint-compatible params; extra keys
+ignored): `{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,
+"color":"#RRGGBB"}`.
+
 Engine owns document truth; the app never caches swapped pixels.
 Layers, filters, selection, vector, animation extend the same pattern
 with explicit additions to `include/openclip/` only.

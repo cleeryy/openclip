@@ -1,0 +1,22 @@
+name: engine
+on:
+  push:
+    paths: ["engine/**", ".github/workflows/ci-engine.yml"]
+    branches: ["**"]
+  pull_request:
+    paths: ["engine/**", ".github/workflows/ci-engine.yml"]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + test engine (g++)
+        run: cd engine && make && make test
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-test-log
+          path: engine/obj/
+          if-no-files-found: ignore
