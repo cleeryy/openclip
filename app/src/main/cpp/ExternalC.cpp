@@ -357,85 +357,11 @@ Java_dev_openclip_engine_EngineHost_nApplyFilter(JNIEnv* env, jclass,
 // to the M1 ora.h primitives (loadOra/saveOra/exportPng).
 bool loadViaFallback(openclip::Canvas& canvas, const std::string& path,
                      std::string& error) {
-    const std::size_t dot = path.find_last_of('.');
-    std::string ext;
-    if (dot != std::string::npos) {
-        ext = path.substr(dot + 1);
-        for (auto& ch : ext)
-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-    if (ext == "ora") {
-        openclip::Canvas tmp;
-        if (!openclip::loadOra(tmp, path, error)) return false;
-        canvas = std::move(tmp);
-        if (canvas.layerCount() > 0 &&
-            (canvas.activeLayer() < 0 ||
-             canvas.activeLayer() >= static_cast<int>(canvas.layerCount())))
-            canvas.setActiveLayer(0);
-        return true;
-    }
-    if (ext == "png") {
-        // Single flattened layer: decode straight PNG bytes ourselves via
-        // the same stb_image the engine vendors (shim-side include, same
-        // premultiplied model as ora.cpp's decodePng).
-        FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) {
-            error = std::string("png: cannot open ") + path;
-            return false;
-        }
-        std::fseek(f, 0, SEEK_END);
-        const long n = std::ftell(f);
-        std::fseek(f, 0, SEEK_SET);
-        if (n <= 0 || n > 64L * 1024 * 1024) {
-            std::fclose(f);
-            error = "png: bad file size";
-            return false;
-        }
-        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(n));
-        if (std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) {
-            std::fclose(f);
-            error = "png: read failed";
-            return false;
-        }
-        std::fclose(f);
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-#undef STB_IMAGE_IMPLEMENTATION
-        int w = 0, h = 0, comp = 0;
-        unsigned char* data = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &comp, 4);
-        if (!data || w <= 0 || h <= 0 || w > 16384 || h > 16384) {
-            if (data) stbi_image_free(data);
-            error = "png: decode failed";
-            return false;
-        }
-        openclip::Canvas tmp(w, h);
-        const std::size_t li = tmp.addLayer("Background");
-        openclip::Layer& layer = tmp.layer(li);
-        auto& px = layer.surface.bytes();
-        for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
-            const std::uint8_t a = data[i * 4 + 3];
-            px[i * 4 + 3] = a;
-            if (a == 0) {
-                px[i * 4 + 0] = px[i * 4 + 1] = px[i * 4 + 2] = 0;
-            } else if (a == 255) {
-                px[i * 4 + 0] = data[i * 4 + 0];
-                px[i * 4 + 1] = data[i * 4 + 1];
-                px[i * 4 + 2] = data[i * 4 + 2];
-            } else {
-                for (int c = 0; c < 3; ++c) {
-                    int v = (data[i * 4 + c] * a + 127) / 255;
-                    px[i * 4 + c] = static_cast<std::uint8_t>(v > a ? a : v);
-                }
-            }
-        }
-        stbi_image_free(data);
-        canvas = std::move(tmp);
-        canvas.setActiveLayer(0);
-        return true;
-    }
-    error = std::string("unsupported document extension: ") +
-            (ext.empty() ? "(none)" : ext);
-    return false;
+    // document.h is on master since commit 9b9387f; this shim fallback now
+    // delegates every format to the engine (per-extension routing).
+    return openclip::loadPngInto(canvas, path, error) ||
+           openclip::loadOra(canvas, path, error) ||
+           openclip::loadPsd(canvas, path, error);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
