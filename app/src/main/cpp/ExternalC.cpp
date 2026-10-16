@@ -64,21 +64,34 @@ namespace {
  *   {"radius":8, "hardness":0.7, "opaque":1.0, "spacing":0.15,
  *    "color":"#RRGGBB", "mode":"brush"|"eraser"}   // extra keys ignored
  */
+// M7 frames: each frame owns its canvas plus its own undo stacks
+// (full Canvas copies, ARCHITECTURE.md "M7 additions"). Frame is
+// movable/copyable (plain data members only) so the vector can grow,
+// shrink and reallocate. A duplicate copies the canvas pixels with a
+// fresh empty stack: it is a new frame, not a history fork.
+struct Frame {
+    openclip::Canvas canvas;
+    openclip::History history;
+    // M6 vector per-layer path stacks, per frame like raster undo.
+    std::map<std::size_t, openclip::VectorHistory> vectors;
+    Frame() = default;
+    explicit Frame(openclip::Canvas c) : canvas(std::move(c)) {}
+};
 struct Session {
-    // M7 frames: the session canvas is frames[cur] (full Canvas copies,
-    // ARCHITECTURE.md "M7 additions"). Every pre-M7 s->canvas use routes
-    // through frames[cur]; nLoadDocument/nSaveDocument apply to the
-    // current frame only. Strokes stay per-frame in effect: switching,
-    // adding, duplicating or deleting a frame clears the undo history
-    // and disarms mask/vector per-layer state (shim documented).
-    std::vector<openclip::Canvas> frames;
+    // The live document canvas is frames[cur].canvas;
+    // nLoadDocument/nSaveDocument apply to the current frame only.
+    // Switching frames shows the destination frame's stacks (fresh
+    // frames undo nothing, returning preserves them); deleting a frame
+    // drops its stacks with it. The session mask arm stays global but
+    // is disarmed on any frame op (it indexes current-frame layers;
+    // shim documented).
+    std::vector<Frame> frames;
     std::size_t cur = 0;
     // M7 playback rate, app-side only (no engine loop, no JNI symbol;
     // default 12 per the contract; the Compose timeline owns the value).
     float fps = 12.0f;
     bool onionPrev = false, onionNext = false;
     float onionStrength = 0.3f;
-    openclip::History history;
     openclip::BrushParams brush;
     std::uint8_t r = 20, g = 20, b = 20;
     // M2 shim-side brush state (engine takes over when its M2 lane lands):
@@ -94,8 +107,7 @@ struct Session {
     int maskTarget = -1;
     bool maskTargetOn = false;
 
-    // M6 vector layers: per-layer path history (append/erase snapshots).
-    std::map<std::size_t, openclip::VectorHistory> vectorHistories;
+    // (M6 vector stacks now live per-Frame above.)
 
     // M6 rulers (shim transforms input before stamping; ARCHITECTURE.md).
     struct RulEllipse { float cx = 0, cy = 0, rx = 1, ry = 1; };
@@ -107,9 +119,14 @@ struct Session {
 
 Session* asSession(jlong handle) { return reinterpret_cast<Session*>(handle); }
 
-// M7: the live document canvas is always the current frame.
-inline openclip::Canvas& cur(Session* s) { return s->frames[s->cur]; }
-inline const openclip::Canvas& cur(const Session* s) { return s->frames[s->cur]; }
+// M7: the live document canvas is always the current frame's; hist/vecs
+// expose that frame's own undo stacks.
+inline openclip::Canvas& cur(Session* s) { return s->frames[s->cur].canvas; }
+inline const openclip::Canvas& cur(const Session* s) { return s->frames[s->cur].canvas; }
+inline openclip::History& hist(Session* s) { return s->frames[s->cur].history; }
+inline std::map<std::size_t, openclip::VectorHistory>& vecs(Session* s) {
+    return s->frames[s->cur].vectors;
+}
 
 std::string toStd(JNIEnv* env, jstring jstr) {
     if (!jstr) return {};
@@ -190,7 +207,7 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
             std::max(0.0f, std::min(1.0f, dab.opacity)));
         for (int ty = ty0; ty <= ty1; ++ty)
             for (int tx = tx0; tx <= tx1; ++tx)
-                s->history.touchTile(cur(s), layer, tx, ty, true);
+                hist(s).touchTile(cur(s), layer, tx, ty, true);
         openclip::Surface& m = cur(s).layer(layer).mask;
         const float rad = dab.radius > 0.5f ? dab.radius : 0.5f;
         for (int y = y0; y < y1; ++y) {
@@ -215,7 +232,7 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
     }
     for (int ty = ty0; ty <= ty1; ++ty)
         for (int tx = tx0; tx <= tx1; ++tx)
-            s->history.touchTile(cur(s), layer, tx, ty);
+            hist(s).touchTile(cur(s), layer, tx, ty);
     openclip::paintDab(cur(s).layer(layer).surface, dab, s->brush);
     return true;
 }
@@ -298,7 +315,7 @@ Java_dev_openclip_engine_EngineHost_nInit(JNIEnv* env, jclass, jint w, jint h,
             first.layer(0).surface.set(x, y,
                                        openclip::Pixel{255, 255, 255, 255});
     first.setActiveLayer(0);
-    s->frames.push_back(std::move(first));
+    s->frames.push_back(Frame(std::move(first)));
     s->cur = 0;
     return reinterpret_cast<jlong>(s);
 }
@@ -612,7 +629,7 @@ Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
                                                  jfloat pressure) {
     Session* s = asSession(handle);
     if (!s) return 0;
-    s->history.beginStroke();
+    hist(s).beginStroke();
     rulerStamp(s, x, y, pressure);
     // M6: rulers transform input here. Stroke ids are cosmetic (single
     // render thread).
@@ -682,15 +699,13 @@ static jint blitArgb(JNIEnv* env, const std::vector<std::uint8_t>& px,
 }
 
 // M7: per-frame local state reset. Switching/adding/duplicating/
-// deleting a frame (or loading a document into one) clears the undo
-// history and disarms mask/vector per-layer state, which always refers
-// to current-frame layer indexes. ARCHITECTURE.md documents the history
-// reset on nSetFrame; the other frame ops share it (shim documented).
+// deleting a frame (or loading a document into one) disarms the session
+// mask target, which always refers to current-frame layer indexes. Undo
+// stacks need no reset: each frame owns its own (ARCHITECTURE.md "M7
+// additions" — switching shows the destination frame's stack).
 static void resetFrameLocalState(Session* s) {
-    s->history.clear();
     s->maskTarget = -1;
     s->maskTargetOn = false;
-    s->vectorHistories.clear();
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -715,7 +730,7 @@ Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
         std::vector<std::uint8_t> under(px.size(), 0);
         if (wantPrev) {
             openclip::Surface n;
-            s->frames[s->cur - 1].composite(n);
+            s->frames[s->cur - 1].canvas.composite(n);
             if (n.bytes().size() == under.size()) {
                 std::vector<std::uint8_t> t;
                 tintOnion(n, s->onionStrength, t);
@@ -724,7 +739,7 @@ Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
         }
         if (wantNext) {
             openclip::Surface n;
-            s->frames[s->cur + 1].composite(n);
+            s->frames[s->cur + 1].canvas.composite(n);
             if (n.bytes().size() == under.size()) {
                 std::vector<std::uint8_t> t;
                 tintOnion(n, s->onionStrength, t);
@@ -755,7 +770,7 @@ Java_dev_openclip_engine_EngineHost_nStrokeEnd(JNIEnv*, jclass, jlong handle,
                                                jlong /*strokeId*/) {
     Session* s = asSession(handle);
     if (!s) return;
-    s->history.endStroke(cur(s));
+    hist(s).endStroke(cur(s));
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -767,7 +782,7 @@ Java_dev_openclip_engine_EngineHost_nApplyFilter(JNIEnv* env, jclass,
     const std::string fname = toStd(env, name);
     const std::string params = toStd(env, paramsJson);
     // M3 contract: full active layer, undoable like a brush stroke.
-    openclip::History& h = s->history;
+    openclip::History& h = hist(s);
     h.beginStroke();
     const std::size_t layer = static_cast<std::size_t>(
         cur(s).activeLayer() < 0 ? 0 : cur(s).activeLayer());
@@ -827,7 +842,7 @@ Java_dev_openclip_engine_EngineHost_nLoadDocument(JNIEnv* env, jclass,
              cur(s).activeLayer() >=
                  static_cast<int>(cur(s).layerCount())))
             cur(s).setActiveLayer(0);
-        s->history.clear();  // document load resets undo history
+        hist(s).clear();  // document load resets the current frame's undo history
         return JNI_TRUE;
     }
 #else
@@ -839,7 +854,7 @@ Java_dev_openclip_engine_EngineHost_nLoadDocument(JNIEnv* env, jclass,
             return JNI_FALSE;  // canvas left untouched
         }
         cur(s) = std::move(tmp);
-        s->history.clear();  // document load resets undo history
+        hist(s).clear();  // document load resets the current frame's undo history
         return JNI_TRUE;
     }
 #endif
@@ -889,13 +904,13 @@ Java_dev_openclip_engine_EngineHost_nSaveDocument(JNIEnv* env, jclass,
 extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_openclip_engine_EngineHost_nUndo(JNIEnv*, jclass, jlong handle) {
     Session* s = asSession(handle);
-    return s ? static_cast<jboolean>(s->history.undo(cur(s))) : JNI_FALSE;
+    return s ? static_cast<jboolean>(hist(s).undo(cur(s))) : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_openclip_engine_EngineHost_nRedo(JNIEnv*, jclass, jlong handle) {
     Session* s = asSession(handle);
-    return s ? static_cast<jboolean>(s->history.redo(cur(s))) : JNI_FALSE;
+    return s ? static_cast<jboolean>(hist(s).redo(cur(s))) : JNI_FALSE;
 }
 
 // ---- M6 vector layers + rulers (symbols per ARCHITECTURE.md) ----
@@ -936,7 +951,7 @@ Java_dev_openclip_engine_EngineHost_nAppendVectorPath(JNIEnv* env, jclass,
     if (j.empty()) return -1;
     std::string kind = jsonStr(j, "kind");
     kind = (kind == "eraser-stroke") ? "eraser-stroke" : "stroke";
-    openclip::VectorHistory& h = s->vectorHistories[static_cast<std::size_t>(index)];
+    openclip::VectorHistory& h = vecs(s)[static_cast<std::size_t>(index)];
     std::string err;
     const int n = openclip::appendVectorPath(
         cur(s), h, static_cast<std::size_t>(index), j,
@@ -954,7 +969,7 @@ Java_dev_openclip_engine_EngineHost_nVectorEraser(JNIEnv* env, jclass,
         return JNI_FALSE;
     const std::string j = toStd(env, pathJson);
     if (j.empty()) return JNI_FALSE;
-    openclip::VectorHistory& h = s->vectorHistories[static_cast<std::size_t>(index)];
+    openclip::VectorHistory& h = vecs(s)[static_cast<std::size_t>(index)];
     std::string err;
     return openclip::eraseVectorPaths(cur(s), h,
                                       static_cast<std::size_t>(index), j,
@@ -969,8 +984,8 @@ Java_dev_openclip_engine_EngineHost_nUndoVector(JNIEnv*, jclass, jlong handle,
     Session* s = asSession(handle);
     if (!s || index < 0 || index >= static_cast<int>(cur(s).layerCount()))
         return JNI_FALSE;
-    auto it = s->vectorHistories.find(static_cast<std::size_t>(index));
-    if (it == s->vectorHistories.end()) return JNI_FALSE;
+    auto it = vecs(s).find(static_cast<std::size_t>(index));
+    if (it == vecs(s).end()) return JNI_FALSE;
     return openclip::undoVectorPath(cur(s), it->second,
                                     static_cast<std::size_t>(index))
                ? JNI_TRUE
@@ -1042,8 +1057,9 @@ Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
 // same size as the current frame). nDuplicateFrame appends an exact
 // copy of the current frame (all layers, same framebuffer bytes).
 // nDeleteFrame removes index (refused when it is the last frame);
-// the current index clamps, history resets. nSetFrame switches the
-// editing frame (history resets per the contract). nFrameCount returns
+// the current index clamps and the dropped frame takes its undo stacks
+// with it. nSetFrame switches the editing frame (the destination
+// frame's own stacks become visible, per the contract). nFrameCount returns
 // the clip length. nFrameCompositeInto composites ONLY frame index
 // (never the onion ghosts — thumbnails and playback do their own
 // layering); returns pixel count like nCompositeInto, -1 on bad
@@ -1066,7 +1082,7 @@ Java_dev_openclip_engine_EngineHost_nAddFrame(JNIEnv*, jclass, jlong handle) {
                                        openclip::Pixel{255, 255, 255, 255});
     blank.setActiveLayer(0);
     s->frames.insert(s->frames.begin() + static_cast<std::ptrdiff_t>(s->cur) + 1,
-                     std::move(blank));
+                     Frame(std::move(blank)));
     ++s->cur;
     resetFrameLocalState(s);
     return static_cast<jint>(s->cur);
@@ -1077,8 +1093,10 @@ Java_dev_openclip_engine_EngineHost_nDuplicateFrame(JNIEnv*, jclass,
                                                      jlong handle) {
     Session* s = asSession(handle);
     if (!s || s->frames.empty()) return -1;
+    // Full Canvas copy (layers + framebuffers) with a fresh empty undo
+    // stack: a duplicate is a new frame, not a history fork.
     s->frames.insert(s->frames.begin() + static_cast<std::ptrdiff_t>(s->cur) + 1,
-                     cur(s));  // full Canvas copy: layers + framebuffers
+                     Frame(cur(s)));
     ++s->cur;
     resetFrameLocalState(s);
     return static_cast<jint>(s->cur);
@@ -1132,7 +1150,7 @@ Java_dev_openclip_engine_EngineHost_nFrameCompositeInto(JNIEnv* env, jclass,
     if (width <= 0 || height <= 0) return -2;
     if (index < 0 || index >= static_cast<jint>(s->frames.size())) return -2;
     openclip::Surface comp;
-    s->frames[static_cast<std::size_t>(index)].composite(comp);
+    s->frames[static_cast<std::size_t>(index)].canvas.composite(comp);
     std::vector<std::uint8_t> px = comp.bytes();
     return blitArgb(env, px, out, width, height);
 }

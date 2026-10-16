@@ -69,8 +69,9 @@ M7 additions (defined 2026-10-16, animation round):
   fps field default 12, play/pause button (app-side timer, no engine
   loop), onion toggles. Audio track + webm export = M7b post-baseline
   (documented here) — not this round.
-- Undo: strokes stay per-frame (history resets on nSetFrame — shim
-  documented).
+- Undo: strokes stay per-frame — each frame owns its undo stacks, so
+  switching frames shows the destination frame's stack (empty on a
+  fresh frame, preserved on return) — shim documented.
 
 M6 additions (defined 2026-10-15, vector + rulers round):
 
