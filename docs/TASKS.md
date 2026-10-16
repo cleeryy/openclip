@@ -41,9 +41,9 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] Couches vectorielles (chemins resamplés 8px, pression→largeur via PointCurve, gomme vectorielle par intersection, undo path-level)
 - [x] Règles M6: symétrie X/Y, ellipse (projection), segment/perspective à 1 segment (3-point perspective → M9)
 
-## M7 — Animation
-- [ ] Timeline UI, frames, onion skin, lecture fps réel
-- [ ] Piste audio + export séquence/webm
+## M7 — Animation (clos: 17/17 émulateur local KVM, CI android verte run 38906341149, engine local 55/55)
+- [x] Timeline UI, frames, onion skin, lecture fps réel (frames=full Canvas copies, undo stacks par frame — fix frameSwitchIsolatesStrokes commit 129e660, onion prev/next, TimelineStrip 96px + fps slider)
+- [ ] Piste audio + export séquence/webm (= M7b, lot suivant)
 
 ## M8 — IA
 - [ ] Super-résolution + débruitage via ONNX Runtime (poids libres)
@@ -74,3 +74,4 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-15 (6): M6 clos — vector layers + rulers, 13/13 emulator (run 38815184126); engine 55/55 (a65b39f). CI emulator-resources fix (bound RAM + swiftshader_indirect) a supprimé les crashes system (run 38813808271 vert).
 - 2026-10-16: M6 clos — vector layers + rulers, 13/13 emulator (run 38815184126). Fix CI stabilité émulateur (RAM bornée + swiftshader_indirect, run 38813808271 vert).
 - 2026-10-16 (2): Emulateur = gate LOCAL desormais (`scripts/emutest.sh`, suite instrumentee) ; job emulateur retire de GitHub CI (trop lent: timeout 1h). CI GitHub = engine tests + build APK debug/androidTest + JNI symbols, avec concurrency auto-cancel. M7: run local en cours de validation (17 tests).
+- 2026-10-16 (3): M7 clos — undo per-frame (commit 129e660), 17/17 emulateur local KVM (boot 117s, suite 42s) ; CI android verte run 38906341149 ; engine 55/55 local via prepush. Reste M7b (audio + webm).
