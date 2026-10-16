@@ -509,8 +509,10 @@ class EngineConformanceTest {
     fun frameSwitchIsolatesStrokes() {
         val handle = EngineHost.nInit(w, h, 160f)
         try {
-            assertEquals(1, EngineHost.nAddFrame(handle))
-            assertTrue(EngineHost.nSetFrame(handle, 1))
+            assertEquals("addFrame must append and select frame 1",
+                         1, EngineHost.nAddFrame(handle))
+            assertTrue("switch to frame 1 must succeed",
+                       EngineHost.nSetFrame(handle, 1))
             EngineHost.nSetBrush(
                 handle,
                 """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
@@ -521,22 +523,30 @@ class EngineConformanceTest {
             }
             EngineHost.nStrokeEnd(handle, sid)
             val onFrame1 = IntArray(w * h)
-            assertEquals(w * h, EngineHost.nCompositeInto(handle, onFrame1, w, h))
-            assertTrue(onFrame1.any { it != -1 })
+            assertEquals("composite must fill the buffer", w * h,
+                         EngineHost.nCompositeInto(handle, onFrame1, w, h))
+            assertTrue("stroke must be visible on frame 1 (colored pixels)",
+                       onFrame1.any { it != -1 })
 
-            assertTrue(EngineHost.nSetFrame(handle, 0))
+            assertTrue("switch back to frame 0 must succeed",
+                       EngineHost.nSetFrame(handle, 0))
             val onFrame0 = IntArray(w * h)
-            assertEquals(w * h, EngineHost.nCompositeInto(handle, onFrame0, w, h))
+            assertEquals("composite must fill the buffer", w * h,
+                         EngineHost.nCompositeInto(handle, onFrame0, w, h))
             assertTrue("frame 0 must stay blank white", onFrame0.all { it == -1 })
             // History reset on switch: nothing to undo on frame 0.
             assertFalse(EngineHost.nUndo(handle))
 
             // Back on frame 1 the stroke is still there and undoable.
-            assertTrue(EngineHost.nSetFrame(handle, 1))
+            assertTrue("switch to frame 1 again must succeed",
+                       EngineHost.nSetFrame(handle, 1))
             val back = IntArray(w * h)
-            assertEquals(w * h, EngineHost.nCompositeInto(handle, back, w, h))
-            assertTrue(back.contentEquals(onFrame1))
-            assertTrue(EngineHost.nUndo(handle))
+            assertEquals("composite must fill the buffer", w * h,
+                         EngineHost.nCompositeInto(handle, back, w, h))
+            assertTrue("frame 1 stroke must survive the round trip",
+                       back.contentEquals(onFrame1))
+            assertTrue("undo must be available on frame 1 after switch",
+                       EngineHost.nUndo(handle))
             val undone = IntArray(w * h)
             assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
             assertTrue("undo on frame 1 must restore white", undone.all { it == -1 })
@@ -558,7 +568,10 @@ class EngineConformanceTest {
             )
             val dup = EngineHost.nDuplicateFrame(handle)
             assertEquals(1, dup)
-            // Frame 1 keeps a big red patch; frame 0 stays empty.
+            // The duplicate inherits the hidden base (that is why the
+            // pre-dup frame0 is transparent). Re-show it: an animation
+            // frame must be visible to leave ghosts in the onion pass.
+            assertTrue(EngineHost.nSetLayerVisibility(handle, 0, true))
             for (yy in 96..160 step 32) {
                 val s = EngineHost.nStrokeBegin(handle, 96f, yy.toFloat(), 1f)
                 for (x in 96..160 step 8) {
