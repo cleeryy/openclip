@@ -43,7 +43,7 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 
 ## M7 — Animation (clos: 17/17 émulateur local KVM, CI android verte run 38906341149, engine local 55/55)
 - [x] Timeline UI, frames, onion skin, lecture fps réel (frames=full Canvas copies, undo stacks par frame — fix frameSwitchIsolatesStrokes commit 129e660, onion prev/next, TimelineStrip 96px + fps slider)
-- [ ] Piste audio + export séquence/webm (= M7b, lot suivant)
+- [x] Piste audio + export séquence/webm (M7b clos : ClipAudio MediaPlayer + ExportWebm MediaCodec VP8/MediaMuxer app-side, SAF audio→cache ; 19/19 local KVM, CI android run 38983403837)
 
 ## M8 — IA
 - [ ] Super-résolution + débruitage via ONNX Runtime (poids libres)
