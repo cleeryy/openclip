@@ -111,8 +111,16 @@ done
 say "boot gate passed ($((SECONDS / 1))s elapsed)"
 
 # ---------- install + run ----------
-adb -s "$SERIAL" install -r -t "$APP_APK" >/dev/null
-adb -s "$SERIAL" install -r -t "$TEST_APK" >/dev/null
+install_retry() {
+  local apk="$1"
+  for i in 1 2 3; do
+    if adb -s "$SERIAL" install -r -t "$apk" >/dev/null 2>&1; then return 0; fi
+    echo "[emutest] install retry $i for $(basename "$apk")" >&2
+    sleep 15
+  done
+  return 1
+}
+install_retry "$APP_APK" && install_retry "$TEST_APK"
 say "installed app + test APKs; running suite"
 adb -s "$SERIAL" shell am instrument -w -r \
   dev.openclip.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee "$OUT_LOG" || true
