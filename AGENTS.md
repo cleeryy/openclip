@@ -15,5 +15,12 @@
 - No external C++ frameworks; single-file vendored headers only, logged
   in `engine/third_party/README.md` with license and origin URL.
 - Commits: concise imperative subject lines; never include binaries.
-- CI must pass before pushes: engine Linux build + tests, Android debug
-  APK build, JNI symbols check.
+- Before pushing: `bash scripts/prepush.sh` (engine tests, JNI symbol
+  contract, Kotlin + NDK compile).
+- GitHub CI (every commit/PR): engine Linux build + tests, Android debug
+  APK + instrumented test APK build, JNI symbols cross-check. The
+  emulator suite is intentionally NOT on GitHub CI — it runs locally.
+- Emulator conformance gate (before closing a milestone):
+  `bash scripts/emutest.sh` on the dev box must end with `OK (N tests)`.
+  It boots the x86_64 AVD (TCG software mode when /dev/kvm is absent),
+  installs the built APKs and runs the instrumented suite directly.

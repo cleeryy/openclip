@@ -16,7 +16,12 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            // Device builds keep arm64 phones + x86_64 emulators. The local
+            // emulator gate (scripts/emutest.sh) narrows to x86_64 with
+            // -PciAbi=x86_64 to halve the native build time.
+            val ciAbi = (project.findProperty("ciAbi") as String?)?.trim().orEmpty()
+            if (ciAbi.isNotEmpty()) abiFilters += ciAbi
+            else abiFilters += listOf("arm64-v8a", "x86_64")
         }
         externalNativeBuild {
             cmake {

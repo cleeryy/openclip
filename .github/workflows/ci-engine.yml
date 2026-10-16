@@ -6,16 +6,21 @@ on:
   pull_request:
     paths: ["engine/**", ".github/workflows/ci-engine.yml"]
 
+concurrency:
+  group: engine-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build + test engine (g++)
         run: cd engine && make && make test
       - name: Upload test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: engine-test-log
           path: engine/obj/
