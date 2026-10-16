@@ -48,7 +48,14 @@ import dev.openclip.R
 fun TimelineStrip(
     surface: EngineSurface,
     refreshKey: Int,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    audioName: String? = null,
+    exporting: Boolean = false,
+    onPlayingChange: (Boolean) -> Unit = {},
+    onFpsChange: (Float) -> Unit = {},
+    onImportAudio: () -> Unit = {},
+    onClearAudio: () -> Unit = {},
+    onExportWebm: () -> Unit = {}
 ) {
     var count by remember { mutableStateOf(1) }
     var cur by remember { mutableStateOf(0) }
@@ -165,7 +172,10 @@ fun TimelineStrip(
                 if (cur > 0) cur--
                 refresh()
             }) { Text(stringResource(R.string.frame_delete)) }
-            TextButton(onClick = { playing = !playing }) {
+            TextButton(onClick = {
+                playing = !playing
+                onPlayingChange(playing)
+            }) {
                 Text(
                     if (playing) stringResource(R.string.timeline_pause)
                     else stringResource(R.string.timeline_play)
@@ -180,7 +190,10 @@ fun TimelineStrip(
             )
             Slider(
                 value = fps,
-                onValueChange = { fps = it },
+                onValueChange = {
+                    fps = it
+                    onFpsChange(it)
+                },
                 valueRange = 1f..60f,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -243,6 +256,38 @@ fun TimelineStrip(
                 },
                 modifier = Modifier.fillMaxWidth()
             )
+        }
+        // M7b — clip audio + WebM export row (presentation only; the
+        // MainActivity lane owns import/export, the strip just reports).
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (audioName == null) {
+                TextButton(onClick = onImportAudio) {
+                    Text(stringResource(R.string.audio_import))
+                }
+            } else {
+                Text(
+                    audioName,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1
+                )
+                TextButton(onClick = onClearAudio) {
+                    Text(stringResource(R.string.audio_clear))
+                }
+            }
+            TextButton(
+                enabled = !exporting,
+                onClick = onExportWebm
+            ) {
+                Text(
+                    stringResource(
+                        if (exporting) R.string.exporting
+                        else R.string.export_webm
+                    )
+                )
+            }
         }
     }
     // Keep the strip honest when playback steps outside it.

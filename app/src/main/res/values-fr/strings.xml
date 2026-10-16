@@ -38,7 +38,7 @@
     <string name="export_hint">Choisissez un format (ora / png / psd)</string>
     <string name="export_ok">Enregistré.</string>
     <string name="export_failed">Échec de l’enregistrement.</string>
-    <string name="exporting">En cours…</string>
+    <string name="exporting">Export en cours…</string>
     <string name="file_menu">Fichier</string>
     <string name="import_doc">Ouvrir un document…</string>
     <string name="import_failed">Échec de l’ouverture.</string>
@@ -58,4 +58,8 @@
     <string name="onion_prev">Préc.</string>
     <string name="onion_next">Suiv.</string>
     <string name="onion_strength">Intensité %1$d%%</string>
+    <string name="audio_import">Importer audio</string>
+    <string name="audio_clear">Retirer audio</string>
+    <string name="export_webm">Exporter WebM</string>
+    <string name="audio_failed">Échec de l’import audio.</string>
 </resources>

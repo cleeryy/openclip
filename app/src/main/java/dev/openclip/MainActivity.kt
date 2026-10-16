@@ -5,8 +5,11 @@
 package dev.openclip
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -22,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -30,6 +34,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.openclip.R
+import dev.openclip.media.ClipAudio
+import dev.openclip.media.ExportWebm
 import dev.openclip.ui.ColorPicker
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.ExportDialog
@@ -62,6 +68,13 @@ class MainActivity : ComponentActivity() {
         val showExport = remember { mutableStateOf(false) }
         val exportFormat = remember { mutableStateOf("ora") }
         val ctx = LocalContext.current
+        // M7b: clip audio (session-only) + webm export state. fps mirrors
+        // the strip slider (default 12, contract: no engine symbol).
+        val clipAudio = remember { ClipAudio() }
+        val audioName = remember { mutableStateOf<String?>(null) }
+        val exporting = remember { mutableStateOf(false) }
+        val clipFps = remember { mutableStateOf(12f) }
+        val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
         // M4: SAF bridge. Files go through cacheDir copies so the engine
         // keeps seeing plain filesystem paths only (no Android IO inside
@@ -99,6 +112,101 @@ class MainActivity : ComponentActivity() {
                     } else {
                         status.value = ctx.getString(R.string.export_failed)
                     }
+                }
+            } else if (uri != null) {
+                status.value = ctx.getString(R.string.export_failed)
+            }
+        }
+
+        // M7b: audio import (audio/* → cache copy → ClipAudio attach).
+        val openAudio = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                val name = queryDisplayName(ctx, uri) ?: "audio"
+                val dst = java.io.File(
+                    ctx.cacheDir, "audio-${System.currentTimeMillis()}-$name"
+                )
+                copyTo(ctx, uri, dst)
+                if (clipAudio.attach(dst.absolutePath, name)) {
+                    audioName.value = name
+                    status.value = ctx.getString(R.string.import_ok) + " " + name
+                } else {
+                    dst.delete()
+                    status.value = ctx.getString(R.string.audio_failed)
+                }
+            }
+        }
+
+        // M7b: webm export. Frames pull full-res off the render thread in
+        // index order; the mux runs on a worker thread, status posts back
+        // on the UI thread (M4 cache-file bridge for the SAF uri).
+        fun exportClipFrames(
+            surface: EngineSurface,
+            count: Int,
+            fps: Float,
+            dst: java.io.File,
+            done: (Boolean) -> Unit
+        ) {
+            if (count <= 0) {
+                done(false)
+                return
+            }
+            val acc = mutableListOf<Bitmap>()
+            fun pull(i: Int) {
+                if (i >= count) {
+                    Thread {
+                        var ok = false
+                        try {
+                            ok = ExportWebm.export(acc.toList(), fps, dst)
+                        } catch (_: Exception) {
+                            ok = false
+                        } finally {
+                            acc.forEach { bmp ->
+                                if (!bmp.isRecycled) bmp.recycle()
+                            }
+                            acc.clear()
+                        }
+                        val result = ok
+                        mainHandler.post { done(result) }
+                    }.start()
+                    return
+                }
+                surface.pullFrameFull(i) { bmp ->
+                    if (bmp == null) {
+                        acc.forEach { b ->
+                            if (!b.isRecycled) b.recycle()
+                        }
+                        acc.clear()
+                        done(false)
+                        return@pullFrameFull
+                    }
+                    acc.add(bmp)
+                    pull(i + 1)
+                }
+            }
+            pull(0)
+        }
+
+        val createWebm = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("video/webm")
+        ) { uri: Uri? ->
+            val surface = canvas.value
+            if (uri != null && surface != null && !exporting.value) {
+                exporting.value = true
+                val count = surface.frameCount()
+                val dst = java.io.File(
+                    ctx.cacheDir, "openclip-${System.currentTimeMillis()}.webm"
+                )
+                exportClipFrames(surface, count, clipFps.value, dst) { ok ->
+                    if (ok) {
+                        copyFromTo(ctx, dst, uri)
+                        status.value = ctx.getString(R.string.export_ok)
+                    } else {
+                        status.value = ctx.getString(R.string.export_failed)
+                    }
+                    dst.delete()
+                    exporting.value = false
                 }
             } else if (uri != null) {
                 status.value = ctx.getString(R.string.export_failed)
@@ -161,13 +269,33 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 // M7: timeline strip — full width under the panels so the
-                // thumbnails stay tappable on small screens.
+                // thumbnails stay tappable on small screens. M7b wires
+                // audio + webm export through it (state lives here).
+                DisposableEffect(surface) {
+                    onDispose { clipAudio.clear() }
+                }
                 TimelineStrip(
                     surface = surface,
                     refreshKey = refreshKey.value,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(4.dp)
+                        .padding(4.dp),
+                    audioName = audioName.value,
+                    exporting = exporting.value,
+                    onPlayingChange = { playing ->
+                        if (playing) clipAudio.play() else clipAudio.pause()
+                    },
+                    onFpsChange = { clipFps.value = it },
+                    onImportAudio = { openAudio.launch(arrayOf("audio/*")) },
+                    onClearAudio = {
+                        clipAudio.clear()
+                        audioName.value = null
+                    },
+                    onExportWebm = {
+                        createWebm.launch(
+                            "openclip-${System.currentTimeMillis()}.webm"
+                        )
+                    }
                 )
                 if (status.value.isNotEmpty()) {
                     androidx.compose.material3.Text(

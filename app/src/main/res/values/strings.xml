@@ -70,5 +70,9 @@
     <string name="onion_prev">Prev</string>
     <string name="onion_next">Next</string>
     <string name="onion_strength">Strength %1$d%%</string>
+    <string name="audio_import">Import audio</string>
+    <string name="audio_clear">Clear audio</string>
+    <string name="export_webm">Export WebM</string>
+    <string name="audio_failed">Audio import failed.</string>
     <string name="ok">OK</string>
 </resources>

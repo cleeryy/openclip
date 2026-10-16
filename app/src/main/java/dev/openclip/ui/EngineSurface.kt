@@ -190,12 +190,25 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     // M7 thumbnails: pulled on the render thread (engine state stays
     // single-thread), full-canvas nFrameCompositeInto downscaled to 96px
     // wide app-side, result posted on the UI thread. Null = no engine.
-    private data class ThumbRequest(val index: Int, val onResult: (Bitmap?) -> Unit)
+    private data class ThumbRequest(
+        val index: Int,
+        val onResult: (Bitmap?) -> Unit,
+        val full: Boolean = false
+    )
     private val thumbQueue = ArrayDeque<ThumbRequest>()
 
     fun pullFrameThumbnail(index: Int, onResult: (Bitmap?) -> Unit) {
         if (handle == 0L || !running.get()) { post { onResult(null) }; return }
         synchronized(thumbQueue) { thumbQueue.add(ThumbRequest(index, onResult)) }
+    }
+
+    // M7b export: full-res frame pull on the render thread (same queue
+    // discipline as thumbnails, no downscale). Null = no engine.
+    fun pullFrameFull(index: Int, onResult: (Bitmap?) -> Unit) {
+        if (handle == 0L || !running.get()) { post { onResult(null) }; return }
+        synchronized(thumbQueue) {
+            thumbQueue.add(ThumbRequest(index, onResult, full = true))
+        }
     }
 
     private fun drainThumbQueue() {
@@ -217,11 +230,15 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                         engineWidth, engineHeight, Bitmap.Config.ARGB_8888
                     )
                     full.setPixels(px, 0, engineWidth, 0, 0, engineWidth, engineHeight)
-                    val tw = 96
-                    val th = (96f * engineHeight / engineWidth).toInt().coerceAtLeast(1)
-                    val small = Bitmap.createScaledBitmap(full, tw, th, true)
-                    full.recycle()
-                    small
+                    if (req.full) {
+                        full
+                    } else {
+                        val tw = 96
+                        val th = (96f * engineHeight / engineWidth).toInt().coerceAtLeast(1)
+                        val small = Bitmap.createScaledBitmap(full, tw, th, true)
+                        full.recycle()
+                        small
+                    }
                 }
             } catch (_: Exception) {
                 null

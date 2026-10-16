@@ -73,6 +73,27 @@ M7 additions (defined 2026-10-16, animation round):
   switching frames shows the destination frame's stack (empty on a
   fresh frame, preserved on return) — shim documented.
 
+M7b additions (defined 2026-10-16, audio + webm round):
+
+- No new engine/JNI symbols. M7b is app-side only: frames come from
+  the existing nFrameCompositeInto, audio from platform MediaPlayer.
+- WebM export: app pulls each frame full-res in index order through a
+  MediaCodec VP8 surface-input encoder + MediaMuxer OUTPUT_FORMAT_WEBM
+  at the clip fps (frames paced at 1/fps through a surface input, EOS
+  on last frame). SAF
+  CreateDocument("video/webm") via the M4 cache-file bridge (mux to
+  cache, copy to the SAF uri). Encoder absence or surface-input
+  failure surfaces as export_failed, never a crash.
+- Audio track: one clip-level track, session-only (not stored in ORA).
+  SAF OpenDocument("audio/*") → cache copy. ClipAudio controller
+  (attach/play/pause/stop/release + hasAudio/isPlaying flags);
+  TimelineStrip play drives audio via onPlayingChange; fps flows out
+  via onFpsChange (default 12) for the exporter.
+- Tests (instrumented, +2): webmExportProducesPlayableFile (EBML
+  header 0x1A45DFA3 + size floor on a 3-frame clip) and
+  audioAttachPlayPause (WAV fixture generated in-code, controller
+  state machine; audibility never asserted).
+
 M6 additions (defined 2026-10-15, vector + rulers round):
 
 - Vector layer model (clean-room, no SVG dependency at the engine level):

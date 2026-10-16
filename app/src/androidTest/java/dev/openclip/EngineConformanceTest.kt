@@ -5,11 +5,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package dev.openclip
 
+import android.graphics.Bitmap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.openclip.engine.EngineHost
+import dev.openclip.media.ClipAudio
+import dev.openclip.media.ExportWebm
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -642,6 +648,116 @@ class EngineConformanceTest {
             assertEquals(-2, EngineHost.nFrameCompositeInto(handle, 7, junk, w, h))
         } finally {
             EngineHost.nDispose(handle)
+        }
+    }
+
+    // M7b-18: webm export — a 3-frame clip encodes to a real EBML/webm
+    // file (magic header + size floor). Frames pulled straight from JNI.
+    @Test
+    fun webmExportProducesPlayableFile() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertEquals(1, EngineHost.nAddFrame(handle))
+            assertEquals(2, EngineHost.nAddFrame(handle))
+            assertEquals(3, EngineHost.nFrameCount(handle))
+            val colors = arrayOf("#141414", "#C80000", "#0014C8")
+            for (i in 0 until 3) {
+                assertTrue(EngineHost.nSetFrame(handle, i))
+                EngineHost.nSetBrush(
+                    handle,
+                    """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"${colors[i]}"}"""
+                )
+                val sid = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+                for (x in 70..170 step 5) {
+                    EngineHost.nStrokeMove(handle, sid, x.toFloat(), 128f, 1f)
+                }
+                EngineHost.nStrokeEnd(handle, sid)
+            }
+            val frames = (0 until 3).map { i ->
+                val px = IntArray(w * h)
+                assertEquals(w * h, EngineHost.nFrameCompositeInto(handle, i, px, w, h))
+                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                bmp.setPixels(px, 0, w, 0, 0, w, h)
+                bmp
+            }
+            val out = File(composeRule.activity.cacheDir, "m7b-test.webm")
+            if (out.exists()) out.delete()
+            assertTrue("webm export must succeed", ExportWebm.export(frames, 12f, out))
+            assertTrue("webm file must exist", out.exists())
+            assertTrue(
+                "webm file must clear 512B, got ${out.length()}",
+                out.length() > 512
+            )
+            val head = ByteArray(4)
+            FileInputStream(out).use { it.read(head) }
+            assertEquals("EBML header magic", 0x1A, head[0].toInt() and 0xFF)
+            assertEquals("EBML header magic", 0x45, head[1].toInt() and 0xFF)
+            assertEquals("EBML header magic", 0xDF, head[2].toInt() and 0xFF)
+            assertEquals("EBML header magic", 0xA3, head[3].toInt() and 0xFF)
+            frames.forEach { if (!it.isRecycled) it.recycle() }
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // M7b-19: audio controller state machine on a generated WAV fixture
+    // (audibility never asserted — headless emulator).
+    @Test
+    fun audioAttachPlayPause() {
+        val wav = File(composeRule.activity.cacheDir, "m7b-tone.wav")
+        writeSineWav(wav)
+        val audio = ClipAudio()
+        try {
+            assertTrue("wav must attach", audio.attach(wav.absolutePath, "tone.wav"))
+            assertTrue(audio.hasAudio)
+            assertEquals("tone.wav", audio.fileName)
+            assertTrue(
+                "duration must be positive, got ${audio.durationMs()}",
+                audio.durationMs() > 0
+            )
+            assertTrue("play must not throw", audio.play())
+            assertTrue(audio.isPlaying)
+            audio.pause()
+            assertFalse(audio.isPlaying)
+        } finally {
+            audio.clear()
+        }
+        assertFalse(audio.hasAudio)
+    }
+
+    // 8 kHz mono 16-bit 1 s 440 Hz sine: generated in-code so no binary
+    // asset ever enters the repo (clean-room rule).
+    private fun writeSineWav(dst: File) {
+        val rate = 8000
+        val n = rate
+        val pcm = ByteArray(n * 2)
+        for (i in 0 until n) {
+            val v = (Math.sin(2.0 * Math.PI * 440.0 * i / rate) * 10000).toInt()
+            pcm[i * 2] = (v and 0xFF).toByte()
+            pcm[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        fun wavInt(v: Int): ByteArray = byteArrayOf(
+            (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
+            ((v shr 16) and 0xFF).toByte(), ((v shr 24) and 0xFF).toByte()
+        )
+        fun wavShort(v: Int): ByteArray = byteArrayOf(
+            (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte()
+        )
+        FileOutputStream(dst).use { o ->
+            o.write("RIFF".toByteArray())
+            o.write(wavInt(36 + pcm.size))
+            o.write("WAVE".toByteArray())
+            o.write("fmt ".toByteArray())
+            o.write(wavInt(16))
+            o.write(wavShort(1))
+            o.write(wavShort(1))
+            o.write(wavInt(rate))
+            o.write(wavInt(rate * 2))
+            o.write(wavShort(2))
+            o.write(wavShort(16))
+            o.write("data".toByteArray())
+            o.write(wavInt(pcm.size))
+            o.write(pcm)
         }
     }
 }
