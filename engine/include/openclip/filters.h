@@ -66,6 +66,30 @@ std::vector<std::string> filterNames();
 bool applyFilter(Surface& s, const std::string& name,
                  const std::string& paramsJson, std::string& error);
 
+// M8 adjustment-layer ops (ARCHITECTURE.md "M8 additions", clean-room).
+// Known adjustment type names (exact match): "brightness", "contrast",
+// "hue", "saturation", "gradientMap". Anything else is identity.
+bool isKnownAdjustType(const std::string& type);
+
+// Parse an nSetLayerAdjustment descriptor object. Unknown keys are
+// ignored, missing keys fall back to defaults (type "", amount 0,
+// stops "") — the M3 params rule. amount is clamped to [-1,1] (NaN ->
+// 0). Always succeeds; unknown types are kept verbatim (composite
+// treats them as identity).
+void parseAdjustDescriptor(const std::string& json, std::string& type,
+                           double& amount, std::string& stops);
+
+// Transform one straight-RGB pixel (r/g/b in 0..255, modified in place)
+// by the named adjustment; unknown type = identity no-op. amount is in
+// [-1,1] (gradientMap ignores it); stops is the gradientMap stops spec
+// (same encoding as the gradientMap filter; unparseable stops =
+// identity). No clamping here: the caller (composite walk) unpremulti-
+// plies before and repremultiplies + clamps to [0,alpha] after, so the
+// M3 alpha contract holds (alpha untouched).
+void applyAdjustOp(const std::string& type, double amount,
+                   const std::string& stops, double& r, double& g,
+                   double& b);
+
 }  // namespace openclip
 
 #endif

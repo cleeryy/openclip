@@ -94,6 +94,42 @@ M7b additions (defined 2026-10-16, audio + webm round):
   audioAttachPlayPause (WAV fixture generated in-code, controller
   state machine; audibility never asserted).
 
+M8 additions (defined 2026-10-16, AI + adjustment round):
+
+- Adjustment layers (engine, non-destructive): nSetLayerAdjustment
+  (handle, index, json|null) turns a layer into an adjustment layer
+  (null clears the descriptor). JSON: {"type":"brightness"|"contrast"|
+  "hue"|"saturation"|"gradientMap", "amount": -1..1 (gradientMap
+  ignores amount), "stops":"[\"#RRGGBB:pos\",...]" (gradientMap, same
+  encoding as the M3 filter)}. Unknown keys ignored, missing keys use
+  code defaults — the M3 params rule.
+- Semantics: an adjustment layer paints no pixels; at composite time,
+  when the per-pixel layer walk reaches it, its op applies to the
+  accumulated output value of everything below (top-level loop and
+  group-child loop alike). The pixel is UNPREMULTIPLIED, transformed,
+  REPREMULTIPLIED and clamped to [0,alpha] (alpha untouched — the M3
+  alpha contract). brightness: +amount*128 on rgb. contrast: scale
+  1+amount around 128. saturation: mix toward luma by factor 1+amount.
+  hue: rotate by amount*180deg (HSL). gradientMap: stops ramp by
+  luminance. Mask/clip/opacity/visibility apply exactly as for normal
+  layers. Descriptor survives resize; nLayerState JSON gains
+  "adjust":{...}|null. ORA round trip persists the descriptor
+  (new <layer> attrs; load of unknown type ignores the descriptor).
+- AI super-resolution (app only — no engine/JNI symbols): dependency
+  com.microsoft.onnxruntime:onnxruntime-android:1.31.0 (MIT) and the
+  bundled model assets/models/super-resolution-10.onnx (ESPCN x3,
+  ~240KB, Apache-2.0, https://huggingface.co/onnxmodelzoo/
+  super-resolution-10). Flow: current-frame composite bitmap -> luma
+  SR x3 + bicubic chroma -> PNG in cache -> nLoadDocument (M7: load
+  replaces the current frame, so the clip gains the upscaled frame
+  with no new symbols). Model bytes load via createSession(byte[]);
+  failure surfaces as a status string, never a crash. The model input
+  is FIXED 224x224 (the card's dynamic claim is wrong): the luma plane
+  is bicubic-resized to 224 and the x3 output back to exactly 3w x 3h;
+  canvases far from 224px lose some SR crispness (honest limit).
+  Denoise and auto-colorize are deferred (no permissively-licensed
+  mobile weights confirmed) — honest note, revisit in M8b.
+
 M6 additions (defined 2026-10-15, vector + rulers round):
 
 - Vector layer model (clean-room, no SVG dependency at the engine level):

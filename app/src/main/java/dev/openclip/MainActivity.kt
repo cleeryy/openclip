@@ -34,6 +34,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.openclip.R
+import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
 import dev.openclip.ui.ColorPicker
@@ -188,6 +189,60 @@ class MainActivity : ComponentActivity() {
             pull(0)
         }
 
+        // M8: AI x3 super-resolution of the current frame (ONNX, app-side;
+        // result loads back into the frame via the M7 load contract).
+        val aiBusy = remember { mutableStateOf(false) }
+        fun aiUpscaleFrame(surface: EngineSurface, frameIdx: Int) {
+            if (aiBusy.value || exporting.value) return
+            aiBusy.value = true
+            surface.pullFrameFull(frameIdx) { bmp ->
+                if (bmp == null) {
+                    aiBusy.value = false
+                    status.value = ctx.getString(R.string.ai_failed)
+                    return@pullFrameFull
+                }
+                Thread {
+                    var ok = false
+                    try {
+                        val up = AiUpscaler.upscale(ctx, bmp)
+                        if (up != null) {
+                            val png = java.io.File(
+                                ctx.cacheDir, "ai-${System.currentTimeMillis()}.png"
+                            )
+                            val wrote = png.outputStream().use { o ->
+                                up.compress(
+                                    android.graphics.Bitmap.CompressFormat.PNG, 100, o
+                                )
+                            }
+                            up.recycle()
+                            if (wrote) {
+                                ok = true
+                                val p = png.absolutePath
+                                surface.loadFrom(p) { loaded ->
+                                    java.io.File(p).delete()
+                                    aiBusy.value = false
+                                    status.value = if (loaded)
+                                        ctx.getString(R.string.ai_upscaled)
+                                    else ctx.getString(R.string.ai_failed)
+                                    refreshKey.value++
+                                }
+                            } else {
+                                java.io.File(png.absolutePath).delete()
+                            }
+                        }
+                    } catch (_: Exception) {
+                        ok = false
+                    } finally {
+                        if (!bmp.isRecycled) bmp.recycle()
+                    }
+                    if (!ok) {
+                        aiBusy.value = false
+                        status.value = ctx.getString(R.string.ai_failed)
+                    }
+                }.start()
+            }
+        }
+
         val createWebm = rememberLauncherForActivityResult(
             ActivityResultContracts.CreateDocument("video/webm")
         ) { uri: Uri? ->
@@ -295,6 +350,9 @@ class MainActivity : ComponentActivity() {
                         createWebm.launch(
                             "openclip-${System.currentTimeMillis()}.webm"
                         )
+                    },
+                    onAiUpscale = { frameIdx ->
+                        aiUpscaleFrame(surface, frameIdx)
                     }
                 )
                 if (status.value.isNotEmpty()) {

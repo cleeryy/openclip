@@ -75,4 +75,14 @@
     <string name="export_webm">Export WebM</string>
     <string name="audio_failed">Audio import failed.</string>
     <string name="ok">OK</string>
+    <string name="adjustment_brightness">Brightness</string>
+    <string name="adjustment_contrast">Contrast</string>
+    <string name="adjustment_hue">Hue</string>
+    <string name="adjustment_saturation">Saturation</string>
+    <string name="adjustment_gradient">Gradient</string>
+    <string name="adjustment_clear">Clear</string>
+    <string name="adjustment_amount">Amount %1$d%%</string>
+    <string name="ai_upscale">AI ×3</string>
+    <string name="ai_upscaled">AI upscale applied.</string>
+    <string name="ai_failed">AI upscale failed.</string>
 </resources>

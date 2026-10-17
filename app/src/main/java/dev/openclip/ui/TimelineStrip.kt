@@ -55,7 +55,8 @@ fun TimelineStrip(
     onFpsChange: (Float) -> Unit = {},
     onImportAudio: () -> Unit = {},
     onClearAudio: () -> Unit = {},
-    onExportWebm: () -> Unit = {}
+    onExportWebm: () -> Unit = {},
+    onAiUpscale: (Int) -> Unit = {}
 ) {
     var count by remember { mutableStateOf(1) }
     var cur by remember { mutableStateOf(0) }
@@ -287,6 +288,12 @@ fun TimelineStrip(
                         else R.string.export_webm
                     )
                 )
+            }
+            TextButton(
+                enabled = !exporting,
+                onClick = { onAiUpscale(cur) }
+            ) {
+                Text(stringResource(R.string.ai_upscale))
             }
         }
     }

@@ -54,6 +54,16 @@ private val BLEND_NAMES = listOf(
     "svg:plus", "svg:soft-light"
 )
 
+// M8 — adjustment descriptor types (engine contract: "gradientMap"
+// carries stops; amount is ignored for it).
+private val ADJUST_TYPES = listOf(
+    "brightness" to R.string.adjustment_brightness,
+    "contrast" to R.string.adjustment_contrast,
+    "hue" to R.string.adjustment_hue,
+    "saturation" to R.string.adjustment_saturation,
+    "gradientMap" to R.string.adjustment_gradient
+)
+
 private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
     val kids = mutableListOf<LayerInfo>()
     val arr = o.optJSONArray("children")
@@ -99,6 +109,10 @@ fun LayerPanel(
     var maskTarget by remember { mutableStateOf(-1) }
     var renameIndex by remember { mutableStateOf<Int?>(null) }
     var renameText by remember { mutableStateOf("") }
+    // M8 — selected-layer adjustment descriptor mirror (engine truth
+    // via layerState "adjust"; null = no adjustment).
+    var adjustType by remember { mutableStateOf<String?>(null) }
+    var adjustAmount by remember { mutableStateOf(0f) }
     val expanded = remember { mutableStateMapOf<Int, Boolean>() }
 
     fun refresh() {
@@ -114,9 +128,41 @@ fun LayerPanel(
                 }
             }
             layers = out
+            // M8: mirror the selected layer's adjustment descriptor
+            // (tolerant read — absent/null means no adjustment).
+            try {
+                if (arr != null && active >= 0 && active < arr.length()) {
+                    val entry = arr.getJSONObject(active)
+                    val s = entry.optJSONObject("self") ?: entry
+                    val adj = s.optJSONObject("adjust")
+                        ?: entry.optJSONObject("adjust")
+                    if (adj == null) {
+                        adjustType = null
+                        adjustAmount = 0f
+                    } else {
+                        adjustType = adj.optString("type", "").ifEmpty { null }
+                        adjustAmount = adj.optDouble("amount", 0.0)
+                            .toFloat().coerceIn(-1f, 1f)
+                    }
+                } else {
+                    adjustType = null
+                    adjustAmount = 0f
+                }
+            } catch (_: Exception) {
+                adjustType = null
+                adjustAmount = 0f
+            }
         } catch (_: Exception) {
             layers = emptyList()
         }
+    }
+
+    fun pushAdjust(type: String, amount: Float) {
+        val idx = active
+        surface.layerOp {
+            setLayerAdjustment(idx, """{"type":"$type","amount":$amount}""")
+        }
+        refresh()
     }
 
     LaunchedEffect(refreshKey) { refresh() }
@@ -203,6 +249,59 @@ fun LayerPanel(
                 surface.layerOp { addVectorLayer("Vector") }
                 refresh()
             }) { Text(stringResource(R.string.layer_add_vector)) }
+        }
+        // M8 — adjustment cluster for the selected layer: five type
+        // toggles + Clear, and a -1..1 amount slider below the toggles
+        // (gradient hides the slider; its amount is ignored per contract).
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ADJUST_TYPES.forEach { (type, res) ->
+                TextButton(onClick = { pushAdjust(type, adjustAmount) }) {
+                    Text(
+                        (if (adjustType == type) "[" else "") +
+                            stringResource(res) +
+                            (if (adjustType == type) "]" else ""),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+            TextButton(onClick = {
+                val idx = active
+                surface.layerOp { setLayerAdjustment(idx, null) }
+                refresh()
+            }) {
+                Text(
+                    stringResource(R.string.adjustment_clear),
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+        if (adjustType != null && adjustType != "gradientMap") {
+            val t = adjustType
+            if (t != null) {
+                var amt by remember(active, t, adjustAmount) {
+                    mutableStateOf(adjustAmount.coerceIn(-1f, 1f))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(
+                            R.string.adjustment_amount,
+                            (amt * 100).toInt()
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Slider(
+                        value = amt,
+                        onValueChange = { amt = it },
+                        onValueChangeFinished = { pushAdjust(t, amt) },
+                        valueRange = -1f..1f,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
         }
         Row(
             horizontalArrangement = Arrangement.spacedBy(4.dp),

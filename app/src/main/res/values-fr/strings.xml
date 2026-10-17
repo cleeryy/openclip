@@ -62,4 +62,14 @@
     <string name="audio_clear">Retirer audio</string>
     <string name="export_webm">Exporter WebM</string>
     <string name="audio_failed">Échec de l’import audio.</string>
+    <string name="adjustment_brightness">Luminosité</string>
+    <string name="adjustment_contrast">Contraste</string>
+    <string name="adjustment_hue">Teinte</string>
+    <string name="adjustment_saturation">Saturation</string>
+    <string name="adjustment_gradient">Dégradé</string>
+    <string name="adjustment_clear">Effacer</string>
+    <string name="adjustment_amount">Intensité %1$d%%</string>
+    <string name="ai_upscale">IA ×3</string>
+    <string name="ai_upscaled">Upscale IA appliqué.</string>
+    <string name="ai_failed">Échec de l’upscale IA.</string>
 </resources>

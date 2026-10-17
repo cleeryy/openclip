@@ -592,6 +592,19 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
     out += l.hasMask ? "true" : "false";
     out += ",\"clipped\":";
     out += l.clipped ? "true" : "false";
+    // M8: adjustment descriptor (absent = normal layer; the app parses
+    // tolerantly).
+    if (!l.adjustType.empty()) {
+        out += ",\"adjust\":{\"type\":";
+        appendJsonStr(out, l.adjustType);
+        out += ",\"amount\":";
+        char abuf[32];
+        std::snprintf(abuf, sizeof abuf, "%g", l.adjustAmount);
+        out += abuf;
+        out += ",\"stops\":";
+        appendJsonStr(out, l.adjustStops);
+        out += "}";
+    }
     out += "}";
 }
 
@@ -621,6 +634,29 @@ Java_dev_openclip_engine_EngineHost_nLayerState(JNIEnv* env, jclass,
     }
     out += "]}";
     return env->NewStringUTF(out.c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerAdjustment(JNIEnv* env, jclass,
+                                                        jlong handle,
+                                                        jint index,
+                                                        jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
+    const std::string j = json ? toStd(env, json) : std::string();
+    if (j.empty()) {  // null/empty clears the descriptor
+        l.adjustType.clear();
+        l.adjustAmount = 0.0;
+        l.adjustStops.clear();
+        return JNI_TRUE;
+    }
+    openclip::parseAdjustDescriptor(j, l.adjustType, l.adjustAmount,
+                                    l.adjustStops);
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jlong JNICALL

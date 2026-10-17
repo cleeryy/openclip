@@ -4,6 +4,7 @@
 #include "openclip/ora.h"
 
 #include "openclip/canvas.h"
+#include "openclip/filters.h"
 
 #include <cctype>
 #include <cstdio>
@@ -151,7 +152,13 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
             << l.opacity << "\" visibility=\""
             << (l.visible ? "visible" : "hidden") << "\" composite-op=\""
             << blendToName(l.blend) << "\" isolation=\""
-            << (l.passThrough ? "auto" : "isolated") << "\">\n";
+            << (l.passThrough ? "auto" : "isolated") << "\"";
+        if (!l.adjustType.empty()) {
+            xml << " adjust-type=\"" << xmlEscape(l.adjustType) << "\""
+                << " adjust-amount=\"" << l.adjustAmount << "\""
+                << " adjust-stops=\"" << xmlEscape(l.adjustStops) << "\"";
+        }
+        xml << ">\n";
         writeLayerList(l.children, xml, entries, idx, indent + 1,
                        depth + 1, error, ok);
         xml << pad << "</stack>\n";
@@ -162,7 +169,15 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
     xml << pad << "<layer name=\"" << xmlEscape(l.name) << "\" src=\"" << src
         << "\" opacity=\"" << l.opacity << "\" visibility=\""
         << (l.visible ? "visible" : "hidden") << "\" composite-op=\""
-        << blendToName(l.blend) << "\"/>\n";
+        << blendToName(l.blend) << "\"";
+    // M8: adjustment descriptor persists as attrs (round trips through
+    // tagAttr/xmlUnescape on load).
+    if (!l.adjustType.empty()) {
+        xml << " adjust-type=\"" << xmlEscape(l.adjustType) << "\""
+            << " adjust-amount=\"" << l.adjustAmount << "\""
+            << " adjust-stops=\"" << xmlEscape(l.adjustStops) << "\"";
+    }
+    xml << "/>\n";
     std::vector<std::uint8_t> png;
     if (!encodePng(l.surface, png)) {
         error = "ora: PNG encode failed for layer " + l.name;
@@ -192,6 +207,27 @@ bool attrFloat(const std::string& def, float& out) {
         return false;
     }
     return true;
+}
+
+// M8: read the adjustment descriptor attrs into l when present AND the
+// type is known; unknown or missing = layer loads as normal (contract).
+void applyAdjustAttrs(const std::string& xml, std::size_t tagStart,
+                      Layer& l) {
+    std::string t, a, s;
+    if (!tagAttr(xml, tagStart, "adjust-type", t) || t.empty()) return;
+    if (!openclip::isKnownAdjustType(t)) return;
+    l.adjustType = t;
+    if (tagAttr(xml, tagStart, "adjust-amount", a)) {
+        try {
+            l.adjustAmount = std::stod(a);
+        } catch (...) {
+            l.adjustAmount = 0.0;
+        }
+        if (l.adjustAmount < -1.0) l.adjustAmount = -1.0;
+        if (l.adjustAmount > 1.0) l.adjustAmount = 1.0;
+    }
+    tagAttr(xml, tagStart, "adjust-stops", s);
+    l.adjustStops = s;
 }
 
 bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
@@ -247,6 +283,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 l.visible = (vis != "hidden" && vis != "false" && vis != "0");
                 l.blend =
                     blendFromName(blendVectorValue(comp).c_str());
+                applyAdjustAttrs(xml, lOpen, l);
                 l.surface.resize(tmp.width(), tmp.height());
                 if (s.width() == tmp.width() && s.height() == tmp.height()) {
                     l.surface.bytes().swap(s.bytes());
@@ -296,6 +333,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 g.blend =
                     blendFromName(blendVectorValue(comp).c_str());
                 g.passThrough = (iso != "isolated");
+                applyAdjustAttrs(xml, lOpen, g);
                 out.push_back(std::move(g));
                 continue;
             }
@@ -337,6 +375,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
             g.visible = (vis != "hidden" && vis != "false" && vis != "0");
             g.blend = blendFromName(blendVectorValue(comp).c_str());
             g.passThrough = (iso != "isolated");
+            applyAdjustAttrs(xml, lOpen, g);
             if (!loadLayerList(xml, close + 1, gEnd, entries, tmp, depth + 1,
                                g.children, error))
                 return false;

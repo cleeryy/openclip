@@ -29,6 +29,16 @@ struct Layer {
     // target already has painted alpha; see compositeInto).
     bool clipped = false;
 
+    // M8: adjustment layer descriptor (ARCHITECTURE.md "M8 additions").
+    // Empty adjustType = normal layer. A set type means the layer paints
+    // no pixels; at composite time its op transforms the accumulated
+    // output of everything below (unpremultiplied, repremultiplied,
+    // clamped to [0,alpha], alpha untouched). Unknown types are stored
+    // but behave as identity. Plain data: survives resize/copy/ORA.
+    std::string adjustType;
+    double adjustAmount = 0.0;
+    std::string adjustStops;
+
     // M6: vector layer state. isVector layers store resolution-
     // independent paths (vectorData) and rasterize them at composite
     // time into a temp surface that flows through the same

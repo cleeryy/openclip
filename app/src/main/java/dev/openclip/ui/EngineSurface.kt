@@ -127,6 +127,12 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     fun setLayerName(index: Int, name: String) =
         if (handle != 0L) EngineHost.nSetLayerName(handle, index, name) else false
 
+    // M8 adjustment layers (M8 symbol; null/empty json clears the
+    // descriptor — ARCHITECTURE.md "M8 additions").
+    fun setLayerAdjustment(index: Int, json: String?) =
+        if (handle != 0L) EngineHost.nSetLayerAdjustment(handle, index, json)
+            .also { if (it) needsComposite = true } else false
+
     fun layerOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
     // M6 vector layers + rulers (thin wrappers over the exact symbols).

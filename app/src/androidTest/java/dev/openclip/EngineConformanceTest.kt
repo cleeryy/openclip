@@ -10,7 +10,9 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import dev.openclip.engine.EngineHost
+import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
 import java.io.File
@@ -723,6 +725,38 @@ class EngineConformanceTest {
             audio.clear()
         }
         assertFalse(audio.hasAudio)
+    }
+
+    // M8-20: AI x3 super-resolution — a deterministic two-tone bitmap
+    // upscales to exactly 3x with real pixel content (luma follows the
+    // source's bright/dark split; no crash on x86_64 CPU EP).
+    @Test
+    fun aiSuperResTriplesBitmap() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val src = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 64) {
+            for (x in 0 until 64) {
+                val v = if (y < 32) 240 else 15  // top bright, bottom dark
+                src.setPixel(x, y, (0xFF shl 24) or (v shl 16) or (v shl 8) or v)
+            }
+        }
+        val up = AiUpscaler.upscale(ctx, src)
+        assertNotNull(
+            "ai upscale must produce a bitmap: ${AiUpscaler.lastError}",
+            up
+        )
+        assertEquals("width must triple", 192, up!!.width)
+        assertEquals("height must triple", 192, up.height)
+        val top = up.getPixel(32, 16)
+        val bottom = up.getPixel(32, 176)
+        assertTrue("top region must stay bright", (top and 0xFF) > 100)
+        assertTrue("bottom region must stay dark", (bottom and 0xFF) < 120)
+        assertTrue(
+            "bright/dark split must survive",
+            ((top and 0xFF) - (bottom and 0xFF)) > 60
+        )
+        src.recycle()
+        if (!up.isRecycled) up.recycle()
     }
 
     // 8 kHz mono 16-bit 1 s 440 Hz sine: generated in-code so no binary

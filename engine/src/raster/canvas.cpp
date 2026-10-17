@@ -2,8 +2,10 @@
 #include "openclip/canvas.h"
 
 #include "openclip/blend.h"
+#include "openclip/filters.h"
 #include "openclip/vector.h"
 
+#include <cmath>
 #include <utility>
 
 namespace openclip {
@@ -66,6 +68,110 @@ inline bool stencilPainted(const std::vector<Layer>& layers,
     return out.get(x, y).a != 0;
 }
 
+// M8: apply one adjustment layer's op to the accumulated pixel in `out`
+// (premultiplied RGBA bytes). The pixel is unpremultiplied, transformed
+// by applyAdjustOp, repremultiplied and clamped to [0,alpha] (alpha
+// untouched — the M3 alpha contract). Unknown types are identity.
+inline void applyAdjustmentTo(Surface& out, const Layer& adj, int x, int y) {
+    Pixel p = out.get(x, y);
+    if (p.a == 0) return;
+    double r, g, b;
+    if (p.a == 255) {
+        r = p.r;
+        g = p.g;
+        b = p.b;
+    } else {
+        r = (static_cast<double>(p.r) * 255.0 + p.a / 2.0) / p.a;
+        g = (static_cast<double>(p.g) * 255.0 + p.a / 2.0) / p.a;
+        b = (static_cast<double>(p.b) * 255.0 + p.a / 2.0) / p.a;
+    }
+    applyAdjustOp(adj.adjustType, adj.adjustAmount, adj.adjustStops, r, g,
+                  b);
+    const double a = p.a;
+    auto repack = [&](double v) -> std::uint8_t {
+        long q = std::lround(v * a / 255.0);
+        if (q < 0) q = 0;
+        if (q > p.a) q = p.a;
+        return static_cast<std::uint8_t>(q);
+    };
+    p.r = repack(r);
+    p.g = repack(g);
+    p.b = repack(b);
+    out.set(x, y, p);
+}
+
+// M8: adjustment branch of the per-layer walk. Returns true when the
+// layer was an adjustment layer (the normal pixel-paint path must be
+// skipped). Mask multiplies the EFFECT by mask alpha (masked-out regions
+// see no change), clip uses the same stencil rule as normal layers, and
+// opacity blends pre/post (opacity 1 = full transform, 0.5 = halfway,
+// 0 = no-op); invisible layers are skipped by the caller.
+inline bool walkAdjustment(Surface& out, const Layer& l, int x, int y) {
+    if (l.adjustType.empty()) return false;
+    if (l.clipped && out.get(x, y).a == 0) return true;
+    float maskK = 1.0f;
+    if (l.hasMask) {
+        maskK = l.mask.get(x, y).a / 255.0f;
+        if (maskK <= 0.0f) return true;
+    }
+    const float op = l.opacity * maskK;
+    if (op <= 0.0f) return true;
+    Pixel before = out.get(x, y);
+    if (before.a == 0) return true;
+    applyAdjustmentTo(out, l, x, y);
+    if (op < 1.0f) {
+        const Pixel after = out.get(x, y);
+        Pixel m;
+        m.a = before.a;  // alpha never moves
+        m.r = static_cast<std::uint8_t>(
+            std::lround(before.r + (after.r - before.r) * op));
+        m.g = static_cast<std::uint8_t>(
+            std::lround(before.g + (after.g - before.g) * op));
+        m.b = static_cast<std::uint8_t>(
+            std::lround(before.b + (after.b - before.b) * op));
+        // Repacked parts already satisfy rgb <= a; the lerp of two such
+        // values stays in range (clamp defensively anyway).
+        if (m.r > m.a) m.r = m.a;
+        if (m.g > m.a) m.g = m.a;
+        if (m.b > m.a) m.b = m.a;
+        out.set(x, y, m);
+    }
+    return true;
+}
+
+// Group-child variant: same as walkAdjustment but the clip stencil may
+// come from a sibling of this group level (sibVecCache) instead of the
+// running output, and `groupOp` carries the enclosing group's opacity
+// (pass-through groups scale each child by l.opacity * child.opacity,
+// mirroring the normal-layer scalePixel path).
+inline bool walkChildAdjustment(
+    Surface& out, const std::vector<Layer>& siblings,
+    const std::vector<const Surface*>& sibVecCache, std::size_t ci,
+    const Layer& child, float groupOp, int x, int y) {
+    if (child.adjustType.empty()) return false;
+    if (child.clipped &&
+        !stencilPainted(siblings, sibVecCache, ci, out, x, y))
+        return true;
+    float maskK = 1.0f;
+    if (child.hasMask) {
+        maskK = child.mask.get(x, y).a / 255.0f;
+        if (maskK <= 0.0f) return true;
+    }
+    const float op = groupOp * child.opacity * maskK;
+    if (op <= 0.0f) return true;
+    Pixel before = out.get(x, y);
+    if (before.a == 0) return true;
+    // Reuse the top-level helper by folding group/child opacity into a
+    // shim layer view (Layer is plain data; adjust fields copied).
+    Layer view;
+    view.adjustType = child.adjustType;
+    view.adjustAmount = child.adjustAmount;
+    view.adjustStops = child.adjustStops;
+    view.opacity = op;
+    view.clipped = false;
+    return walkAdjustment(out, view, x, y);
+}
+
 // Composite `layers` (document order, bottom-to-top) onto `out` (w x h).
 // M5 rules: a clipped layer skips any pixel where its stencil (above)
 // has zero painted alpha; a layer with a mask multiplies its alpha by
@@ -103,6 +209,12 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                     // then blend onto out so order stays correct.
                     for (int y = 0; y < h; ++y) {
                         for (int x = 0; x < w; ++x) {
+                            // M8: adjustment children transform the
+                            // accumulated output; they paint no pixels.
+                            if (walkChildAdjustment(out, l.children,
+                                                    childVecCache, ci, child,
+                                                    l.opacity, x, y))
+                                continue;
                             if (child.clipped &&
                                 !stencilPainted(l.children, childVecCache,
                                                 ci, out, x, y))
@@ -157,6 +269,9 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
         const Surface* vecTmp = vecCache[li];
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
+                // M8: adjustment layers paint no pixels; their op
+                // transforms the accumulated output of everything below.
+                if (walkAdjustment(out, l, x, y)) continue;
                 if (l.clipped && !stencilPainted(layers, vecCache, li, out, x, y))
                     continue;
                 Pixel s = layerPixel(l, vecTmp, x, y);

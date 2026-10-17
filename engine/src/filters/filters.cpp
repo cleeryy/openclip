@@ -541,4 +541,165 @@ bool applyFilter(Surface& s, const std::string& name,
     return true;
 }
 
+// --- M8 adjustment-layer ops (clean-room pixel math) ---
+
+bool isKnownAdjustType(const std::string& type) {
+    return type == "brightness" || type == "contrast" || type == "hue" ||
+           type == "saturation" || type == "gradientMap";
+}
+
+void parseAdjustDescriptor(const std::string& json, std::string& type,
+                           double& amount, std::string& stops) {
+    type.clear();
+    amount = 0.0;
+    stops.clear();
+    if (!json.empty()) {
+        std::string t;
+        if (jsonStr(json, "type", t)) type = t;
+        double d = 0.0;
+        if (jsonNum(json, "amount", d)) amount = d;
+        std::string sv;
+        if (jsonStr(json, "stops", sv)) stops = sv;
+    }
+    if (amount != amount) amount = 0.0;  // NaN -> default
+    if (amount < -1.0) amount = -1.0;
+    if (amount > 1.0) amount = 1.0;
+}
+
+namespace {
+
+// Rec.601 luma weights (same as the gradientMap filter above).
+inline double luma601(double r, double g, double b) {
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+// HSL conversion (h in degrees [0,360), s/l in [0,1]); hue rotation only
+// needs full round-trip fidelity, not gamut perfection — clean-room.
+inline void rgbToHsl(double r, double g, double b, double& h, double& s,
+                     double& l) {
+    r /= 255.0;
+    g /= 255.0;
+    b /= 255.0;
+    const double mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    const double mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    l = (mx + mn) / 2.0;
+    if (mx == mn) {
+        h = 0.0;
+        s = 0.0;
+        return;
+    }
+    const double d = mx - mn;
+    s = l > 0.5 ? d / (2.0 - mx - mn) : d / (mx + mn);
+    if (mx == r) {
+        h = (g - b) / d + (g < b ? 6.0 : 0.0);
+    } else if (mx == g) {
+        h = (b - r) / d + 2.0;
+    } else {
+        h = (r - g) / d + 4.0;
+    }
+    h *= 60.0;
+}
+
+inline double hueToRgb(double p, double q, double t) {
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+    if (t < 1.0 / 2.0) return q;
+    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    return p;
+}
+
+inline void hslToRgb(double h, double s, double l, double& r, double& g,
+                     double& b) {
+    h = std::fmod(h, 360.0);
+    if (h < 0.0) h += 360.0;
+    h /= 360.0;
+    double qr, qg, qb;
+    if (s == 0.0) {
+        qr = qg = qb = l;
+    } else {
+        const double q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+        const double p = 2.0 * l - q;
+        qr = hueToRgb(p, q, h + 1.0 / 3.0);
+        qg = hueToRgb(p, q, h);
+        qb = hueToRgb(p, q, h - 1.0 / 3.0);
+    }
+    r = qr * 255.0;
+    g = qg * 255.0;
+    b = qb * 255.0;
+}
+
+// Ramp one luminance value through the stops spec (same parse + interp as
+// the M3 gradientMap filter: stop list must parse, else identity=false).
+bool gradientRamp(const std::string& spec, double lum, double& r, double& g,
+                  double& b) {
+    std::string inner = spec;
+    const auto lb = inner.find('[');
+    const auto rb = inner.rfind(']');
+    if (lb == std::string::npos || rb == std::string::npos || rb <= lb)
+        return false;
+    inner = inner.substr(lb + 1, rb - lb - 1);
+    std::string flat;
+    for (char ch : inner)
+        if (ch != '"' && ch != '\'') flat.push_back(ch);
+    std::vector<Stop> stops;
+    std::string error;
+    if (!parseStops(flat, stops, error)) return false;
+    const Stop* lo = &stops.front();
+    const Stop* hi = &stops.back();
+    for (const auto& s : stops) {
+        if (s.pos <= lum) lo = &s;
+        if (s.pos >= lum) {
+            hi = &s;
+            break;
+        }
+    }
+    const double t =
+        (hi->pos > lo->pos) ? (lum - lo->pos) / (hi->pos - lo->pos) : 0.0;
+    r = lo->r + (hi->r - lo->r) * t;
+    g = lo->g + (hi->g - lo->g) * t;
+    b = lo->b + (hi->b - lo->b) * t;
+    return true;
+}
+
+}  // namespace
+
+void applyAdjustOp(const std::string& type, double amount,
+                   const std::string& stops, double& r, double& g,
+                   double& b) {
+    if (type == "brightness") {
+        const double d = amount * 128.0;
+        r += d;
+        g += d;
+        b += d;
+    } else if (type == "contrast") {
+        const double k = 1.0 + amount;
+        r = 128.0 + (r - 128.0) * k;
+        g = 128.0 + (g - 128.0) * k;
+        b = 128.0 + (b - 128.0) * k;
+    } else if (type == "saturation") {
+        const double k = 1.0 + amount;
+        const double l = luma601(r, g, b);
+        r = l + (r - l) * k;
+        g = l + (g - l) * k;
+        b = l + (b - l) * k;
+    } else if (type == "hue") {
+        if (amount == 0.0) return;
+        double h = 0.0, s = 0.0, l = 0.0;
+        rgbToHsl(r, g, b, h, s, l);
+        if (s == 0.0) return;  // gray has no hue to rotate
+        h += amount * 180.0;
+        hslToRgb(h, s, l, r, g, b);
+    } else if (type == "gradientMap") {
+        double nr = r, ng = g, nb = b;
+        if (gradientRamp(stops, luma601(r, g, b) / 255.0, nr, ng, nb)) {
+            r = nr;
+            g = ng;
+            b = nb;
+        }
+        // Unparseable stops: identity (keeps the no-false-success rule).
+    }
+    // Unknown type: identity no-op.
+}
+
 }  // namespace openclip

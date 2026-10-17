@@ -65,4 +65,8 @@ object EngineHost {
     external fun nFrameCount(handle: Long): Int
     external fun nFrameCompositeInto(handle: Long, index: Int, pixels: IntArray, width: Int, height: Int): Int
     external fun nSetOnion(handle: Long, previous: Boolean, next: Boolean, strength: Float): Boolean
+
+    // M8 additions (ARCHITECTURE.md): adjustment layers — null/empty
+    // json clears the descriptor.
+    external fun nSetLayerAdjustment(handle: Long, index: Int, json: String?): Boolean
 }
