@@ -34,7 +34,7 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] Shim+Kotlin 10 symboles M5 + nLayerState snapshot panel (ARCHITECTURE.md §M5, check_jni_symbols PASS)
 - [x] LayerPanel réel (visibilité/opacité slider/blend dropdown/rename/add group/move up-down/mask+mask-target/clipped, groupes repliables, ops render-thread) — strings ajoutées
 - [x] 2 tests instrumentés M5 (maskTarget stroke hide + undo restore ; clipped stencil + unclip parity) — CI engine verte run 38769787419 ; APK build vert (run 38762936820 build success) ; emulator 10/10 en attente run vert (cancellations par pushes successifs, dernier run 38774585877 build success)
-- [ ] Calques d'ajustement (brightness/contrast, hue, gradient map) — REPORTE M8 (impact faible/peinture)
+- [x] Calques d'ajustement (brightness/contrast, hue, gradient map) — fait en M8 (non destructifs, composite-time, ORA round-trip ; + saturation)
 - [x] UX panneau calques réel : visibilité/opacité/blends/rename/groupes/move/mask/clipped
 
 ## M6 — Vectoriel + règles (clos: app 13/13 run 38815184126, engine 55/55 commit a65b39f)
@@ -45,9 +45,9 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] Timeline UI, frames, onion skin, lecture fps réel (frames=full Canvas copies, undo stacks par frame — fix frameSwitchIsolatesStrokes commit 129e660, onion prev/next, TimelineStrip 96px + fps slider)
 - [x] Piste audio + export séquence/webm (M7b clos : ClipAudio MediaPlayer + ExportWebm MediaCodec VP8/MediaMuxer app-side, SAF audio→cache ; 19/19 local KVM, CI android run 38983403837)
 
-## M8 — IA
-- [ ] Super-résolution + débruitage via ONNX Runtime (poids libres)
-- [ ] Auto-colorize assist (si poids ouverts disponibles)
+## M8 — IA (clos: 20/20 émulateur local, engine 66/66, CI android 38987098898 + engine 38987098900, commit d9c11b7)
+- [x] Super-résolution ×3 via ONNX Runtime (onnxruntime-android 1.31.0 MIT, modèle ESPCN 224 fixe Apache-2.0 bundlé ; luma SR + chroma bicubique, retour PNG→nLoadDocument, bouton IA ×3 dans la timeline) + calques d'ajustement (brightness/contrast/hue/saturation/gradientMap, engine composite-time, ORA attrs)
+- [x] Débruitage : DIFFÉRÉ (aucun modèle mobile à licence permissive confirmée) ; auto-colorize : DIFFÉRÉ (pas de poids ouverts) — notes honnêtes dans ARCHITECTURE.md, revoir en M8b
 
 ## M9 — Référence 3D
 - [ ] Visionneuse glTF (mannequins libres), panneau référence
@@ -75,3 +75,4 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-16: M6 clos — vector layers + rulers, 13/13 emulator (run 38815184126). Fix CI stabilité émulateur (RAM bornée + swiftshader_indirect, run 38813808271 vert).
 - 2026-10-16 (2): Emulateur = gate LOCAL desormais (`scripts/emutest.sh`, suite instrumentee) ; job emulateur retire de GitHub CI (trop lent: timeout 1h). CI GitHub = engine tests + build APK debug/androidTest + JNI symbols, avec concurrency auto-cancel. M7: run local en cours de validation (17 tests).
 - 2026-10-16 (3): M7 clos — undo per-frame (commit 129e660), 17/17 emulateur local KVM (boot 117s, suite 42s) ; CI android verte run 38906341149 ; engine 55/55 local via prepush. Reste M7b (audio + webm).
+- 2026-10-17: M8 clos — ajustements (engine, ORA round-trip) + AI x3 (ONNX Runtime, modèle ESPCN 224 fixe) ; 20/20 local KVM + CI android/engine verts. Denoise/auto-colorize différés faute de poids à licence claire.
