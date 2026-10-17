@@ -130,6 +130,38 @@ M8 additions (defined 2026-10-16, AI + adjustment round):
   Denoise and auto-colorize are deferred (no permissively-licensed
   mobile weights confirmed) — honest note, revisit in M8b.
 
+M9 additions (defined 2026-10-17, 3D reference + lens round):
+
+- glTF reference model: vendored single-header cgltf (MIT, logged in
+  engine/third_party/README.md). nLoadGlbReference(handle, path): Int —
+  loads a .glb/.gltf (first scene's meshes, positions + triangle
+  edges only, no textures/materials) into the session reference model;
+  returns the triangle edge count, -1 on parse/load failure.
+  nSetRefView(handle, json): Boolean — keys {yaw,pitch,roll} (degrees,
+  0..360), {dist} (model-units, default 3), {fov} (10..120, default
+  45), {fisheye} (0..1, default 0 = rectilinear), {offX,offY} (pixels);
+  unknown keys ignored, missing keys keep the previous value (M3 rule).
+  nSetRefVisible(handle, on): Boolean.
+- Rendering: the reference wireframe draws OVER the current frame in
+  nCompositeInto only (a tracing aid, never in nFrameCompositeInto —
+  thumbnails/export stay clean, like onion). Camera projection:
+  perspective + optional fisheye radial distortion (r' = r*(1+k*r^2),
+  k = fisheye*0.001); edges rasterized 1px dark gray at 50% alpha.
+- App: reference pane (import .glb via SAF → cache file, view sliders
+  yaw/pitch/roll/dist/fov/fisheye + show toggle, strings EN/FR). No
+  model bundled yet: the engine test fixture is a generated in-code
+  cube .glb (clean-room); bundling a libre mannequin is a later asset
+  decision.
+- 3-point perspective (deferred from M6): nSetRulers accepts up to
+  THREE points in "perspective":[[{x,y},...]]; the shim ruler transform
+  snaps strokes to the 3-point grid (existing M6 code path).
+- Tests: engine — cube fixture loads with 18 edges, projected edges
+  land in the composite above frame pixels, fisheye>0 displaces edge
+  pixels radially, visible=false removes them, 3-point ruler snaps;
+  instrumented +1 — refLoadAndCompositeShowsEdges (fixture .glb written
+  to cacheDir, JNI load, composite shows non-white pixels, toggle
+  clears them).
+
 M6 additions (defined 2026-10-15, vector + rulers round):
 
 - Vector layer model (clean-room, no SVG dependency at the engine level):

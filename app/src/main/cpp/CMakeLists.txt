@@ -15,6 +15,7 @@ file(GLOB ENGINE_SOURCES
      ${ENGINE_SRC_DIR}/filters/*.cpp
      ${ENGINE_SRC_DIR}/io/*.cpp
      ${ENGINE_SRC_DIR}/raster/*.cpp
+     ${ENGINE_SRC_DIR}/ref/*.cpp
      ${ENGINE_SRC_DIR}/stroke/*.cpp
      ${ENGINE_SRC_DIR}/undo/*.cpp)
 

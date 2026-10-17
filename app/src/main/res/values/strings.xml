@@ -85,4 +85,16 @@
     <string name="ai_upscale">AI ×3</string>
     <string name="ai_upscaled">AI upscale applied.</string>
     <string name="ai_failed">AI upscale failed.</string>
+    <string name="reference">Reference</string>
+    <string name="reference_import">Import .glb</string>
+    <string name="reference_clear">Hide</string>
+    <string name="reference_show">Show overlay</string>
+    <string name="yaw">Yaw %1$d°</string>
+    <string name="pitch">Pitch %1$d°</string>
+    <string name="roll">Roll %1$d°</string>
+    <string name="ref_dist">Dist %1$.1f</string>
+    <string name="fov">FOV %1$d°</string>
+    <string name="fisheye">Fisheye %1$d%%</string>
+    <string name="ref_loaded">Reference loaded (%1$d edges).</string>
+    <string name="ref_failed">Reference import failed.</string>
 </resources>

@@ -18,6 +18,8 @@ import dev.openclip.media.ExportWebm
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -757,6 +759,76 @@ class EngineConformanceTest {
         )
         src.recycle()
         if (!up.isRecycled) up.recycle()
+    }
+
+    // M9-21: glTF reference overlay — a generated cube .glb loads through
+    // JNI (18 edges), composites edge pixels over the frame, and the
+    // visibility toggle clears them.
+    @Test
+    fun refLoadAndCompositeShowsEdges() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val glb = File(composeRule.activity.cacheDir, "cube.glb")
+            writeCubeGlb(glb)
+            assertEquals(
+                "cube must load with 18 edges", 18,
+                EngineHost.nLoadGlbReference(handle, glb.absolutePath)
+            )
+            assertTrue(EngineHost.nSetRefVisible(handle, true))
+            val withRef = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, withRef, w, h))
+            val edgePixels = withRef.indices.count { withRef[it] != -1 }
+            assertTrue(
+                "reference must add edge pixels, got $edgePixels",
+                edgePixels > 0
+            )
+            assertTrue(EngineHost.nSetRefVisible(handle, false))
+            val without = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, without, w, h))
+            assertTrue(
+                "hiding the reference must restore the clean frame",
+                without.all { it == -1 }
+            )
+            assertTrue(glb.delete())
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // Minimal valid glTF 2.0 binary in-code: unit cube, 12 triangles
+    // (18 unique edges). glTF is LITTLE-ENDIAN — ByteBuffer LE order
+    // (DataOutputStream big-endian would corrupt the magic). Clean-room:
+    // no binary assets in git.
+    private fun writeCubeGlb(dst: File) {
+        val verts = floatArrayOf(
+            -0.5f, -0.5f, -0.5f, 0.5f, -0.5f, -0.5f, 0.5f, 0.5f, -0.5f,
+            -0.5f, 0.5f, -0.5f, -0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f,
+            0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f
+        )
+        val idx = intArrayOf(
+            0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1,
+            3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2
+        )
+        val bin = ByteBuffer.allocate(96 + 72).order(ByteOrder.LITTLE_ENDIAN)
+        for (v in verts) bin.putFloat(v)
+        for (i in idx) bin.putShort(i.toShort())
+        val binBytes = bin.array()
+        val json = """{"asset":{"version":"2.0"},"buffers":[{"byteLength":${binBytes.size}}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":96,"target":34962},{"buffer":0,"byteOffset":96,"byteLength":72,"target":34963}],"accessors":[{"bufferView":0,"componentType":5126,"count":8,"type":"VEC3"},{"bufferView":1,"componentType":5123,"count":36,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0}"""
+        val jb = json.toByteArray()
+        val pad = (4 - jb.size % 4) % 4
+        val total = 12 + 8 + jb.size + pad + 8 + binBytes.size
+        val out = ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN)
+        out.putInt(0x46546C67)  // "glTF"
+        out.putInt(2)
+        out.putInt(total)
+        out.putInt(jb.size + pad)
+        out.putInt(0x4E4F534A)  // "JSON"
+        out.put(jb)
+        repeat(pad) { out.put(' '.code.toByte()) }
+        out.putInt(binBytes.size)
+        out.putInt(0x004E4942)  // "BIN\0"
+        out.put(binBytes)
+        dst.writeBytes(out.array())
     }
 
     // 8 kHz mono 16-bit 1 s 440 Hz sine: generated in-code so no binary

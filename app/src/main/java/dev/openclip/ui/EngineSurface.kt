@@ -133,6 +133,20 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         if (handle != 0L) EngineHost.nSetLayerAdjustment(handle, index, json)
             .also { if (it) needsComposite = true } else false
 
+    // M9 glTF reference model (thin wrappers over the M9 symbols;
+    // rendering lives in nCompositeInto — the overlay never reaches
+    // thumbnails/export).
+    fun loadGlbReference(path: String) =
+        if (handle != 0L) EngineHost.nLoadGlbReference(handle, path) else -1
+
+    fun setRefView(json: String) =
+        if (handle != 0L) EngineHost.nSetRefView(handle, json)
+            .also { if (it) needsComposite = true } else false
+
+    fun setRefVisible(on: Boolean) =
+        if (handle != 0L) EngineHost.nSetRefVisible(handle, on)
+            .also { if (it) needsComposite = true } else false
+
     fun layerOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
     // M6 vector layers + rulers (thin wrappers over the exact symbols).

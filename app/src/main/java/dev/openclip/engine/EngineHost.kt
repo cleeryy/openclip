@@ -69,4 +69,9 @@ object EngineHost {
     // M8 additions (ARCHITECTURE.md): adjustment layers — null/empty
     // json clears the descriptor.
     external fun nSetLayerAdjustment(handle: Long, index: Int, json: String?): Boolean
+
+    // M9 additions (ARCHITECTURE.md): glTF reference model overlay.
+    external fun nLoadGlbReference(handle: Long, path: String): Int
+    external fun nSetRefView(handle: Long, json: String): Boolean
+    external fun nSetRefVisible(handle: Long, on: Boolean): Boolean
 }

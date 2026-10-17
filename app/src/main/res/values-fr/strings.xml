@@ -72,4 +72,16 @@
     <string name="ai_upscale">IA ×3</string>
     <string name="ai_upscaled">Upscale IA appliqué.</string>
     <string name="ai_failed">Échec de l’upscale IA.</string>
+    <string name="reference">Référence</string>
+    <string name="reference_import">Importer .glb</string>
+    <string name="reference_clear">Masquer</string>
+    <string name="reference_show">Afficher la référence</string>
+    <string name="yaw">Lacet %1$d°</string>
+    <string name="pitch">Tangage %1$d°</string>
+    <string name="roll">Roulis %1$d°</string>
+    <string name="ref_dist">Dist. %1$.1f</string>
+    <string name="fov">FOV %1$d°</string>
+    <string name="fisheye">Fisheye %1$d%%</string>
+    <string name="ref_loaded">Référence chargée (%1$d arêtes).</string>
+    <string name="ref_failed">Échec de l’import de la référence.</string>
 </resources>

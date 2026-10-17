@@ -42,6 +42,7 @@ import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.PresetGallery
+import dev.openclip.ui.ReferencePanel
 import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 
@@ -76,6 +77,8 @@ class MainActivity : ComponentActivity() {
         val exporting = remember { mutableStateOf(false) }
         val clipFps = remember { mutableStateOf(12f) }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
+        // M9: glTF reference model (session-only, never in exports).
+        val refModelName = remember { mutableStateOf<String?>(null) }
 
         // M4: SAF bridge. Files go through cacheDir copies so the engine
         // keeps seeing plain filesystem paths only (no Android IO inside
@@ -142,6 +145,31 @@ class MainActivity : ComponentActivity() {
         // M7b: webm export. Frames pull full-res off the render thread in
         // index order; the mux runs on a worker thread, status posts back
         // on the UI thread (M4 cache-file bridge for the SAF uri).
+        // M9: .glb import (SAF → cache → loadGlbReference; edge count
+        // drives the success status; overlay auto-shows on success).
+        val openGlb = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            val surface = canvas.value
+            if (uri != null && surface != null) {
+                val name = queryDisplayName(ctx, uri) ?: "reference.glb"
+                val dst = java.io.File(
+                    ctx.cacheDir, "ref-${System.currentTimeMillis()}-$name"
+                )
+                copyTo(ctx, uri, dst)
+                val edges = surface.loadGlbReference(dst.absolutePath)
+                if (edges > 0) {
+                    refModelName.value = name
+                    surface.setRefVisible(true)
+                    status.value = ctx.getString(R.string.ref_loaded, edges)
+                } else {
+                    dst.delete()
+                    refModelName.value = null
+                    status.value = ctx.getString(R.string.ref_failed)
+                }
+            }
+        }
+
         fun exportClipFrames(
             surface: EngineSurface,
             count: Int,
@@ -354,6 +382,15 @@ class MainActivity : ComponentActivity() {
                     onAiUpscale = { frameIdx ->
                         aiUpscaleFrame(surface, frameIdx)
                     }
+                )
+                // M9: reference pane — full width under the timeline.
+                ReferencePanel(
+                    surface = surface,
+                    onImportGlb = { openGlb.launch(arrayOf("*/*")) },
+                    modelName = refModelName.value,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(4.dp)
                 )
                 if (status.value.isNotEmpty()) {
                     androidx.compose.material3.Text(

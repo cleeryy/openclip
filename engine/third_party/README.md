@@ -18,3 +18,6 @@ Notes:
 - ZIP handling for `.ora` is first-party clean-room code in
   `src/io/minizip.{h,cpp}` on top of system zlib (`-lz`); no vendored zip
   library was needed.
+- `cgltf.h` (MIT, https://github.com/jkuhlmann/cgltf, single file) parses
+  glTF 2.0 / .glb meshes for the M9 reference viewer; positions +
+  triangle edges only (no textures/materials).

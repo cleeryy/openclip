@@ -38,6 +38,7 @@
 #include "openclip/canvas.h"
 #include "openclip/filters.h"
 #include "openclip/ora.h"
+#include "openclip/ref.h"
 #include "openclip/surface.h"
 #include "openclip/undo.h"
 #include "openclip/vector.h"
@@ -92,6 +93,10 @@ struct Session {
     float fps = 12.0f;
     bool onionPrev = false, onionNext = false;
     float onionStrength = 0.3f;
+    // M9: glTF reference model overlay (tracing aid, composite only).
+    openclip::RefModel refModel;
+    bool refLoaded = false;
+    openclip::RefView refView;
     openclip::BrushParams brush;
     std::uint8_t r = 20, g = 20, b = 20;
     // M2 shim-side brush state (engine takes over when its M2 lane lands):
@@ -263,14 +268,26 @@ void rulerStamp(Session* s, float x, float y, float pressure) {
         px = e.cx + e.rx * std::cos(t);
         py = e.cy + e.ry * std::sin(t);
     } else if (!s->lines.empty()) {
-        const auto& seg = s->lines.front();  // nearest point on segment
-        const float ax = seg.first.x, ay = seg.first.y;
-        const float bxD = seg.second.x - ax, byD = seg.second.y - ay;
-        const float len2 = bxD * bxD + byD * byD;
-        float t = len2 > 0 ? ((px - ax) * bxD + (py - ay) * byD) / len2 : 0;
-        t = std::max(0.0f, std::min(1.0f, t));
-        px = ax + t * bxD;
-        py = ay + t * byD;
+        // M9: snap to the NEAREST segment of the perspective grid
+        // (1 segment = M6 behavior, 2 segments = 3-point perspective).
+        float bestDist = 1e30f, bx = px, by = py;
+        for (const auto& seg : s->lines) {
+            const float ax = seg.first.x, ay = seg.first.y;
+            const float bxD = seg.second.x - ax, byD = seg.second.y - ay;
+            const float len2 = bxD * bxD + byD * byD;
+            float t = len2 > 0 ? ((px - ax) * bxD + (py - ay) * byD) / len2 : 0;
+            t = std::max(0.0f, std::min(1.0f, t));
+            const float sx = ax + t * bxD, sy = ay + t * byD;
+            const float ddx = px - sx, ddy = py - sy;
+            const float d2 = ddx * ddx + ddy * ddy;
+            if (d2 < bestDist) {
+                bestDist = d2;
+                bx = sx;
+                by = sy;
+            }
+        }
+        px = bx;
+        py = by;
     }
     const std::vector<openclip::Dab> base = openclip::interpolateStamps(
         s->brush, px, py, pressure, px, py, pressure, s->r, s->g, s->b);
@@ -659,6 +676,44 @@ Java_dev_openclip_engine_EngineHost_nSetLayerAdjustment(JNIEnv* env, jclass,
     return JNI_TRUE;
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nLoadGlbReference(JNIEnv* env, jclass,
+                                                      jlong handle,
+                                                      jstring path) {
+    Session* s = asSession(handle);
+    if (!s || !path) return -1;
+    const std::string p = toStd(env, path);
+    if (p.empty()) return -1;
+    openclip::RefModel m;
+    std::string err;
+    if (!openclip::loadRefModel(p, m, err)) {
+        s->refLoaded = false;
+        return -1;
+    }
+    s->refModel = std::move(m);
+    s->refLoaded = true;
+    return static_cast<jint>(s->refModel.edges.size());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetRefView(JNIEnv* env, jclass,
+                                                jlong handle, jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (json) openclip::parseRefViewJson(toStd(env, json), s->refView);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetRefVisible(JNIEnv*, jclass,
+                                                   jlong handle,
+                                                   jboolean on) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    s->refView.visible = (on == JNI_TRUE);
+    return JNI_TRUE;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
                                                  jfloat x, jfloat y,
@@ -786,6 +841,13 @@ Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
             overPremult(px, under);  // current frame on top
             px.swap(under);
         }
+    }
+    // M9: reference wireframe draws OVER the frame (tracing aid; never
+    // in nFrameCompositeInto so thumbnails/export stay clean).
+    if (s->refLoaded && s->refView.visible) {
+        int drawnEdges = 0;
+        openclip::renderRefEdges(s->refModel, s->refView, width, height, px,
+                                 drawnEdges);
     }
     return blitArgb(env, px, out, width, height);
 }
@@ -1058,14 +1120,14 @@ Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
     }
     const std::size_t per = j.find("\"perspective\"");
     if (per != std::string::npos) {
-        // First segment only in M6: scan the bracket body and take the
-        // first four numbers as {x1,y1,x2,y2}.
+        // M9: up to THREE points (6 numbers) — a 2-segment grid; M6
+        // kept the first segment only.
         const std::size_t open = j.find('[', per + 12);
         if (open != std::string::npos) {
             std::vector<float> vals;
             std::size_t p = open + 1;
             int depth = 0;
-            while (p < j.size() && vals.size() < 4) {
+            while (p < j.size() && vals.size() < 6) {
                 const char c = j[p];
                 if (c == '{') ++depth;
                 else if (c == '}') { if (depth > 0) --depth; }
@@ -1081,6 +1143,10 @@ Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
                 s->lines.emplace_back(
                     openclip::Vec2{vals[0], vals[1]},
                     openclip::Vec2{vals[2], vals[3]});
+            if (vals.size() >= 6)
+                s->lines.emplace_back(
+                    openclip::Vec2{vals[2], vals[3]},
+                    openclip::Vec2{vals[4], vals[5]});
         }
     }
     return JNI_TRUE;
