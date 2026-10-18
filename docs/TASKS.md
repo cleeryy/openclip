@@ -49,13 +49,13 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] Super-résolution ×3 via ONNX Runtime (onnxruntime-android 1.31.0 MIT, modèle ESPCN 224 fixe Apache-2.0 bundlé ; luma SR + chroma bicubique, retour PNG→nLoadDocument, bouton IA ×3 dans la timeline) + calques d'ajustement (brightness/contrast/hue/saturation/gradientMap, engine composite-time, ORA attrs)
 - [x] Débruitage : DIFFÉRÉ (aucun modèle mobile à licence permissive confirmée) ; auto-colorize : DIFFÉRÉ (pas de poids ouverts) — notes honnêtes dans ARCHITECTURE.md, revoir en M8b
 
-## M9 — Référence 3D
-- [ ] Visionneuse glTF (mannequins libres), panneau référence
-- [ ] Outils distorsion/fisheye sur 3D importée
+## M9 — Référence 3D (clos: 21/21 émulateur local, engine 71/71, CI android 38989149455 + engine 38989149351, commit 406ab88)
+- [x] Visionneuse glTF (cgltf MIT vendored, .glb wireframe projeté caméra yaw/pitch/roll/dist/fov + fisheye, overlay au-dessus du frame dans nCompositeInto seulement, panneau référence import SAF + sliders)
+- [x] Outils distorsion/fisheye (lentille fisheye k=fisheye*0.001 sur la caméra de référence) + perspective 3 points (nSetRulers jusqu'à 3 points, snap au segment le plus proche)
 
-## M10 — Écosystème sans telemetry
-- [ ] Sync auto-hébergée (WebDAV/Forgejo) plugin
-- [ ] Matériaux libres : packaging + navigateur
+## M10 — Écosystème sans telemetry (clos: 23/23 émulateur local, engine 75/75, CI android 39134827315 + engine 39134827313, commit c5f1d3d)
+- [x] Sync auto-hébergée (WebDAV/Forgejo) plugin (WebdavClient HTTP basic auth push/pull, dialog export/import SAF, cleartext limité à 127.0.0.1/localhost via network_security_config)
+- [x] Matériaux libres : packaging + navigateur (tones procéduraux clean-room : hatch/crosshatch/dots/grid/checker/stripes via nApplyTone, remplissage de calque undoable comme un filtre)
 
 ## CI/CD — pérenne
 - [x] CI engine verte sur master
@@ -75,4 +75,7 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-16: M6 clos — vector layers + rulers, 13/13 emulator (run 38815184126). Fix CI stabilité émulateur (RAM bornée + swiftshader_indirect, run 38813808271 vert).
 - 2026-10-16 (2): Emulateur = gate LOCAL desormais (`scripts/emutest.sh`, suite instrumentee) ; job emulateur retire de GitHub CI (trop lent: timeout 1h). CI GitHub = engine tests + build APK debug/androidTest + JNI symbols, avec concurrency auto-cancel. M7: run local en cours de validation (17 tests).
 - 2026-10-16 (3): M7 clos — undo per-frame (commit 129e660), 17/17 emulateur local KVM (boot 117s, suite 42s) ; CI android verte run 38906341149 ; engine 55/55 local via prepush. Reste M7b (audio + webm).
-- 2026-10-17: M8 clos — ajustements (engine, ORA round-trip) + AI x3 (ONNX Runtime, modèle ESPCN 224 fixe) ; 20/20 local KVM + CI android/engine verts. Denoise/auto-colorize différés faute de poids à licence claire.
+- 2026-10-17: M8 clos — ajustements (engine, ORA round-trip) + AI x3 (ONNX Runtime, modèle ESPCN 224 fixe) ; 20/20 local KVM + CI android/engine verts.
+- 2026-10-17 (2): M7b clos — ClipAudio + ExportWebm (MediaCodec VP8/MediaMuxer, app-side) ; 19/19 local, CI android 38983403837.
+- 2026-10-17 (3): M9 clos — glTF cgltf vendored + fisheye + perspective 3 points ; 21/21 local, engine 71/71, CI 38989149455/38989149351 (commit 406ab88).
+- 2026-10-18: M10 clos (DERNIER JALON) — tones procéduraux clean-room (nApplyTone) + sync WebDAV app-side ; 23/23 local, engine 75/75, CI android 39134827315 + engine 39134827313 (commit c5f1d3d). App OpenClip M1→M10 complète. Denoise/auto-colorize différés faute de poids à licence claire.
