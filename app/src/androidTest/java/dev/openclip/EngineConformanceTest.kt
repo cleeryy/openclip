@@ -6,6 +6,10 @@
 package dev.openclip
 
 import android.graphics.Bitmap
+import android.os.SystemClock
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -16,6 +20,7 @@ import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
 import dev.openclip.media.WebdavClient
+import dev.openclip.ui.EngineSurface
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -981,6 +986,79 @@ class EngineConformanceTest {
             } catch (_: Exception) {
             }
         }
+    }
+
+    private fun findEngineSurface(root: View): EngineSurface? {
+        if (root is EngineSurface) return root
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val found = findEngineSurface(root.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    // Regression gate for tablet UI + touch pipeline: the live EngineSurface
+    // on MainActivity must have substantial visible dimensions (never crushed
+    // to 0px by panels), and a real MotionEvent DOWN -> MOVE -> UP stroke
+    // must draw ink into the active frame and be undoable.
+    @Test
+    fun canvasSurfaceHasVisibleSizeAndTouchDrawsStroke() {
+        composeRule.waitForIdle()
+        var surface: EngineSurface? = null
+        composeRule.activityRule.scenario.onActivity { act ->
+            surface = findEngineSurface(act.window.decorView)
+        }
+        val es = surface
+        assertNotNull("EngineSurface must be attached to MainActivity", es)
+        assertTrue(
+            "EngineSurface width (${es!!.width}) and height (${es.height}) must be > 200px",
+            es.width > 200 && es.height > 200
+        )
+
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        composeRule.activityRule.scenario.onActivity {
+            val t0 = SystemClock.uptimeMillis()
+            val down = MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, cx - 80f, cy, 0.8f, 1f, 0, 1f, 1f, 0, 0)
+            val move1 = MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, cx, cy, 0.8f, 1f, 0, 1f, 1f, 0, 0)
+            val move2 = MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, cx + 80f, cy, 0.8f, 1f, 0, 1f, 1f, 0, 0)
+            val up = MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, cx + 80f, cy, 0.8f, 1f, 0, 1f, 1f, 0, 0)
+            es.dispatchTouchEvent(down)
+            es.dispatchTouchEvent(move1)
+            es.dispatchTouchEvent(move2)
+            es.dispatchTouchEvent(up)
+            down.recycle(); move1.recycle(); move2.recycle(); up.recycle()
+        }
+
+        // Wait briefly for the render thread to drain the touch queue.
+        Thread.sleep(350)
+
+        var bmp: Bitmap? = null
+        val lock = Object()
+        es.pullFrameFull(0) { b ->
+            synchronized(lock) {
+                bmp = b
+                lock.notifyAll()
+            }
+        }
+        synchronized(lock) {
+            if (bmp == null) lock.wait(5000)
+        }
+        assertNotNull("pullFrameFull must return a bitmap", bmp)
+        val b = bmp!!
+        val midY = b.height / 2
+        var nonWhite = 0
+        for (x in 0 until b.width) {
+            if (b.getPixel(x, midY) != -1) nonWhite++
+        }
+        b.recycle()
+        assertTrue(
+            "touch stroke across canvas center must paint non-white pixels (got $nonWhite)",
+            nonWhite > 20
+        )
+        assertTrue("undo after touch stroke must succeed", es.undo())
     }
 
     // 8 kHz mono 16-bit 1 s 440 Hz sine: generated in-code so no binary

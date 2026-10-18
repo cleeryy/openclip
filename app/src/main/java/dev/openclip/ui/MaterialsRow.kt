@@ -4,10 +4,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package dev.openclip.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,7 +32,9 @@ fun MaterialsRow(
         )
         Row(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
         ) {
             TextButton(onClick = { surface.applyTone("hatch") }) {
                 Text(stringResource(R.string.tone_hatch))

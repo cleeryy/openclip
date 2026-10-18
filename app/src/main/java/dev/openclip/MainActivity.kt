@@ -1,7 +1,7 @@
-// OpenClip — main activity: Compose shell hosting the canvas SurfaceView
-// plus tool palette, color picker and layer panel. Phase 1 layout keeps
-// the canvas dominant with slim panels below; a tablet sidebar layout
-// comes with the M5 tool work.
+// OpenClip — main activity: dark studio workspace with a dominant central
+// canvas (EngineSurface), compact top toolbar, collapsible right inspector
+// dock (Layers / Color & Brushes / 3D & Tones), and collapsible bottom
+// animation timeline drawer.
 package dev.openclip
 
 import android.content.Context
@@ -14,26 +14,41 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import dev.openclip.R
 import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
@@ -49,6 +64,22 @@ import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 import dev.openclip.ui.WebdavDialog
 
+private val StudioColorScheme = darkColorScheme(
+    primary = Color(0xFF5C9DFF),
+    onPrimary = Color(0xFF0B1426),
+    primaryContainer = Color(0xFF284678),
+    onPrimaryContainer = Color(0xFFDCE8FF),
+    secondary = Color(0xFF7E8CE0),
+    secondaryContainer = Color(0xFF2E3452),
+    onSecondaryContainer = Color(0xFFE0E4FF),
+    background = Color(0xFF141418),
+    onBackground = Color(0xFFECECF1),
+    surface = Color(0xFF1E1E24),
+    onSurface = Color(0xFFECECF1),
+    surfaceVariant = Color(0xFF282832),
+    onSurfaceVariant = Color(0xFFC4C4D0)
+)
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,8 +87,11 @@ class MainActivity : ComponentActivity() {
         val dpi = resources.displayMetrics.density * 160f
 
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+            MaterialTheme(colorScheme = StudioColorScheme) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
                     OpenClipScreen(dpi)
                 }
             }
@@ -73,22 +107,21 @@ class MainActivity : ComponentActivity() {
         val showExport = remember { mutableStateOf(false) }
         val exportFormat = remember { mutableStateOf("ora") }
         val ctx = LocalContext.current
-        // M7b: clip audio (session-only) + webm export state. fps mirrors
-        // the strip slider (default 12, contract: no engine symbol).
         val clipAudio = remember { ClipAudio() }
         val audioName = remember { mutableStateOf<String?>(null) }
         val exporting = remember { mutableStateOf(false) }
         val clipFps = remember { mutableStateOf(12f) }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
-        // M9: glTF reference model (session-only, never in exports).
         val refModelName = remember { mutableStateOf<String?>(null) }
-        // M10: WebDAV sync dialog (self-hosted, user-configured only).
         val showWebdav = remember { mutableStateOf(false) }
         val webdavUrl = remember { mutableStateOf("") }
 
-        // M4: SAF bridge. Files go through cacheDir copies so the engine
-        // keeps seeing plain filesystem paths only (no Android IO inside
-        // the engine).
+        // Studio workspace state: right dock open + selected tab (0 = Draw/Layers, 1 = 3D & Tones)
+        // and bottom timeline drawer collapsed by default so the canvas gets maximum space.
+        val dockOpen = remember { mutableStateOf(true) }
+        val dockTab = remember { mutableStateOf(0) }
+        val showTimeline = remember { mutableStateOf(false) }
+
         val openDoc = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocument()
         ) { uri: Uri? ->
@@ -128,7 +161,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // M7b: audio import (audio/* → cache copy → ClipAudio attach).
         val openAudio = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocument()
         ) { uri: Uri? ->
@@ -148,11 +180,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // M7b: webm export. Frames pull full-res off the render thread in
-        // index order; the mux runs on a worker thread, status posts back
-        // on the UI thread (M4 cache-file bridge for the SAF uri).
-        // M9: .glb import (SAF → cache → loadGlbReference; edge count
-        // drives the success status; overlay auto-shows on success).
         val openGlb = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocument()
         ) { uri: Uri? ->
@@ -223,8 +250,6 @@ class MainActivity : ComponentActivity() {
             pull(0)
         }
 
-        // M8: AI x3 super-resolution of the current frame (ONNX, app-side;
-        // result loads back into the frame via the M7 load contract).
         val aiBusy = remember { mutableStateOf(false) }
         fun aiUpscaleFrame(surface: EngineSurface, frameIdx: Int) {
             if (aiBusy.value || exporting.value) return
@@ -305,107 +330,231 @@ class MainActivity : ComponentActivity() {
         Column(
             Modifier
                 .fillMaxSize()
+                .background(Color(0xFF141418))
                 .systemBarsPadding()
         ) {
-            AndroidView(
-                factory = { c ->
-                    EngineSurface(c).also { cv ->
-                        cv.start(dpi)
-                        cv.onStrokeChanged = { refreshKey.value++ }
-                        canvas.value = cv
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            )
-
+            // 1. Top Studio Toolbar
             canvas.value?.let { surface ->
-                ToolPalette(
-                    surface = surface,
-                    initialColor = inkColor.value,
-                    onFileClicked = {
-                        showExport.value = true
-                    },
-                    onImportClicked = { openDoc.launch(arrayOf("*/*")) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(4.dp)
-                )
-                Row(Modifier.fillMaxWidth()) {
-                    ColorPicker(
-                        initialColor = inkColor.value,
-                        onColorChanged = { hex ->
-                            inkColor.value = hex
-                            surface.setBrush("""{"color":"$hex"}""")
-                        },
-                        modifier = Modifier
-                            .width(300.dp)
-                            .padding(4.dp)
-                    )
-                    PresetGallery(
-                        surface = surface,
-                        modifier = Modifier
-                            .requiredWidth(220.dp)
-                            .padding(4.dp)
-                    )
-                    LayerPanel(
-                        surface = surface,
-                        refreshKey = refreshKey.value,
-                        modifier = Modifier
-                            .requiredWidth(170.dp)
-                            .padding(4.dp)
-                    )
-                }
-                // M7: timeline strip — full width under the panels so the
-                // thumbnails stay tappable on small screens. M7b wires
-                // audio + webm export through it (state lives here).
                 DisposableEffect(surface) {
                     onDispose { clipAudio.clear() }
                 }
-                TimelineStrip(
+                ToolPalette(
                     surface = surface,
-                    refreshKey = refreshKey.value,
+                    initialColor = inkColor.value,
+                    onFileClicked = { showExport.value = true },
+                    onImportClicked = { openDoc.launch(arrayOf("*/*")) }
+                )
+                HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
+            }
+
+            // 2. Central Workspace Row: Dominant Canvas on the left, Collapsible Studio Dock on the right
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(4.dp),
-                    audioName = audioName.value,
-                    exporting = exporting.value,
-                    onPlayingChange = { playing ->
-                        if (playing) clipAudio.play() else clipAudio.pause()
-                    },
-                    onFpsChange = { clipFps.value = it },
-                    onImportAudio = { openAudio.launch(arrayOf("audio/*")) },
-                    onClearAudio = {
-                        clipAudio.clear()
-                        audioName.value = null
-                    },
-                    onExportWebm = {
-                        createWebm.launch(
-                            "openclip-${System.currentTimeMillis()}.webm"
-                        )
-                    },
-                    onAiUpscale = { frameIdx ->
-                        aiUpscaleFrame(surface, frameIdx)
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(Color(0xFF141418))
+                ) {
+                    AndroidView(
+                        factory = { c ->
+                            EngineSurface(c).also { cv ->
+                                cv.start(dpi)
+                                cv.onStrokeChanged = { refreshKey.value++ }
+                                canvas.value = cv
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                canvas.value?.let { surface ->
+                    if (dockOpen.value) {
+                        VerticalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
+                        Column(
+                            modifier = Modifier
+                                .width(290.dp)
+                                .fillMaxHeight()
+                                .background(Color(0xFF1C1C22))
+                        ) {
+                            // Studio Dock Header Tabs
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFF22222A))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FilterChip(
+                                    selected = dockTab.value == 0,
+                                    onClick = { dockTab.value = 0 },
+                                    label = { Text("Studio", style = MaterialTheme.typography.labelSmall) }
+                                )
+                                FilterChip(
+                                    selected = dockTab.value == 1,
+                                    onClick = { dockTab.value = 1 },
+                                    label = { Text("3D & Tones", style = MaterialTheme.typography.labelSmall) }
+                                )
+                                Box(Modifier.weight(1f))
+                                TextButton(
+                                    onClick = { dockOpen.value = false },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("⟩", color = Color(0xFFB8B8C8))
+                                }
+                            }
+                            HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
+
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (dockTab.value == 0) {
+                                    LayerPanel(
+                                        surface = surface,
+                                        refreshKey = refreshKey.value,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    ColorPicker(
+                                        initialColor = inkColor.value,
+                                        onColorChanged = { hex ->
+                                            inkColor.value = hex
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    PresetGallery(
+                                        surface = surface,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                } else {
+                                    ReferencePanel(
+                                        surface = surface,
+                                        onImportGlb = { openGlb.launch(arrayOf("*/*")) },
+                                        modelName = refModelName.value,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    MaterialsRow(
+                                        surface = surface,
+                                        onWebdav = { showWebdav.value = true },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+                        }
                     }
-                )
-                // M9: reference pane — full width under the timeline.
-                ReferencePanel(
-                    surface = surface,
-                    onImportGlb = { openGlb.launch(arrayOf("*/*")) },
-                    modelName = refModelName.value,
+                }
+            }
+
+            // 3. Collapsible Bottom Timeline Drawer & Footer Bar
+            canvas.value?.let { surface ->
+                HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
+                if (showTimeline.value) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 175.dp)
+                            .background(Color(0xFF1C1C22))
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        TimelineStrip(
+                            surface = surface,
+                            refreshKey = refreshKey.value,
+                            modifier = Modifier.fillMaxWidth(),
+                            audioName = audioName.value,
+                            exporting = exporting.value,
+                            onPlayingChange = { playing ->
+                                if (playing) clipAudio.play() else clipAudio.pause()
+                            },
+                            onFpsChange = { clipFps.value = it },
+                            onImportAudio = { openAudio.launch(arrayOf("audio/*")) },
+                            onClearAudio = {
+                                clipAudio.clear()
+                                audioName.value = null
+                            },
+                            onExportWebm = {
+                                createWebm.launch(
+                                    "openclip-${System.currentTimeMillis()}.webm"
+                                )
+                            },
+                            onAiUpscale = { frameIdx ->
+                                aiUpscaleFrame(surface, frameIdx)
+                            }
+                        )
+                    }
+                    HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
+                }
+
+                // Slim Studio Status & Drawer Toggle Bar
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(4.dp)
-                )
-                // M10: materials + WebDAV entry (self-hosted sync).
-                MaterialsRow(
-                    surface = surface,
-                    onWebdav = { showWebdav.value = true },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(4.dp)
-                )
+                        .height(34.dp)
+                        .background(Color(0xFF1E1E24))
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TextButton(
+                        onClick = { showTimeline.value = !showTimeline.value },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text(
+                            (if (showTimeline.value) "▾ " else "▸ ") +
+                                stringResource(R.string.timeline),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF90B8FF)
+                        )
+                    }
+                    TextButton(
+                        onClick = { showWebdav.value = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text(
+                            stringResource(R.string.webdav),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFC4C4D0)
+                        )
+                    }
+                    Text(
+                        "2048×1536",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF787888)
+                    )
+                    if (status.value.isNotEmpty()) {
+                        Text(
+                            status.value,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF80E27E)
+                        )
+                    }
+                    Box(Modifier.weight(1f))
+                    if (!dockOpen.value) {
+                        TextButton(
+                            onClick = { dockOpen.value = true },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text(
+                                "⟨ " + stringResource(R.string.layers),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF90B8FF)
+                            )
+                        }
+                    }
+                }
+
                 if (showWebdav.value) {
                     WebdavDialog(
                         onDismiss = { showWebdav.value = false },
@@ -464,13 +613,6 @@ class MainActivity : ComponentActivity() {
                                 }
                             }.start()
                         }
-                    )
-                }
-                if (status.value.isNotEmpty()) {
-                    androidx.compose.material3.Text(
-                        status.value,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(4.dp)
                     )
                 }
                 if (showExport.value) {

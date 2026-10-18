@@ -7,10 +7,14 @@ package dev.openclip.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -18,6 +22,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -231,30 +236,67 @@ fun LayerPanel(
                 }
             )
         }
+        val compactPad = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
         Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Button(onClick = {
-                surface.layerOp { addLayer() }
-                refresh()
-            }) { Text("+") }
-            Button(onClick = {
-                surface.layerOp { addGroup("Group") }
-                refresh()
-            }) { Text(stringResource(R.string.layer_add_group)) }
-            // M6: vector layer button — layers added this way rasterize
-            // their stored paths at composite time (engine contract).
-            Button(onClick = {
-                surface.layerOp { addVectorLayer("Vector") }
-                refresh()
-            }) { Text(stringResource(R.string.layer_add_vector)) }
+            OutlinedButton(
+                onClick = {
+                    surface.layerOp { addLayer() }
+                    refresh()
+                },
+                contentPadding = compactPad,
+                modifier = Modifier.height(28.dp)
+            ) { Text("+", style = MaterialTheme.typography.labelSmall) }
+            OutlinedButton(
+                onClick = {
+                    surface.layerOp { addGroup("Group") }
+                    refresh()
+                },
+                contentPadding = compactPad,
+                modifier = Modifier.height(28.dp)
+            ) { Text(stringResource(R.string.layer_add_group), style = MaterialTheme.typography.labelSmall, maxLines = 1) }
+            OutlinedButton(
+                onClick = {
+                    surface.layerOp { addVectorLayer("Vector") }
+                    refresh()
+                },
+                contentPadding = compactPad,
+                modifier = Modifier.height(28.dp)
+            ) { Text(stringResource(R.string.layer_add_vector), style = MaterialTheme.typography.labelSmall, maxLines = 1) }
+            var symX by remember { mutableStateOf(false) }
+            var symY by remember { mutableStateOf(false) }
+            OutlinedButton(
+                onClick = {
+                    symX = !symX
+                    when (symX) {
+                        true -> surface.setRulers("""{"symmetryX":${surface.canvasWidth() / 2f}}""")
+                        else -> surface.setRulers(if (symY) """{"symmetryY":${surface.canvasHeight() / 2f}}""" else "")
+                    }
+                },
+                contentPadding = compactPad,
+                modifier = Modifier.height(28.dp)
+            ) { Text(if (symX) "⇋X" else "⇋x", style = MaterialTheme.typography.labelSmall) }
+            OutlinedButton(
+                onClick = {
+                    symY = !symY
+                    when (symY) {
+                        true -> surface.setRulers("""{"symmetryY":${surface.canvasHeight() / 2f}}""")
+                        else -> surface.setRulers(if (symX) """{"symmetryX":${surface.canvasWidth() / 2f}}""" else "")
+                    }
+                },
+                contentPadding = compactPad,
+                modifier = Modifier.height(28.dp)
+            ) { Text(if (symY) "⇋Y" else "⇋y", style = MaterialTheme.typography.labelSmall) }
         }
         // M8 — adjustment cluster for the selected layer: five type
         // toggles + Clear, and a -1..1 amount slider below the toggles
         // (gradient hides the slider; its amount is ignored per contract).
         Row(
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             ADJUST_TYPES.forEach { (type, res) ->
@@ -302,29 +344,6 @@ fun LayerPanel(
                     )
                 }
             }
-        }
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // M6 rulers: symmetry X/Y row toggles (engine transforms
-            // input at the shim before stamping).
-            var symX by remember { mutableStateOf(false) }
-            var symY by remember { mutableStateOf(false) }
-            Button(onClick = {
-                symX = !symX
-                when (symX) {
-                    true -> surface.setRulers("""{"symmetryX":${surface.canvasWidth() / 2f}}""")
-                    else -> surface.setRulers(if (symY) """{"symmetryY":${surface.canvasHeight() / 2f}}""" else "")
-                }
-            }) { Text(if (symX) "⇋X" else "⇋x") }
-            Button(onClick = {
-                symY = !symY
-                when (symY) {
-                    true -> surface.setRulers("""{"symmetryY":${surface.canvasHeight() / 2f}}""")
-                    else -> surface.setRulers(if (symX) """{"symmetryX":${surface.canvasWidth() / 2f}}""" else "")
-                }
-            }) { Text(if (symY) "⇋Y" else "⇋y") }
         }
     }
 
@@ -417,7 +436,9 @@ private fun LayerRow(
             value = slider,
             onValueChange = { slider = it },
             onValueChangeFinished = { onOpacityRelease(slider) },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(22.dp)
         )
         Row(
             verticalAlignment = Alignment.CenterVertically,

@@ -12,8 +12,8 @@ android {
         applicationId = "dev.openclip"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.0-alpha.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // Device builds keep arm64 phones + x86_64 emulators. The local

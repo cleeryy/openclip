@@ -39,6 +39,7 @@
 #include "openclip/filters.h"
 #include "openclip/ora.h"
 #include "openclip/ref.h"
+#include "openclip/stroke.h"
 #include "openclip/surface.h"
 #include "openclip/undo.h"
 #include "openclip/vector.h"
@@ -105,6 +106,8 @@ struct Session {
     float stabilize = 0.0f;
     float curve = 0.0f;
     bool eraser = false;
+    bool strokeOpen = false;
+    float lastX = 0.0f, lastY = 0.0f, lastP = 1.0f;
     // M5: per-session mask-edit target (index + on/off). When on and the
     // active layer owns a mask, paintStamp resolves dabs to mask alpha:
     // ink luminance drives mask.a (white = show, black = hide), snaps the
@@ -289,30 +292,47 @@ void rulerStamp(Session* s, float x, float y, float pressure) {
         px = bx;
         py = by;
     }
+    const float mappedP =
+        openclip::PointCurve::fromJsonCurve(s->curve).at(pressure);
+    if (s->strokeOpen && s->stabilize > 0.0f) {
+        const float a = std::min(0.85f, s->stabilize * 0.85f);
+        px = s->lastX * a + px * (1.0f - a);
+        py = s->lastY * a + py * (1.0f - a);
+    }
+    const float x0 = s->strokeOpen ? s->lastX : px;
+    const float y0 = s->strokeOpen ? s->lastY : py;
+    const float p0 = s->strokeOpen ? s->lastP : mappedP;
     const std::vector<openclip::Dab> base = openclip::interpolateStamps(
-        s->brush, px, py, pressure, px, py, pressure, s->r, s->g, s->b);
+        s->brush, x0, y0, p0, px, py, mappedP, s->r, s->g, s->b);
     for (const auto& d : base) stampResolved(s, d);
     if (s->symX) {
+        const float mx0 = 2 * s->symXAt - x0;
         const float mx = 2 * s->symXAt - px;
         for (const auto& d : openclip::interpolateStamps(
-                 s->brush, mx, py, pressure, mx, py, pressure, s->r, s->g,
+                 s->brush, mx0, y0, p0, mx, py, mappedP, s->r, s->g,
                  s->b))
             stampResolved(s, d);
     }
     if (s->symY) {
+        const float my0 = 2 * s->symYAt - y0;
         const float my = 2 * s->symYAt - py;
         for (const auto& d : openclip::interpolateStamps(
-                 s->brush, px, my, pressure, px, my, pressure, s->r, s->g,
+                 s->brush, x0, my0, p0, px, my, mappedP, s->r, s->g,
                  s->b))
             stampResolved(s, d);
     }
     if (s->symX && s->symY) {  // quadrant mirror
+        const float mx0 = 2 * s->symXAt - x0, my0 = 2 * s->symYAt - y0;
         const float mx = 2 * s->symXAt - px, my = 2 * s->symYAt - py;
         for (const auto& d : openclip::interpolateStamps(
-                 s->brush, mx, my, pressure, mx, my, pressure, s->r, s->g,
+                 s->brush, mx0, my0, p0, mx, my, mappedP, s->r, s->g,
                  s->b))
             stampResolved(s, d);
     }
+    s->lastX = px;
+    s->lastY = py;
+    s->lastP = mappedP;
+    s->strokeOpen = true;
 }
 
 }  // namespace
@@ -720,6 +740,7 @@ Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
                                                  jfloat pressure) {
     Session* s = asSession(handle);
     if (!s) return 0;
+    s->strokeOpen = false;
     hist(s).beginStroke();
     rulerStamp(s, x, y, pressure);
     // M6: rulers transform input here. Stroke ids are cosmetic (single
@@ -868,6 +889,7 @@ Java_dev_openclip_engine_EngineHost_nStrokeEnd(JNIEnv*, jclass, jlong handle,
                                                jlong /*strokeId*/) {
     Session* s = asSession(handle);
     if (!s) return;
+    s->strokeOpen = false;
     hist(s).endStroke(cur(s));
 }
 

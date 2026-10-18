@@ -1,29 +1,39 @@
-// OpenClip M2 — top tool palette: brush/eraser mode, brush JSON push
-// (radius/hardness/opaque/spacing + M2 keys stabilize/curve, mode), and
-// undo/redo buttons whose enabled state is tracked from engine returns
-// and refreshed after each stroke via EngineSurface.onStrokeChanged.
-// M3 adds a "Filtres" button opening the filter dialog (FilterDialog.kt).
+// OpenClip — compact studio top toolbar: brush/eraser mode, inline size &
+// opacity sliders, collapsible stabilization/pressure/symmetry bar, and
+// undo/redo/filter/file actions.
 package dev.openclip.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
+import java.util.Locale
 
 data class BrushState(
     val color: String,
@@ -34,12 +44,17 @@ data class BrushState(
     val curve: Float = 0f
 )
 
-private fun BrushState.toJson(): String =
-    """{"radius":%f,"hardness":%f,"opaque":%f,"spacing":0.15,"color":"%s","stabilize":%f,"curve":%f,"mode":"%s"}"""
-        .format(
-            radius, if (isBrush) 0.7f else 0f, opaque, color,
-            stabilize, curve, if (isBrush) "brush" else "eraser"
-        )
+private fun BrushState.toJson(): String = String.format(
+    Locale.US,
+    """{"radius":%.2f,"hardness":%.2f,"opaque":%.2f,"spacing":0.15,"color":"%s","stabilize":%.2f,"curve":%.2f,"mode":"%s"}""",
+    radius,
+    if (isBrush) 0.7f else 0.9f,
+    opaque,
+    color,
+    stabilize,
+    curve,
+    if (isBrush) "brush" else "eraser"
+)
 
 private const val DEFAULT_INK = "#141414"
 
@@ -52,36 +67,60 @@ fun ToolPalette(
     modifier: Modifier = Modifier
 ) {
     var isBrush by remember { mutableStateOf(true) }
-    var radius by remember { mutableStateOf(8f) }
+    var radius by remember { mutableStateOf(10f) }
     var opaque by remember { mutableStateOf(1f) }
-    var stabilize by remember { mutableStateOf(0f) }
+    var stabilize by remember { mutableStateOf(0.15f) }
     var curve by remember { mutableStateOf(0f) }
     var inkColor by remember { mutableStateOf(initialColor) }
-    // Real undo/redo state: a finished stroke makes undo available and
-    // clears redo; tap results update both (false = stack exhausted).
     var canUndo by remember { mutableStateOf(false) }
     var canRedo by remember { mutableStateOf(false) }
-    // M3: filter dialog visibility.
     var showFilters by remember { mutableStateOf(false) }
+    var showAdvanced by remember { mutableStateOf(false) }
+    var symX by remember { mutableStateOf(false) }
+    var symY by remember { mutableStateOf(false) }
 
     fun pushBrush() = surface.setBrush(
         BrushState(inkColor, isBrush, radius, opaque, stabilize, curve).toJson()
     )
 
+    fun pushSymmetry() {
+        val sx = if (symX) surface.canvasWidth() / 2f else -1f
+        val sy = if (symY) surface.canvasHeight() / 2f else -1f
+        surface.setRulers(
+            String.format(Locale.US, """{"symX":%.1f,"symY":%.1f}""", sx, sy)
+        )
+    }
+
+    LaunchedEffect(initialColor) {
+        if (inkColor != initialColor) {
+            inkColor = initialColor
+            pushBrush()
+        }
+    }
+
     LaunchedEffect(surface) {
-        // Chain: MainActivity may already observe stroke changes to
-        // refresh panels; wrap, don't clobber.
         val prev = surface.onStrokeChanged
         surface.onStrokeChanged = {
             prev?.invoke()
             canUndo = true
             canRedo = false
         }
+        pushBrush()
     }
 
-    Column(modifier = modifier) {
+    val compactPad = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Color(0xFF202026))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             FilterChip(
@@ -94,67 +133,156 @@ fun ToolPalette(
                 onClick = { isBrush = false; pushBrush() },
                 label = { Text(stringResource(R.string.eraser)) }
             )
-            Button(
+
+            // Compact inline Brush Size slider
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            ) {
+                Text(
+                    "${radius.toInt()}px",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFD0D0DC),
+                    modifier = Modifier.width(38.dp)
+                )
+                Slider(
+                    value = radius,
+                    onValueChange = { radius = it; pushBrush() },
+                    valueRange = 1f..128f,
+                    modifier = Modifier
+                        .width(110.dp)
+                        .height(28.dp)
+                )
+            }
+
+            // Compact inline Opacity slider
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            ) {
+                Text(
+                    stringResource(R.string.opacity, (opaque * 100).toInt()),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFD0D0DC)
+                )
+                Slider(
+                    value = opaque,
+                    onValueChange = { opaque = it; pushBrush() },
+                    modifier = Modifier
+                        .width(96.dp)
+                        .height(28.dp)
+                )
+            }
+
+            FilterChip(
+                selected = showAdvanced,
+                onClick = { showAdvanced = !showAdvanced },
+                label = { Text("⚙") }
+            )
+
+            OutlinedButton(
                 onClick = {
                     val ok = surface.undo()
                     if (ok) canRedo = true else canUndo = false
                 },
-                enabled = canUndo
+                enabled = canUndo,
+                contentPadding = compactPad,
+                modifier = Modifier.height(34.dp)
             ) {
-                Text(stringResource(R.string.undo), modifier = Modifier.padding(2.dp))
+                Text(stringResource(R.string.undo), style = MaterialTheme.typography.labelMedium)
             }
-            Button(
+            OutlinedButton(
                 onClick = {
                     val ok = surface.redo()
                     if (ok) canUndo = true else canRedo = false
                 },
-                enabled = canRedo
+                enabled = canRedo,
+                contentPadding = compactPad,
+                modifier = Modifier.height(34.dp)
             ) {
-                Text(stringResource(R.string.redo), modifier = Modifier.padding(2.dp))
+                Text(stringResource(R.string.redo), style = MaterialTheme.typography.labelMedium)
             }
-            Button(onClick = { showFilters = true }) {
-                Text(stringResource(R.string.filters), modifier = Modifier.padding(2.dp))
+            Button(
+                onClick = { showFilters = true },
+                contentPadding = compactPad,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF32323D),
+                    contentColor = Color(0xFFECECF1)
+                ),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text(stringResource(R.string.filters), style = MaterialTheme.typography.labelMedium)
             }
-            Button(onClick = onImportClicked) {
-                Text(stringResource(R.string.import_doc))
+            Button(
+                onClick = onImportClicked,
+                contentPadding = compactPad,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF32323D),
+                    contentColor = Color(0xFFECECF1)
+                ),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text(stringResource(R.string.import_doc), style = MaterialTheme.typography.labelMedium)
             }
-            Button(onClick = onFileClicked) {
-                Text(stringResource(R.string.file_menu))
+            Button(
+                onClick = onFileClicked,
+                contentPadding = compactPad,
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text(stringResource(R.string.file_menu), style = MaterialTheme.typography.labelMedium)
             }
         }
+
+        if (showAdvanced) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    stringResource(R.string.stabilize, (stabilize * 100).toInt()),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFB8B8C8)
+                )
+                Slider(
+                    value = stabilize,
+                    onValueChange = { stabilize = it; pushBrush() },
+                    valueRange = 0f..1f,
+                    modifier = Modifier
+                        .width(110.dp)
+                        .height(26.dp)
+                )
+                Text(
+                    stringResource(R.string.curve, (curve * 100).toInt()),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFB8B8C8)
+                )
+                Slider(
+                    value = curve,
+                    onValueChange = { curve = it; pushBrush() },
+                    valueRange = 0f..1f,
+                    modifier = Modifier
+                        .width(110.dp)
+                        .height(26.dp)
+                )
+                FilterChip(
+                    selected = symX,
+                    onClick = { symX = !symX; pushSymmetry() },
+                    label = { Text("Sym X", style = MaterialTheme.typography.labelSmall) }
+                )
+                FilterChip(
+                    selected = symY,
+                    onClick = { symY = !symY; pushSymmetry() },
+                    label = { Text("Sym Y", style = MaterialTheme.typography.labelSmall) }
+                )
+            }
+        }
+
         if (showFilters) {
             FilterDialog(surface = surface, onDismiss = { showFilters = false })
         }
-        Text(
-            stringResource(R.string.opacity, (opaque * 100).toInt()),
-            style = androidx.compose.material3.MaterialTheme.typography.labelSmall
-        )
-        Slider(
-            value = opaque,
-            onValueChange = { opaque = it; pushBrush() }
-        )
-        Slider(
-            value = radius,
-            onValueChange = { radius = it; pushBrush() },
-            valueRange = 1f..128f
-        )
-        Text(
-            stringResource(R.string.stabilize, (stabilize * 100).toInt()),
-            style = androidx.compose.material3.MaterialTheme.typography.labelSmall
-        )
-        Slider(
-            value = stabilize,
-            onValueChange = { stabilize = it; pushBrush() },
-            valueRange = 0f..1f
-        )
-        Text(
-            stringResource(R.string.curve, (curve * 100).toInt()),
-            style = androidx.compose.material3.MaterialTheme.typography.labelSmall
-        )
-        Slider(
-            value = curve,
-            onValueChange = { curve = it; pushBrush() },
-            valueRange = 0f..1f
-        )
     }
 }

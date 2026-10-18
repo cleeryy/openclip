@@ -1,19 +1,22 @@
-// OpenClip M1 — canvas view: SurfaceView hosting the render thread.
-// Input (stylus/touch) is captured on the UI thread and queued; stroke
-// replay and compositing happen on the render thread only, per the
-// threading note in ARCHITECTURE.md. Phase 2 replaces the full-canvas
-// IntArray composite with a Direct/AndroidHardwareBuffer image path.
+// OpenClip — canvas view: SurfaceView hosting the render thread.
+// Input (stylus/touch/mouse) is mapped from the letterboxed 4:3 paper
+// viewport to engine coordinates (2048x1536) and queued to the render
+// thread. All JNI calls synchronize on engineLock so UI actions and
+// render-thread compositing never race.
+// SPDX-License-Identifier: GPL-3.0-or-later
 package dev.openclip.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Paint
 import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.Surface
-import android.view.SurfaceView
 import android.view.SurfaceHolder
+import android.view.SurfaceView
 import dev.openclip.engine.EngineHost
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
 
 class EngineSurface(context: Context) : SurfaceView(context) {
 
@@ -24,9 +27,6 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         val action: Int
     )
 
-    // M3: a named filter application request. Processed on the render
-    // thread only (ARCHITECTURE.md threading); the result is posted back
-    // to the caller on the UI thread.
     private data class FilterRequest(
         val name: String,
         val paramsJson: String,
@@ -38,38 +38,68 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             """{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
     }
 
-    private val engineWidth: Int
-    private val engineHeight: Int
-    private var handle: Long = 0
+    private val engineWidth: Int = 2048
+    private val engineHeight: Int = 1536
+    private val engineLock = Any()
+    @Volatile private var handle: Long = 0
     private var strokeId = 0L
     private val queue = ArrayDeque<QueuedPoint>()
     private val filterQueue = ArrayDeque<FilterRequest>()
     private val running = AtomicBoolean(false)
-    private var needsComposite = true
+    @Volatile private var needsComposite = true
 
-    // M2: invoked (posted to the UI thread) at each stroke end so panels
-    // can refresh real undo/redo state. Null = no listener.
     var onStrokeChanged: (() -> Unit)? = null
 
-    init {
-        // Phase 1: canvas lives at fixed reference resolution and is
-        // letterboxed into the view; pan/zoom comes with the M5 tool work.
-        engineWidth = 2048
-        engineHeight = 1536
+    private fun computePaperRect(viewW: Int, viewH: Int): RectF {
+        if (viewW <= 0 || viewH <= 0) {
+            return RectF(0f, 0f, engineWidth.toFloat(), engineHeight.toFloat())
+        }
+        val pad = 12f
+        val availW = (viewW - pad * 2f).coerceAtLeast(1f)
+        val availH = (viewH - pad * 2f).coerceAtLeast(1f)
+        val scale = min(availW / engineWidth.toFloat(), availH / engineHeight.toFloat())
+        val drawW = engineWidth * scale
+        val drawH = engineHeight * scale
+        val left = (viewW - drawW) * 0.5f
+        val top = (viewH - drawH) * 0.5f
+        return RectF(left, top, left + drawW, top + drawH)
+    }
+
+    private fun mapToEngineX(vx: Float): Float {
+        val rect = computePaperRect(width, height)
+        if (rect.width() <= 1f) return vx.coerceIn(0f, engineWidth - 1f)
+        return (((vx - rect.left) / rect.width()) * engineWidth)
+            .coerceIn(0f, engineWidth - 1f)
+    }
+
+    private fun mapToEngineY(vy: Float): Float {
+        val rect = computePaperRect(width, height)
+        if (rect.height() <= 1f) return vy.coerceIn(0f, engineHeight - 1f)
+        return (((vy - rect.top) / rect.height()) * engineHeight)
+            .coerceIn(0f, engineHeight - 1f)
     }
 
     fun start(dpi: Float) {
+        synchronized(engineLock) {
+            if (handle == 0L) {
+                handle = EngineHost.nInit(engineWidth, engineHeight, dpi)
+                EngineHost.nSetBrush(handle, DEFAULT_BRUSH)
+            }
+        }
         holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                if (handle == 0L) {
-                    handle = EngineHost.nInit(engineWidth, engineHeight, dpi)
-                    setBrush(DEFAULT_BRUSH)
+                synchronized(engineLock) {
+                    if (handle == 0L) {
+                        handle = EngineHost.nInit(engineWidth, engineHeight, dpi)
+                        EngineHost.nSetBrush(handle, DEFAULT_BRUSH)
+                    }
                 }
                 needsComposite = true
-                running.set(true)
-                Thread(::renderLoop, "openclip-render").apply {
-                    isDaemon = true
-                    start()
+                if (!running.getAndSet(true)) {
+                    Thread(::renderLoop, "openclip-render").apply {
+                        isDaemon = true
+                        start()
+                    }
                 }
             }
 
@@ -85,135 +115,153 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun dispose() {
         running.set(false)
-        if (handle != 0L) EngineHost.nDispose(handle)
-        handle = 0
+        synchronized(engineLock) {
+            if (handle != 0L) EngineHost.nDispose(handle)
+            handle = 0
+        }
     }
 
     fun setBrush(json: String) {
-        if (handle != 0L) EngineHost.nSetBrush(handle, json)
+        synchronized(engineLock) {
+            if (handle != 0L) EngineHost.nSetBrush(handle, json)
+        }
     }
 
-    // M5: feed a .myb document to the engine; false = malformed, brush kept.
-    fun loadMyb(xml: String): Boolean =
+    fun loadMyb(xml: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nLoadMyb(handle, xml) else false
+    }
 
-    // M5 layer system: thin wrappers; the engine owns truth, the panel
-    // pushes through these exact symbols. Each op marks the composite
-    // dirty on success so the SurfaceView re-renders.
-    fun addLayerNamed(name: String) =
-        if (handle != 0L) EngineHost.nAddLayer(handle, name) else -1
+    fun addLayerNamed(name: String): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nAddLayer(handle, name)
+            .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun addLayer() = addLayerNamed("Layer")
+    fun addLayer(): Int = addLayerNamed("Layer")
 
-    fun addGroup(name: String) =
-        if (handle != 0L) EngineHost.nAddGroup(handle, name) else -1
+    fun addGroup(name: String): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nAddGroup(handle, name)
+            .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun layerState(): String =
+    fun layerState(): String = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nLayerState(handle)
         else "{\"active\":0,\"maskTarget\":-1,\"layers\":[]}"
+    }
 
-    fun setLayerVisibility(index: Int, visible: Boolean) =
+    fun setLayerVisibility(index: Int, visible: Boolean): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerVisibility(handle, index, visible)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun setLayerOpacity(index: Int, opacity: Float) =
+    fun setLayerOpacity(index: Int, opacity: Float): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerOpacity(handle, index, opacity)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun setLayerBlend(index: Int, name: String) =
+    fun setLayerBlend(index: Int, name: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerBlend(handle, index, name)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun setLayerName(index: Int, name: String) =
+    fun setLayerName(index: Int, name: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerName(handle, index, name) else false
+    }
 
-    // M8 adjustment layers (M8 symbol; null/empty json clears the
-    // descriptor — ARCHITECTURE.md "M8 additions").
-    fun setLayerAdjustment(index: Int, json: String?) =
+    fun setLayerAdjustment(index: Int, json: String?): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerAdjustment(handle, index, json)
             .also { if (it) needsComposite = true } else false
+    }
 
-    // M9 glTF reference model (thin wrappers over the M9 symbols;
-    // rendering lives in nCompositeInto — the overlay never reaches
-    // thumbnails/export).
-    fun loadGlbReference(path: String) =
-        if (handle != 0L) EngineHost.nLoadGlbReference(handle, path) else -1
+    fun loadGlbReference(path: String): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nLoadGlbReference(handle, path)
+            .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun setRefView(json: String) =
+    fun setRefView(json: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetRefView(handle, json)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun setRefVisible(on: Boolean) =
+    fun setRefVisible(on: Boolean): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetRefVisible(handle, on)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun applyTone(name: String) =
+    fun applyTone(name: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nApplyTone(handle, name)
-            .also { if (it) needsComposite = true } else false
+            .also {
+                if (it) {
+                    needsComposite = true
+                    notifyStrokeChanged()
+                }
+            } else false
+    }
 
     fun layerOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
-    // M6 vector layers + rulers (thin wrappers over the exact symbols).
-    fun addVectorLayer(name: String) =
+    fun addVectorLayer(name: String): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAddVectorLayer(handle, name)
             .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun setVectorMode(index: Int, on: Boolean) =
+    fun setVectorMode(index: Int, on: Boolean): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetVectorMode(handle, index, on)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun appendVectorPath(index: Int, pathJson: String) =
+    fun appendVectorPath(index: Int, pathJson: String): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAppendVectorPath(handle, index, pathJson)
             .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun vectorEraser(index: Int, pathJson: String) =
+    fun vectorEraser(index: Int, pathJson: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nVectorEraser(handle, index, true, pathJson)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun undoVectorPath(index: Int) =
+    fun undoVectorPath(index: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nUndoVector(handle, index)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun setRulers(kindsJson: String) =
+    fun setRulers(kindsJson: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetRulers(handle, kindsJson) else false
+    }
 
-    // M7 frames + onion skin (thin wrappers over the exact M7 symbols;
-    // fps stays app-side — no engine symbol — the timeline owns it).
-    fun frameCount() = if (handle != 0L) EngineHost.nFrameCount(handle) else 0
+    fun frameCount(): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nFrameCount(handle) else 0
+    }
 
-    fun addFrame() =
+    fun addFrame(): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAddFrame(handle)
             .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun duplicateFrame() =
+    fun duplicateFrame(): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nDuplicateFrame(handle)
             .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun deleteFrame(index: Int) =
+    fun deleteFrame(index: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nDeleteFrame(handle, index)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun setFrame(index: Int) =
+    fun setFrame(index: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetFrame(handle, index)
             .also { if (it) needsComposite = true } else false
+    }
 
     fun frameOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
     fun setOnion(previous: Boolean, next: Boolean, strength: Float) {
-        if (handle == 0L || !running.get()) return
-        synchronized(engineQueue) {
-            engineQueue.add(
-                EngineOp {
-                    if (EngineHost.nSetOnion(handle, previous, next, strength))
-                        needsComposite = true
-                }
-            )
+        synchronized(engineLock) {
+            if (handle != 0L && EngineHost.nSetOnion(handle, previous, next, strength)) {
+                needsComposite = true
+            }
         }
     }
 
-    // M7 thumbnails: pulled on the render thread (engine state stays
-    // single-thread), full-canvas nFrameCompositeInto downscaled to 96px
-    // wide app-side, result posted on the UI thread. Null = no engine.
     private data class ThumbRequest(
         val index: Int,
         val onResult: (Bitmap?) -> Unit,
@@ -226,8 +274,6 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         synchronized(thumbQueue) { thumbQueue.add(ThumbRequest(index, onResult)) }
     }
 
-    // M7b export: full-res frame pull on the render thread (same queue
-    // discipline as thumbnails, no downscale). Null = no engine.
     fun pullFrameFull(index: Int, onResult: (Bitmap?) -> Unit) {
         if (handle == 0L || !running.get()) { post { onResult(null) }; return }
         synchronized(thumbQueue) {
@@ -244,9 +290,11 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         for (req in drained) {
             val bmp: Bitmap? = try {
                 val px = IntArray(engineWidth * engineHeight)
-                val n = EngineHost.nFrameCompositeInto(
-                    handle, req.index, px, engineWidth, engineHeight
-                )
+                val n = synchronized(engineLock) {
+                    EngineHost.nFrameCompositeInto(
+                        handle, req.index, px, engineWidth, engineHeight
+                    )
+                }
                 if (n <= 0) {
                     null
                 } else {
@@ -274,46 +322,57 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     fun canvasWidth(): Int = engineWidth
     fun canvasHeight(): Int = engineHeight
 
-    fun moveLayer(from: Int, to: Int) =
+    fun moveLayer(from: Int, to: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nMoveLayer(handle, from, to)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun appendChild(parent: Int, name: String) =
+    fun appendChild(parent: Int, name: String): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAppendChild(handle, parent, name)
             .also { if (it >= 0) needsComposite = true } else -1
+    }
 
-    fun setLayerClipped(index: Int, clipped: Boolean) =
+    fun setLayerClipped(index: Int, clipped: Boolean): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerClipped(handle, index, clipped)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun addLayerMask(index: Int) =
+    fun addLayerMask(index: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAddLayerMask(handle, index)
             .also { if (it) needsComposite = true } else false
+    }
 
-    fun maskTarget(index: Int, onMask: Boolean) =
+    fun maskTarget(index: Int, onMask: Boolean): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nMaskTarget(handle, index, onMask) else false
+    }
 
-    fun layerCount() = if (handle != 0L) EngineHost.nLayerCount(handle) else 0
+    fun layerCount(): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nLayerCount(handle) else 0
+    }
 
-    fun setActiveLayer(index: Int) = if (handle != 0L) EngineHost.nSetActiveLayer(handle, index) else -1
+    fun setActiveLayer(index: Int): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetActiveLayer(handle, index) else -1
+    }
 
-    fun undo(): Boolean = if (handle != 0L) EngineHost.nUndo(handle).also { if (it) needsComposite = true } else false
+    fun undo(): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nUndo(handle).also { if (it) needsComposite = true } else false
+    }
 
-    fun redo(): Boolean = if (handle != 0L) EngineHost.nRedo(handle).also { if (it) needsComposite = true } else false
+    fun redo(): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nRedo(handle).also { if (it) needsComposite = true } else false
+    }
 
-    // M4: document save/load run on the render thread like everything
-    // else that touches engine state (ARCHITECTURE.md threading). The
-    // SDK/SAF layer copies bytes to a real path first; the engine only
-    // ever sees a plain filesystem path. onResult posts on the UI thread.
-    // M5: every layer op funnels through runOnEngine so panel actions
-    // (visibility/opacity/blend/rename/move/mask/clip) execute on the
-    // render thread like strokes and filters — never on the UI thread.
     private data class EngineOp(val run: () -> Unit)
     private val engineQueue = ArrayDeque<EngineOp>()
 
     private fun runOnEngine(op: EngineSurface.() -> Unit) {
-        if (handle == 0L || !running.get()) return
-        synchronized(engineQueue) { engineQueue.add(EngineOp { op() }) }
+        if (handle == 0L) return
+        synchronized(engineLock) {
+            try {
+                op()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun drainEngineQueue() {
@@ -324,13 +383,18 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         }
         for (op in drained) {
             try {
-                op.run()
+                synchronized(engineLock) { op.run() }
             } catch (_: Exception) {
             }
         }
     }
 
-    private data class DocRequest(val kind: String, val path: String, val format: String, val onResult: (Boolean) -> Unit)
+    private data class DocRequest(
+        val kind: String,
+        val path: String,
+        val format: String,
+        val onResult: (Boolean) -> Unit
+    )
     private val docQueue = ArrayDeque<DocRequest>()
 
     fun loadFrom(path: String, onResult: (Boolean) -> Unit) {
@@ -350,23 +414,21 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             docQueue.clear()
         }
         for (r in drained) {
-            val ok = when (r.kind) {
-                "load" -> {
-                    val b = EngineHost.nLoadDocument(handle, r.path)
-                    if (b) needsComposite = true
-                    b
+            val ok = synchronized(engineLock) {
+                when (r.kind) {
+                    "load" -> {
+                        val b = EngineHost.nLoadDocument(handle, r.path)
+                        if (b) needsComposite = true
+                        b
+                    }
+                    "save" -> EngineHost.nSaveDocument(handle, r.path, r.format)
+                    else -> false
                 }
-                "save" -> EngineHost.nSaveDocument(handle, r.path, r.format)
-                else -> false
             }
             post { r.onResult(ok) }
         }
     }
 
-    // M3: enqueue a named filter over the full active layer. runs on the
-    // render thread like strokes (nCompositeInto is render-thread only);
-    // needsComposite is set on success so the UI refreshes. onResult is
-    // posted on the UI thread (SurfaceView.post is UI-thread safe).
     fun applyFilter(name: String, paramsJson: String, onResult: (Boolean) -> Unit) {
         if (handle == 0L || !running.get()) {
             post { onResult(false) }
@@ -379,14 +441,14 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (handle == 0L || !running.get()) return false
-        // Digitizers report 0..1; finger touch reports 0..1 too but weaker —
-        // uniform scale of 2 is applied then clamped (M2 adds a curve editor).
-        val pressure = (event.getPressure(0) * 2f).coerceIn(0f, 1f)
+        val rawP = event.getPressure(0)
+        val pressure = (if (rawP <= 0f) 0.5f else rawP * 2f).coerceIn(0.05f, 1f)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                strokeId = EngineHost.nStrokeBegin(
-                    handle, event.getX(0), event.getY(0), pressure
-                )
+                val rect = computePaperRect(width, height)
+                if (width > 0 && height > 0 && !rect.contains(event.getX(0), event.getY(0))) {
+                    return false
+                }
                 enqueue(event, pressure, MotionEvent.ACTION_DOWN)
             }
             MotionEvent.ACTION_MOVE -> {
@@ -395,9 +457,6 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP,
             MotionEvent.ACTION_CANCEL -> {
                 enqueue(event, pressure, MotionEvent.ACTION_UP)
-                EngineHost.nStrokeEnd(handle, strokeId)
-                strokeId = 0
-                notifyStrokeChanged()
             }
         }
         requestParentDisallowInterceptTouchEvent()
@@ -408,24 +467,20 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         synchronized(queue) {
             if (action == MotionEvent.ACTION_MOVE) {
                 for (i in 0 until event.historySize) {
-                    queue.add(
-                        QueuedPoint(
-                            event.getHistoricalX(0, i),
-                            event.getHistoricalY(0, i),
-                            pressure,
-                            action
-                        )
-                    )
+                    val hx = mapToEngineX(event.getHistoricalX(0, i))
+                    val hy = mapToEngineY(event.getHistoricalY(0, i))
+                    val hp = (event.getHistoricalPressure(0, i) * 2f).coerceIn(0.05f, 1f)
+                    queue.add(QueuedPoint(hx, hy, hp, MotionEvent.ACTION_MOVE))
                 }
             }
-            queue.add(QueuedPoint(event.getX(0), event.getY(0), pressure, action))
+            val cx = mapToEngineX(event.getX(0))
+            val cy = mapToEngineY(event.getY(0))
+            queue.add(QueuedPoint(cx, cy, pressure, action))
         }
     }
 
     private fun notifyStrokeChanged() {
         val cb = onStrokeChanged ?: return
-        // Called from the render thread; the listener posts to UI itself
-        // if it needs Compose state. SurfaceView.post is UI-thread safe.
         post { cb() }
     }
 
@@ -434,9 +489,18 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     }
 
     private fun renderLoop() {
-        var bitmapW = 0
-        var bitmapH = 0
         val pixels = IntArray(engineWidth * engineHeight)
+        val frame = Bitmap.createBitmap(
+            engineWidth, engineHeight, Bitmap.Config.ARGB_8888
+        )
+        val borderPaint = Paint().apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 2f
+            color = 0xFF3E3E4A.toInt()
+            isAntiAlias = true
+        }
+        val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
         while (running.get()) {
             val surface: Surface? = holder.surface
             if (surface == null || !surface.isValid) {
@@ -444,35 +508,52 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                 continue
             }
 
-            // Drain queued input onto the engine in received order.
             val drained: List<QueuedPoint>
             synchronized(queue) {
                 drained = queue.toList()
                 queue.clear()
             }
             if (drained.isNotEmpty()) {
-                for (pt in drained) {
-                    if (pt.action == MotionEvent.ACTION_DOWN) {
-                        // Already applied at Begin; only accounting here.
-                        needsComposite = true
-                        continue
-                    }
-                    if (strokeId != 0L) {
-                        EngineHost.nStrokeMove(
-                            handle, strokeId, pt.x, pt.y, pt.pressure
-                        )
-                        needsComposite = true
-                        if (pt.action == MotionEvent.ACTION_UP) {
-                            EngineHost.nStrokeEnd(handle, strokeId)
-                            strokeId = 0
-                            notifyStrokeChanged()
+                synchronized(engineLock) {
+                    for (pt in drained) {
+                        when (pt.action) {
+                            MotionEvent.ACTION_DOWN -> {
+                                if (strokeId != 0L) {
+                                    EngineHost.nStrokeEnd(handle, strokeId)
+                                }
+                                strokeId = EngineHost.nStrokeBegin(
+                                    handle, pt.x, pt.y, pt.pressure
+                                )
+                                needsComposite = true
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                if (strokeId == 0L) {
+                                    strokeId = EngineHost.nStrokeBegin(
+                                        handle, pt.x, pt.y, pt.pressure
+                                    )
+                                } else {
+                                    EngineHost.nStrokeMove(
+                                        handle, strokeId, pt.x, pt.y, pt.pressure
+                                    )
+                                }
+                                needsComposite = true
+                            }
+                            MotionEvent.ACTION_UP -> {
+                                if (strokeId != 0L) {
+                                    EngineHost.nStrokeMove(
+                                        handle, strokeId, pt.x, pt.y, pt.pressure
+                                    )
+                                    EngineHost.nStrokeEnd(handle, strokeId)
+                                    strokeId = 0L
+                                    notifyStrokeChanged()
+                                }
+                                needsComposite = true
+                            }
                         }
                     }
                 }
             }
 
-            // M3: drain queued filter requests onto the engine in order,
-            // on this same render thread, before compositing.
             val filters: List<FilterRequest>
             synchronized(filterQueue) {
                 filters = filterQueue.toList()
@@ -481,23 +562,23 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             if (filters.isNotEmpty() && handle != 0L) {
                 for (req in filters) {
                     val ok = try {
-                        EngineHost.nApplyFilter(handle, req.name, req.paramsJson)
+                        synchronized(engineLock) {
+                            EngineHost.nApplyFilter(handle, req.name, req.paramsJson)
+                        }
                     } catch (_: Exception) {
                         false
                     }
-                    if (ok) needsComposite = true
+                    if (ok) {
+                        needsComposite = true
+                        notifyStrokeChanged()
+                    }
                     val cb = req.onResult
                     post { cb(ok) }
                 }
             }
 
-            // M4: drain queued document save/load requests on this render
-            // thread before compositing (engine state stays single-thread).
             drainDocQueue()
-            // M5: drain queued panel ops on this render thread too.
             drainEngineQueue()
-            // M7: drain queued thumbnail pulls (frame composites for the
-            // timeline strip; engine stays render-thread only).
             drainThumbQueue()
 
             if (!needsComposite) {
@@ -506,21 +587,22 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             }
             needsComposite = false
 
-            if (bitmapW != engineWidth || bitmapH != engineHeight) {
-                bitmapW = engineWidth
-                bitmapH = engineHeight
+            synchronized(engineLock) {
+                EngineHost.nCompositeInto(handle, pixels, engineWidth, engineHeight)
             }
-            val frame = Bitmap.createBitmap(
-                engineWidth, engineHeight, Bitmap.Config.ARGB_8888
-            )
-            EngineHost.nCompositeInto(handle, pixels, engineWidth, engineHeight)
             frame.setPixels(pixels, 0, engineWidth, 0, 0, engineWidth, engineHeight)
             val c = holder.lockCanvas()
             if (c != null) {
-                c.drawBitmap(frame, null, RectF(0f, 0f, width.toFloat(), height.toFloat()), null)
-                holder.unlockCanvasAndPost(c)
+                try {
+                    c.drawColor(0xFF141418.toInt())
+                    val dst = computePaperRect(c.width, c.height)
+                    c.drawBitmap(frame, null, dst, bitmapPaint)
+                    c.drawRect(dst, borderPaint)
+                } finally {
+                    holder.unlockCanvasAndPost(c)
+                }
             }
-            frame.recycle()
         }
+        frame.recycle()
     }
 }
