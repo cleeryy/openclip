@@ -84,4 +84,20 @@
     <string name="fisheye">Fisheye %1$d%%</string>
     <string name="ref_loaded">Référence chargée (%1$d arêtes).</string>
     <string name="ref_failed">Échec de l’import de la référence.</string>
+    <string name="materials">Matériaux</string>
+    <string name="tone_hatch">Hachures</string>
+    <string name="tone_cross">Croisées</string>
+    <string name="tone_dots">Points</string>
+    <string name="tone_grid">Grille</string>
+    <string name="tone_checker">Damier</string>
+    <string name="tone_stripes">Rayures</string>
+    <string name="webdav">WebDAV</string>
+    <string name="webdav_title">Sync WebDAV</string>
+    <string name="webdav_push">Envoyer</string>
+    <string name="webdav_pull">Récupérer</string>
+    <string name="webdav_url">URL</string>
+    <string name="webdav_user">Utilisateur</string>
+    <string name="webdav_pass">Mot de passe</string>
+    <string name="webdav_ok">WebDAV réussi.</string>
+    <string name="webdav_failed">Échec WebDAV.</string>
 </resources>

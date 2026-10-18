@@ -37,14 +37,17 @@ import dev.openclip.R
 import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
+import dev.openclip.media.WebdavClient
 import dev.openclip.ui.ColorPicker
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.LayerPanel
+import dev.openclip.ui.MaterialsRow
 import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ReferencePanel
 import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
+import dev.openclip.ui.WebdavDialog
 
 class MainActivity : ComponentActivity() {
 
@@ -79,6 +82,9 @@ class MainActivity : ComponentActivity() {
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
         // M9: glTF reference model (session-only, never in exports).
         val refModelName = remember { mutableStateOf<String?>(null) }
+        // M10: WebDAV sync dialog (self-hosted, user-configured only).
+        val showWebdav = remember { mutableStateOf(false) }
+        val webdavUrl = remember { mutableStateOf("") }
 
         // M4: SAF bridge. Files go through cacheDir copies so the engine
         // keeps seeing plain filesystem paths only (no Android IO inside
@@ -392,6 +398,74 @@ class MainActivity : ComponentActivity() {
                         .fillMaxWidth()
                         .padding(4.dp)
                 )
+                // M10: materials + WebDAV entry (self-hosted sync).
+                MaterialsRow(
+                    surface = surface,
+                    onWebdav = { showWebdav.value = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(4.dp)
+                )
+                if (showWebdav.value) {
+                    WebdavDialog(
+                        onDismiss = { showWebdav.value = false },
+                        initialUrl = webdavUrl.value,
+                        onAction = { push, url, user, pass ->
+                            webdavUrl.value = url
+                            showWebdav.value = false
+                            if (url.isBlank()) {
+                                status.value =
+                                    ctx.getString(R.string.webdav_failed)
+                                return@WebdavDialog
+                            }
+                            Thread {
+                                var ok: Boolean
+                                val doc = java.io.File(
+                                    ctx.cacheDir, "webdav-${System.currentTimeMillis()}.ora"
+                                )
+                                if (push) {
+                                    var saved = false
+                                    val lock = Object()
+                                    surface.saveTo(doc.absolutePath, "ora") { s ->
+                                        saved = s
+                                        synchronized(lock) { lock.notifyAll() }
+                                    }
+                                    synchronized(lock) {
+                                        while (!saved) lock.wait(20000)
+                                    }
+                                    ok = saved && WebdavClient.push(
+                                        doc, url.trim(), user, pass
+                                    )
+                                } else {
+                                    ok = WebdavClient.pull(
+                                        url.trim(), user, pass, doc
+                                    )
+                                    if (ok) {
+                                        val dst = doc.absolutePath
+                                        var loaded = false
+                                        val lock2 = Object()
+                                        surface.loadFrom(dst) { l ->
+                                            loaded = l
+                                            synchronized(lock2) { lock2.notifyAll() }
+                                        }
+                                        synchronized(lock2) {
+                                            while (!loaded) lock2.wait(20000)
+                                        }
+                                        ok = loaded
+                                        refreshKey.value++
+                                    }
+                                }
+                                doc.delete()
+                                val result = ok
+                                mainHandler.post {
+                                    status.value = if (result)
+                                        ctx.getString(R.string.webdav_ok)
+                                    else ctx.getString(R.string.webdav_failed)
+                                }
+                            }.start()
+                        }
+                    )
+                }
                 if (status.value.isNotEmpty()) {
                     androidx.compose.material3.Text(
                         status.value,

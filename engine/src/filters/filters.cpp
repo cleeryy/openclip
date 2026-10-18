@@ -541,6 +541,40 @@ bool applyFilter(Surface& s, const std::string& name,
     return true;
 }
 
+bool applyTone(Surface& s, const std::string& name) {
+    const std::vector<std::string> names = {"hatch", "crosshatch", "dots",
+                                            "grid", "checker", "stripes"};
+    if (std::find(names.begin(), names.end(), name) == names.end())
+        return false;
+    const int w = s.width(), h = s.height();
+    const std::uint8_t ink = 96;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            bool on = false;
+            if (name == "hatch") {
+                on = ((x + y) % 8) == 0;
+            } else if (name == "crosshatch") {
+                on = ((x + y) % 8) == 0 || ((x - y) % 8) == 0;
+            } else if (name == "dots") {
+                on = (x % 8 == 3 || x % 8 == 4) && (y % 8 == 3 || y % 8 == 4);
+            } else if (name == "grid") {
+                on = (x % 8) == 0 || (y % 8) == 0;
+            } else if (name == "checker") {
+                on = (((x / 4) + (y / 4)) % 2) == 0;
+            } else if (name == "stripes") {
+                on = (x % 8) < 4;
+            }
+            Pixel p = s.get(x, y);
+            const std::uint8_t v = on ? ink : 0;
+            p.r = v > p.a ? p.a : v;
+            p.g = v > p.a ? p.a : v;
+            p.b = v > p.a ? p.a : v;
+            s.set(x, y, p);
+        }
+    }
+    return true;
+}
+
 // --- M8 adjustment-layer ops (clean-room pixel math) ---
 
 bool isKnownAdjustType(const std::string& type) {

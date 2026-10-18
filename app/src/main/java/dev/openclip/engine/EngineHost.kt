@@ -74,4 +74,7 @@ object EngineHost {
     external fun nLoadGlbReference(handle: Long, path: String): Int
     external fun nSetRefView(handle: Long, json: String): Boolean
     external fun nSetRefVisible(handle: Long, on: Boolean): Boolean
+
+    // M10 additions (ARCHITECTURE.md): procedural material tones.
+    external fun nApplyTone(handle: Long, name: String): Boolean
 }

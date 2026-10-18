@@ -147,6 +147,10 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         if (handle != 0L) EngineHost.nSetRefVisible(handle, on)
             .also { if (it) needsComposite = true } else false
 
+    fun applyTone(name: String) =
+        if (handle != 0L) EngineHost.nApplyTone(handle, name)
+            .also { if (it) needsComposite = true } else false
+
     fun layerOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
     // M6 vector layers + rulers (thin wrappers over the exact symbols).

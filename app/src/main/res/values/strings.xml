@@ -97,4 +97,20 @@
     <string name="fisheye">Fisheye %1$d%%</string>
     <string name="ref_loaded">Reference loaded (%1$d edges).</string>
     <string name="ref_failed">Reference import failed.</string>
+    <string name="materials">Materials</string>
+    <string name="tone_hatch">Hatch</string>
+    <string name="tone_cross">Cross</string>
+    <string name="tone_dots">Dots</string>
+    <string name="tone_grid">Grid</string>
+    <string name="tone_checker">Checker</string>
+    <string name="tone_stripes">Stripes</string>
+    <string name="webdav">WebDAV</string>
+    <string name="webdav_title">WebDAV sync</string>
+    <string name="webdav_push">Push</string>
+    <string name="webdav_pull">Pull</string>
+    <string name="webdav_url">URL</string>
+    <string name="webdav_user">User</string>
+    <string name="webdav_pass">Password</string>
+    <string name="webdav_ok">WebDAV ok.</string>
+    <string name="webdav_failed">WebDAV failed.</string>
 </resources>

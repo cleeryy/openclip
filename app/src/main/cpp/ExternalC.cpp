@@ -903,6 +903,35 @@ Java_dev_openclip_engine_EngineHost_nApplyFilter(JNIEnv* env, jclass,
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nApplyTone(JNIEnv* env, jclass,
+                                               jlong handle, jstring name) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string tname = toStd(env, name);
+    // M10 contract: active layer, undoable like a filter (full-layer
+    // tile snapshots; unknown name leaves the layer untouched).
+    openclip::History& h = hist(s);
+    h.beginStroke();
+    const std::size_t layer = static_cast<std::size_t>(
+        cur(s).activeLayer() < 0 ? 0 : cur(s).activeLayer());
+    if (layer >= cur(s).layerCount()) {
+        h.cancelStroke(cur(s));
+        return JNI_FALSE;
+    }
+    openclip::Layer& ly = cur(s).layer(layer);
+    for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
+        for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
+            h.touchTile(cur(s), layer, tx, ty);
+    const bool ok = openclip::applyTone(ly.surface, tname);
+    if (ok) {
+        h.endStroke(cur(s));
+    } else {
+        h.cancelStroke(cur(s));
+    }
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 // M4 document I/O. Contract (ARCHITECTURE.md "M4 additions"): load
 // replaces the session canvas from a filesystem path (extension decides:
 // .ora full round trip, .png single flattened layer, .psd import). Save

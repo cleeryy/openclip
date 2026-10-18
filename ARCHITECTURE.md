@@ -162,6 +162,29 @@ M9 additions (defined 2026-10-17, 3D reference + lens round):
   to cacheDir, JNI load, composite shows non-white pixels, toggle
   clears them).
 
+M10 additions (defined 2026-10-17, ecosystem round — final):
+
+- Materials (engine): procedural clean-room tones, no assets. nApplyTone
+  (handle, name): Boolean — fills the ACTIVE layer's pixels with a
+  deterministic 8px-periodic ink pattern (premultiplied-safe: rgb
+  clamped to [0,alpha], alpha untouched — the M3 contract); undoable
+  like a filter (full-layer tile snapshots, cancel on failure).
+  Names: "hatch" (diagonal lines), "crosshatch", "dots", "grid",
+  "checker", "stripes" (vertical). Unknown name returns false, layer
+  untouched. No new formats, no telemetry.
+- WebDAV sync (app only — no engine/JNI symbols): WebdavClient
+  (HttpURLConnection, basic auth over https, no TLS bypass) with
+  push(docFile, url, user, pass) and pull(url, user, pass): File.
+  The UI dialog carries url/user/pass fields (plain, session-only);
+  failures surface as status strings. Server trust is the user's own
+  self-host (the "sans telemetry" goal: no cloud, no analytics).
+- Tests: engine — each tone name repaints the layer with the expected
+  periodicity (row/column sampling), alpha stays untouched, unknown
+  name = false + byte-identical layer; instrumented +1 — webdav
+  round-trip against an in-process loopback WebDAV responder
+  (ServerSocket: PUT 201 + GET bytes back + auth failure 401 surfaces
+  as failure) and a tone fill via JNI changes the composite.
+
 M6 additions (defined 2026-10-15, vector + rulers round):
 
 - Vector layer model (clean-room, no SVG dependency at the engine level):

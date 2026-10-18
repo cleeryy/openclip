@@ -66,6 +66,13 @@ std::vector<std::string> filterNames();
 bool applyFilter(Surface& s, const std::string& name,
                  const std::string& paramsJson, std::string& error);
 
+// M10 procedural material tones (ARCHITECTURE.md "M10 additions",
+// clean-room, 8px periodic, premultiplied-safe). Known names: "hatch",
+// "crosshatch", "dots", "grid", "checker", "stripes". Repaints the
+// whole surface with dark-gray ink (96/255); rgb never exceeds alpha,
+// alpha untouched (M3 contract). Unknown name = false, untouched.
+bool applyTone(Surface& s, const std::string& name);
+
 // M8 adjustment-layer ops (ARCHITECTURE.md "M8 additions", clean-room).
 // Known adjustment type names (exact match): "brightness", "contrast",
 // "hue", "saturation", "gradientMap". Anything else is identity.

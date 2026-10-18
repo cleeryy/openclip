@@ -15,11 +15,14 @@ import dev.openclip.engine.EngineHost
 import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
+import dev.openclip.media.WebdavClient
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.ServerSocket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -829,6 +832,155 @@ class EngineConformanceTest {
         out.putInt(0x004E4942)  // "BIN\0"
         out.put(binBytes)
         dst.writeBytes(out.array())
+    }
+
+    // M10-22: material tone via JNI repaints the active layer and undo
+    // restores the clean frame.
+    @Test
+    fun toneFillChangesCompositeAndUndoRestores() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            assertTrue(EngineHost.nApplyTone(handle, "hatch"))
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            assertTrue(
+                "tone must repaint pixels",
+                !after.contentEquals(before)
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue(
+                "undo must restore the clean frame",
+                undone.contentEquals(before)
+            )
+            assertFalse(
+                "unknown tone must be refused",
+                EngineHost.nApplyTone(handle, "bogus")
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // M10-23: WebDAV round trip against an in-process loopback server
+    // (PUT 201 + GET bytes back; wrong password -> 401 -> failure).
+    @Test
+    fun webdavRoundTripLoopback() {
+        val goodAuth = "Basic " + android.util.Base64.encodeToString(
+            "user:pass".toByteArray(), android.util.Base64.NO_WRAP
+        )
+        var stored = byteArrayOf()
+        val stop = AtomicBoolean(false)
+        val server = ServerSocket(0)
+        val port = server.localPort
+        val t = Thread {
+            try {
+                while (!stop.get()) {
+                    server.accept().use { sock ->
+                        val i = sock.getInputStream()
+                        val o = sock.getOutputStream()
+                        val all = java.io.ByteArrayOutputStream()
+                        val buf = ByteArray(2048)
+                        var end = -1
+                        while (end < 0) {
+                            val r = i.read(buf)
+                            if (r < 0) return@use
+                            all.write(buf, 0, r)
+                            end = all.toString("ISO-8859-1").indexOf("\r\n\r\n")
+                        }
+                        val head = all.toString("ISO-8859-1").substring(0, end)
+                        val lines = head.split("\r\n")
+                        val method = lines[0].substringBefore(" ")
+                        val authed = head.contains(goodAuth)
+                        var cl = 0
+                        for (l in lines) {
+                            if (l.startsWith("Content-Length:")) {
+                                cl = l.substringAfter(":").trim().toInt()
+                            }
+                        }
+                        val body = ByteArray(cl)
+                        var have = all.size() - (end + 4)
+                        if (have > 0) {
+                            System.arraycopy(
+                                all.toByteArray(), end + 4, body, 0,
+                                minOf(have, cl)
+                            )
+                        }
+                        var got = have
+                        while (got < cl) {
+                            val r = i.read(body, got, cl - got)
+                            if (r < 0) break
+                            got += r
+                        }
+                        if (!authed) {
+                            o.write(
+                                ("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n" +
+                                    "Connection: close\r\n\r\n").toByteArray()
+                            )
+                        } else if (method == "PUT") {
+                            stored = body.copyOf()
+                            o.write(
+                                ("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n" +
+                                    "Connection: close\r\n\r\n").toByteArray()
+                            )
+                        } else {
+                            o.write(
+                                ("HTTP/1.1 200 OK\r\nContent-Length: " +
+                                    "${stored.size}\r\nConnection: close\r\n\r\n")
+                                    .toByteArray()
+                            )
+                            o.write(stored)
+                        }
+                        o.flush()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        t.start()
+        try {
+            val payload = "ORA-DOC-${System.nanoTime()}".toByteArray()
+            val doc = File(composeRule.activity.cacheDir, "wd.ora")
+            doc.writeBytes(payload)
+            assertTrue(
+                "push must succeed",
+                WebdavClient.push(
+                    doc, "http://127.0.0.1:$port/doc.ora", "user", "pass"
+                )
+            )
+            assertTrue(
+                "server must hold the payload",
+                stored.contentEquals(payload)
+            )
+            val pulled = File(composeRule.activity.cacheDir, "wd-back.ora")
+            assertTrue(
+                "pull must succeed",
+                WebdavClient.pull(
+                    "http://127.0.0.1:$port/doc.ora", "user", "pass", pulled
+                )
+            )
+            assertTrue(
+                "pulled bytes must round trip",
+                pulled.readBytes().contentEquals(payload)
+            )
+            assertFalse(
+                "wrong password must fail",
+                WebdavClient.push(
+                    doc, "http://127.0.0.1:$port/doc.ora", "user", "wrong"
+                )
+            )
+            doc.delete()
+            pulled.delete()
+        } finally {
+            stop.set(true)
+            try {
+                server.close()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     // 8 kHz mono 16-bit 1 s 440 Hz sine: generated in-code so no binary
