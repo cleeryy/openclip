@@ -4,6 +4,13 @@ Goal: widest possible feature parity with a professional painting app
 (Clip Studio Paint 5 as reference scope, see csp-analysis.md) via
 clean-room reimplementation. Each milestone ships something usable.
 
+> **Status 2026-10-18: milestones M1–M10 are closed and shipped.**
+> This file is the original plan (boxes kept as written, not maintained
+> after M1). The maintained checklist with executable evidence (tests,
+> commits, CI run ids) is `docs/TASKS.md` — see its journal. Known
+> deferrals with reasons: AI denoise + auto-colorize (no permissively
+> licensed weights).
+
 ## M1 — Foundation (this build)
 - [x] Repo, license (GPL-3.0), architecture contract (ARCHITECTURE.md)
 - [x] Engine skeleton host-buildable: tiles, RGBA8 surfaces, blend modes
