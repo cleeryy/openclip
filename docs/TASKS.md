@@ -61,7 +61,7 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [x] CI engine verte sur master
 - [x] CI android verte sur master (assembleDebug + symboles check réels)
 - [ ] Instrumented test émulateur CI : build+connectés verts exigés sur master (gate `publish`)
-- [ ] Release pipeline tags v* → APKs sur GitHub Releases
+- [x] Release pipeline tags v* → APKs sur GitHub Releases (v0.1.0-alpha publié le 2026-10-18 : asset `openclip-v*.apk` debug-signed + `.sha256`, prerelease auto sur tags à tiret, téléchargement anonyme vérifié)
 
 ---
 ## Journal de progression
@@ -78,4 +78,5 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-17: M8 clos — ajustements (engine, ORA round-trip) + AI x3 (ONNX Runtime, modèle ESPCN 224 fixe) ; 20/20 local KVM + CI android/engine verts.
 - 2026-10-17 (2): M7b clos — ClipAudio + ExportWebm (MediaCodec VP8/MediaMuxer, app-side) ; 19/19 local, CI android 38983403837.
 - 2026-10-17 (3): M9 clos — glTF cgltf vendored + fisheye + perspective 3 points ; 21/21 local, engine 71/71, CI 38989149455/38989149351 (commit 406ab88).
-- 2026-10-18: M10 clos (DERNIER JALON) — tones procéduraux clean-room (nApplyTone) + sync WebDAV app-side ; 23/23 local, engine 75/75, CI android 39134827315 + engine 39134827313 (commit c5f1d3d). App OpenClip M1→M10 complète. Denoise/auto-colorize différés faute de poids à licence claire.
+- 2026-10-18: M10 clos (DERNIER JALON) — tones procéduraux clean-room (nApplyTone) + sync WebDAV app-side ; 23/23 local, engine 75/75, CI android 39134827315 + engine 39134827313 (commit c5f1d3d). App OpenClip M1→M10 complète.
+- 2026-10-18 (2): première release ALPHA v0.1.0-alpha publiée (prerelease GitHub) — APK debug-signed arm64+x86_64 84 MB + sha256, téléchargement anonyme vérifié (run tag 39150123145) ; workflow publish durci (action-gh-release v3, asset versionné, prerelease sur tags à tiret). Denoise/auto-colorize différés faute de poids à licence claire.
