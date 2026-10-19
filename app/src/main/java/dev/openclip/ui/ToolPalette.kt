@@ -61,6 +61,7 @@ private const val DEFAULT_INK = "#141414"
 @Composable
 fun ToolPalette(
     surface: EngineSurface,
+    prefs: BrushPrefs,
     initialColor: String = DEFAULT_INK,
     onFileClicked: () -> Unit = {},
     onImportClicked: () -> Unit = {},
@@ -69,9 +70,6 @@ fun ToolPalette(
     modifier: Modifier = Modifier
 ) {
     var isBrush by remember { mutableStateOf(true) }
-    var radius by remember { mutableStateOf(10f) }
-    var opaque by remember { mutableStateOf(1f) }
-    var stabilize by remember { mutableStateOf(0.15f) }
     var curve by remember { mutableStateOf(0f) }
     var inkColor by remember { mutableStateOf(initialColor) }
     var canUndo by remember { mutableStateOf(false) }
@@ -81,9 +79,10 @@ fun ToolPalette(
     var symX by remember { mutableStateOf(false) }
     var symY by remember { mutableStateOf(false) }
 
-    fun pushBrush() = surface.setBrush(
-        BrushState(inkColor, isBrush, radius, opaque, stabilize, curve).toJson()
-    )
+    fun pushBrush() {
+        prefs.bindTool(inkColor, !isBrush, curve)
+        surface.setBrush(prefs.currentJson())
+    }
 
     fun pushSymmetry() {
         val sx = if (symX) surface.canvasWidth() / 2f else -1f
@@ -148,20 +147,20 @@ fun ToolPalette(
                 }
             )
 
-            // Compact inline Brush Size slider
+            // Compact inline Brush Size slider (hoisted BrushPrefs mirror).
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 4.dp)
             ) {
                 Text(
-                    "${radius.toInt()}px",
+                    "${prefs.radius.toInt()}px",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFFD0D0DC),
                     modifier = Modifier.width(38.dp)
                 )
                 Slider(
-                    value = radius,
-                    onValueChange = { radius = it; pushBrush() },
+                    value = prefs.radius,
+                    onValueChange = { prefs.updateRadius(it); pushBrush() },
                     valueRange = 1f..128f,
                     modifier = Modifier
                         .width(110.dp)
@@ -169,19 +168,19 @@ fun ToolPalette(
                 )
             }
 
-            // Compact inline Opacity slider
+            // Compact inline Opacity slider (hoisted BrushPrefs mirror).
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 4.dp)
             ) {
                 Text(
-                    stringResource(R.string.opacity, (opaque * 100).toInt()),
+                    stringResource(R.string.opacity, (prefs.opaque * 100).toInt()),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFFD0D0DC)
                 )
                 Slider(
-                    value = opaque,
-                    onValueChange = { opaque = it; pushBrush() },
+                    value = prefs.opaque,
+                    onValueChange = { prefs.updateOpaque(it); pushBrush() },
                     modifier = Modifier
                         .width(96.dp)
                         .height(28.dp)
@@ -257,13 +256,13 @@ fun ToolPalette(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    stringResource(R.string.stabilize, (stabilize * 100).toInt()),
+                    stringResource(R.string.stabilize, (prefs.stabilize * 100).toInt()),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFFB8B8C8)
                 )
                 Slider(
-                    value = stabilize,
-                    onValueChange = { stabilize = it; pushBrush() },
+                    value = prefs.stabilize,
+                    onValueChange = { prefs.updateStabilize(it); pushBrush() },
                     valueRange = 0f..1f,
                     modifier = Modifier
                         .width(110.dp)

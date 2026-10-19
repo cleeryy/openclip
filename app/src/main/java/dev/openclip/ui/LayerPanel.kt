@@ -1,24 +1,39 @@
-// OpenClip M5 — real layer panel: the engine owns truth, the panel
-// pushes through the exact M5 symbols (visibility/opacity/blend/name/
-// addGroup/moveLayer/appendChild/clipped/mask/maskTarget) and reads back
-// a compact JSON snapshot via nLayerState. Groups render collapsible
-// with their children indented; reordering is up/down buttons (no DnD).
+// OpenClip slice 3 — pro layer panel: LazyColumn two-rank rows, live
+// solo-render thumbnails (app-side only, no new JNI), searchable blend
+// dialog, clip/mask/fx badges, drag-reorder handle, compact mode, search.
+// The engine stays the truth (M5 symbols); tagColor is app-side only.
+// SPDX-License-Identifier: GPL-3.0-or-later
 package dev.openclip.ui
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -36,13 +51,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import org.json.JSONObject
 
-private data class LayerInfo(
+internal data class LayerInfo(
     val index: Int,
     val name: String,
     val visible: Boolean,
@@ -51,13 +77,19 @@ private data class LayerInfo(
     val isGroup: Boolean,
     val hasMask: Boolean,
     val clipped: Boolean,
+    val hasAdjust: Boolean,
+    val tagColor: Int? = null,
     val children: List<LayerInfo> = emptyList()
 )
 
-private val BLEND_NAMES = listOf(
+// Blend list in a single place (spec §3: engine additions = 0 UI change).
+internal val BLEND_NAMES = listOf(
     "svg:normal", "svg:multiply", "svg:screen", "svg:overlay",
     "svg:plus", "svg:soft-light"
 )
+
+internal fun blendDisplay(svg: String): String = svg.removePrefix("svg:")
+internal fun blendSvg(display: String): String = "svg:$display"
 
 // M8 — adjustment descriptor types (engine contract: "gradientMap"
 // carries stops; amount is ignored for it).
@@ -67,6 +99,38 @@ private val ADJUST_TYPES = listOf(
     "hue" to R.string.adjustment_hue,
     "saturation" to R.string.adjustment_saturation,
     "gradientMap" to R.string.adjustment_gradient
+)
+
+// Tag pastilles (maison, app-side only, §4).
+private val TAG_COLORS = listOf(
+    0xFFE53935.toInt(), 0xFFFB8C00.toInt(), 0xFFFDD835.toInt(),
+    0xFF43A047.toInt(), 0xFF1E88E5.toInt(), 0xFF8E24AA.toInt()
+)
+
+/** Test-only hooks (emutest asserts through these, never pixels alone). */
+object LayerPanelTestHooks {
+    /** Set by the panel: single engine moveLayer call used by DnD drop. */
+    var moveOnce: ((from: Int, to: Int) -> Unit)? = null
+
+    /** Live thumbnail cache snapshot (layerIndex -> 48px bitmap). */
+    var thumbSnapshot: () -> Map<Int, Bitmap?> = { emptyMap() }
+
+    /** Compact-mode threshold (spec §6: 20). */
+    var compactThreshold = 20
+
+    /** Debounce before solo-render (spec §1: 400 ms). */
+    var thumbDebounceMs = 400L
+
+    /** Last worker pass description (diagnostics when the cache is empty). */
+    var lastInfo: String = "never"
+}
+
+private data class ThumbKey(
+    val index: Int,
+    val gen: Int,
+    val opacityBits: Int,
+    val blend: String,
+    val visible: Boolean
 )
 
 private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
@@ -84,12 +148,14 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
                     blend = c.optString("blend", "svg:normal"),
                     isGroup = false,
                     hasMask = c.optBoolean("mask", false),
-                    clipped = c.optBoolean("clipped", false)
+                    clipped = c.optBoolean("clipped", false),
+                    hasAdjust = c.optJSONObject("adjust") != null
                 )
             )
         }
     }
     val s = o.optJSONObject("self") ?: o
+    val adj = s.optJSONObject("adjust") ?: o.optJSONObject("adjust")
     return LayerInfo(
         index = index,
         name = s.optString("name", "Layer"),
@@ -99,6 +165,7 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
         isGroup = s.optBoolean("group", false),
         hasMask = s.optBoolean("mask", false),
         clipped = s.optBoolean("clipped", false),
+        hasAdjust = adj != null,
         children = kids
     )
 }
@@ -114,11 +181,25 @@ fun LayerPanel(
     var maskTarget by remember { mutableStateOf(-1) }
     var renameIndex by remember { mutableStateOf<Int?>(null) }
     var renameText by remember { mutableStateOf("") }
-    // M8 — selected-layer adjustment descriptor mirror (engine truth
-    // via layerState "adjust"; null = no adjustment).
+    // M8 — selected-layer adjustment descriptor mirror.
     var adjustType by remember { mutableStateOf<String?>(null) }
     var adjustAmount by remember { mutableStateOf(0f) }
     val expanded = remember { mutableStateMapOf<Int, Boolean>() }
+    // Spec §4: tagColor is app-side only (workspaces persist it later).
+    val tagColors = remember { mutableStateMapOf<Int, Int>() }
+    var search by remember { mutableStateOf("") }
+    var strokeGen by remember { mutableStateOf(0) }
+    var menuIndex by remember { mutableStateOf<Int?>(null) }
+
+    // Thumbnail LRU (≤ 60 entries, ~9 Ko each).
+    val thumbs = remember {
+        object : LinkedHashMap<ThumbKey, Bitmap>(64, 0.75f, true) {
+            override fun removeEldestEntry(
+                eldest: MutableMap.MutableEntry<ThumbKey, Bitmap>
+            ): Boolean = size > 60
+        }
+    }
+    var thumbTick by remember { mutableStateOf(0) }
 
     fun refresh() {
         try {
@@ -129,12 +210,12 @@ fun LayerPanel(
             val out = mutableListOf<LayerInfo>()
             if (arr != null) {
                 for (i in 0 until arr.length()) {
-                    out.add(parseLayer(arr.getJSONObject(i), i))
+                    val info = parseLayer(arr.getJSONObject(i), i)
+                    out.add(info.copy(tagColor = tagColors[info.index]))
                 }
             }
             layers = out
-            // M8: mirror the selected layer's adjustment descriptor
-            // (tolerant read — absent/null means no adjustment).
+            strokeGen++
             try {
                 if (arr != null && active >= 0 && active < arr.length()) {
                     val entry = arr.getJSONObject(active)
@@ -170,77 +251,193 @@ fun LayerPanel(
         refresh()
     }
 
+    fun doMove(from: Int, to: Int) {
+        if (from == to) return
+        if (from < 0 || to < 0 || from >= layers.size || to >= layers.size) return
+        surface.layerOp { moveLayer(from, to) }
+        refresh()
+    }
+
     LaunchedEffect(refreshKey) { refresh() }
+    LaunchedEffect(Unit) {
+        LayerPanelTestHooks.moveOnce = { f, t -> doMove(f, t) }
+        LayerPanelTestHooks.thumbSnapshot = {
+            thumbs.entries.associate { it.key.index to it.value }
+        }
+    }
+
+    val shown = remember(layers, search) {
+        if (search.isBlank()) layers
+        else layers.filter { it.name.contains(search, ignoreCase = true) }
+    }
+    val compact = layers.size > LayerPanelTestHooks.compactThreshold
+    val listState = remember { androidx.compose.foundation.lazy.LazyListState() }
+
+    // Solo-render worker: debounced, never while drawing, active-first.
+    val sig = layers.map { Triple(it.opacity, it.blend, it.visible) } to strokeGen
+    LaunchedEffect(sig) {
+        LayerPanelTestHooks.lastInfo = "waiting layers=${layers.size} gen=$strokeGen"
+        delay(LayerPanelTestHooks.thumbDebounceMs)
+        if (surface.isDrawingNow()) {
+            LayerPanelTestHooks.lastInfo = "skipped-drawing gen=$strokeGen"
+            return@LaunchedEffect
+        }
+        val gen = strokeGen
+        val targets = layers.filter { it.visible }
+            .sortedBy { if (it.index == active) 0 else 1 }
+            .take(8)
+        LayerPanelTestHooks.lastInfo = "targets=${targets.map { it.index }} gen=$gen"
+        for (info in targets) {
+            if (gen != strokeGen || surface.isDrawingNow()) break
+            val key = ThumbKey(
+                info.index, gen,
+                info.opacity.toBits(), info.blend, info.visible
+            )
+            if (thumbs.containsKey(key)) continue
+            val bmp = try {
+                surface.soloRenderLayer(info.index)
+            } catch (e: Exception) {
+                LayerPanelTestHooks.lastInfo = "error ${e.message}"
+                null
+            }
+            if (gen != strokeGen) {
+                bmp?.recycle()
+                break
+            }
+            if (bmp != null) {
+                thumbs[key] = bmp
+                thumbTick++
+            }
+        }
+        LayerPanelTestHooks.lastInfo =
+            "done cache=${thumbs.size} gen=$gen"
+    }
+
+    fun thumbFor(info: LayerInfo): Bitmap? {
+        val e = thumbs.entries.firstOrNull {
+            it.key.index == info.index && it.key.gen == strokeGen
+        }
+        return e?.value
+    }
 
     Column(modifier = modifier) {
         Text(
             stringResource(R.string.layers),
             style = MaterialTheme.typography.titleSmall
         )
-        layers.forEach { info ->
-            LayerRow(
-                info = info,
-                selected = info.index == active,
-                maskEditing = info.index == maskTarget,
-                expanded = expanded[info.index] ?: true,
-                onToggleExpand = {
-                    expanded[info.index] = !(expanded[info.index] ?: true)
-                },
-                onSelect = {
-                    surface.layerOp { setActiveLayer(info.index) }
-                    refresh()
-                },
-                onVisibility = {
-                    surface.layerOp { setLayerVisibility(info.index, !info.visible) }
-                    refresh()
-                },
-                onOpacityRelease = { v ->
-                    surface.layerOp { setLayerOpacity(info.index, v) }
-                    refresh()
-                },
-                onBlend = { b ->
-                    surface.layerOp { setLayerBlend(info.index, b) }
-                    refresh()
-                },
-                onRename = {
-                    renameIndex = info.index
-                    renameText = info.name
-                },
-                onMoveUp = {
-                    if (info.index + 1 < layers.size) {
-                        surface.layerOp { moveLayer(info.index, info.index + 1) }
-                        refresh()
-                    }
-                },
-                onMoveDown = {
-                    if (info.index - 1 >= 0) {
-                        surface.layerOp { moveLayer(info.index, info.index - 1) }
-                        refresh()
-                    }
-                },
-                onAddMask = {
-                    surface.layerOp { addLayerMask(info.index) }
-                    refresh()
-                },
-                onMaskTarget = {
-                    surface.layerOp { maskTarget(info.index, info.index != maskTarget) }
-                    refresh()
-                },
-                onClipped = {
-                    surface.layerOp { setLayerClipped(info.index, !info.clipped) }
-                    refresh()
-                },
-                onAddChild = {
-                    surface.layerOp { appendChild(info.index, "Layer") }
-                    refresh()
-                }
+        OutlinedTextField(
+            value = search,
+            onValueChange = { search = it },
+            label = { Text(stringResource(R.string.layer_search)) },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("layer-search")
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                "${layers.size}/50",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag("layer-count")
             )
+            if (compact) {
+                Text(
+                    stringResource(
+                        R.string.layer_compact_auto, layers.size
+                    ),
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 420.dp)
+                .testTag("layer-list")
+        ) {
+            itemsIndexed(shown, key = { _, l -> l.index }) { _, info ->
+                LayerRow(
+                    info = info,
+                    selected = info.index == active,
+                    maskEditing = info.index == maskTarget,
+                    expanded = expanded[info.index] ?: true,
+                    showRank2 = !compact || info.index == active,
+                    thumb = thumbFor(info),
+                    menuOpen = menuIndex == info.index,
+                    onToggleExpand = {
+                        expanded[info.index] = !(expanded[info.index] ?: true)
+                    },
+                    onSelect = {
+                        surface.layerOp { setActiveLayer(info.index) }
+                        refresh()
+                    },
+                    onRenameAsk = {
+                        renameIndex = info.index
+                        renameText = info.name
+                        menuIndex = null
+                    },
+                    onVisibility = {
+                        surface.layerOp {
+                            setLayerVisibility(info.index, !info.visible)
+                        }
+                        refresh()
+                    },
+                    onOpacityRelease = { v ->
+                        surface.layerOp { setLayerOpacity(info.index, v) }
+                        refresh()
+                    },
+                    onBlend = { b ->
+                        surface.layerOp { setLayerBlend(info.index, b) }
+                        refresh()
+                    },
+                    onMove = { f, t -> doMove(f, t); menuIndex = null },
+                    onMenu = { menuIndex = if (menuIndex == info.index) null else info.index },
+                    onDismissMenu = { menuIndex = null },
+                    onAddMask = {
+                        surface.layerOp { addLayerMask(info.index) }
+                        menuIndex = null
+                        refresh()
+                    },
+                    onMaskTarget = {
+                        surface.layerOp {
+                            maskTarget(info.index, info.index != maskTarget)
+                        }
+                        menuIndex = null
+                        refresh()
+                    },
+                    onClipped = {
+                        surface.layerOp {
+                            setLayerClipped(info.index, !info.clipped)
+                        }
+                        menuIndex = null
+                        refresh()
+                    },
+                    onAddChild = {
+                        surface.layerOp { appendChild(info.index, "Layer") }
+                        menuIndex = null
+                        refresh()
+                    },
+                    onTag = { c ->
+                        if (c == null) tagColors.remove(info.index)
+                        else tagColors[info.index] = c
+                        layers = layers.map {
+                            if (it.index == info.index) it.copy(tagColor = c) else it
+                        }
+                        menuIndex = null
+                    }
+                )
+            }
         }
         val compactPad = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
         Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.fillMaxWidth()
         ) {
             OutlinedButton(
                 onClick = {
@@ -248,7 +445,9 @@ fun LayerPanel(
                     refresh()
                 },
                 contentPadding = compactPad,
-                modifier = Modifier.height(28.dp)
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("layer-add")
             ) { Text("+", style = MaterialTheme.typography.labelSmall) }
             OutlinedButton(
                 onClick = {
@@ -256,7 +455,7 @@ fun LayerPanel(
                     refresh()
                 },
                 contentPadding = compactPad,
-                modifier = Modifier.height(28.dp)
+                modifier = Modifier.height(48.dp)
             ) { Text(stringResource(R.string.layer_add_group), style = MaterialTheme.typography.labelSmall, maxLines = 1) }
             OutlinedButton(
                 onClick = {
@@ -264,40 +463,14 @@ fun LayerPanel(
                     refresh()
                 },
                 contentPadding = compactPad,
-                modifier = Modifier.height(28.dp)
+                modifier = Modifier.height(48.dp)
             ) { Text(stringResource(R.string.layer_add_vector), style = MaterialTheme.typography.labelSmall, maxLines = 1) }
-            var symX by remember { mutableStateOf(false) }
-            var symY by remember { mutableStateOf(false) }
-            OutlinedButton(
-                onClick = {
-                    symX = !symX
-                    when (symX) {
-                        true -> surface.setRulers("""{"symmetryX":${surface.canvasWidth() / 2f}}""")
-                        else -> surface.setRulers(if (symY) """{"symmetryY":${surface.canvasHeight() / 2f}}""" else "")
-                    }
-                },
-                contentPadding = compactPad,
-                modifier = Modifier.height(28.dp)
-            ) { Text(if (symX) "⇋X" else "⇋x", style = MaterialTheme.typography.labelSmall) }
-            OutlinedButton(
-                onClick = {
-                    symY = !symY
-                    when (symY) {
-                        true -> surface.setRulers("""{"symmetryY":${surface.canvasHeight() / 2f}}""")
-                        else -> surface.setRulers(if (symX) """{"symmetryX":${surface.canvasWidth() / 2f}}""" else "")
-                    }
-                },
-                contentPadding = compactPad,
-                modifier = Modifier.height(28.dp)
-            ) { Text(if (symY) "⇋Y" else "⇋y", style = MaterialTheme.typography.labelSmall) }
         }
-        // M8 — adjustment cluster for the selected layer: five type
-        // toggles + Clear, and a -1..1 amount slider below the toggles
-        // (gradient hides the slider; its amount is ignored per contract).
+        // M8 — adjustment cluster for the selected layer (preserved).
         Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
         ) {
             ADJUST_TYPES.forEach { (type, res) ->
                 TextButton(onClick = { pushAdjust(type, adjustAmount) }) {
@@ -376,29 +549,39 @@ fun LayerPanel(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LayerRow(
     info: LayerInfo,
     selected: Boolean,
     maskEditing: Boolean,
     expanded: Boolean,
+    showRank2: Boolean,
+    thumb: Bitmap?,
+    menuOpen: Boolean,
     onToggleExpand: () -> Unit,
     onSelect: () -> Unit,
+    onRenameAsk: () -> Unit,
     onVisibility: () -> Unit,
     onOpacityRelease: (Float) -> Unit,
     onBlend: (String) -> Unit,
-    onRename: () -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onMenu: () -> Unit,
+    onDismissMenu: () -> Unit,
     onAddMask: () -> Unit,
     onMaskTarget: () -> Unit,
     onClipped: () -> Unit,
-    onAddChild: () -> Unit
+    onAddChild: () -> Unit,
+    onTag: (Int?) -> Unit
 ) {
     var slider by remember(info.index, info.opacity) {
         mutableStateOf(info.opacity.coerceIn(0f, 1f))
     }
     var blendOpen by remember { mutableStateOf(false) }
+    var dragOff by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val rowHpx = with(density) { 112.dp.toPx() }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -406,117 +589,423 @@ private fun LayerRow(
                 if (selected) MaterialTheme.colorScheme.secondaryContainer
                 else Color.Transparent
             )
+            .then(
+                if (selected) Modifier.border(
+                    3.dp, MaterialTheme.colorScheme.primary,
+                    RoundedCornerShape(2.dp)
+                ) else Modifier
+            )
             .padding(4.dp)
+            .testTag("layer-row-${info.index}")
     ) {
+        // Rank 1: chevron + thumb + name + badges + visibility + handle.
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            if (info.isGroup) {
-                Text(
-                    if (expanded) "-" else "+",
-                    modifier = Modifier.clickable { onToggleExpand() }
-                )
-            }
-            Text(
-                text = (if (info.visible) "" else "x ") + info.name +
-                    (if (maskEditing) " [M]" else ""),
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onSelect() }
-            )
-            Text(
-                text = if (info.visible) "o" else "-",
-                modifier = Modifier.clickable { onVisibility() }
-            )
-        }
-        Slider(
-            value = slider,
-            onValueChange = { slider = it },
-            onValueChangeFinished = { onOpacityRelease(slider) },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(22.dp)
-        )
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                .height(56.dp)
         ) {
-            Text(
-                text = info.blend.removePrefix("svg:"),
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.clickable { blendOpen = true }
+            if (info.isGroup) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clickable { onToggleExpand() }
+                        .testTag("layer-expand-${info.index}")
+                ) {
+                    Text(if (expanded) "▾" else "▸")
+                }
+            }
+            LayerThumb(
+                info = info,
+                thumb = thumb,
+                selected = selected,
+                onTap = onSelect,
+                onDoubleTap = onRenameAsk
             )
-            DropdownMenu(
-                expanded = blendOpen,
-                onDismissRequest = { blendOpen = false }
-            ) {
-                BLEND_NAMES.forEach { b ->
-                    DropdownMenuItem(
-                        text = { Text(b.removePrefix("svg:")) },
-                        onClick = {
-                            blendOpen = false
-                            onBlend(b)
-                        }
-                    )
-                }
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = onRename) {
-                Text("Aa", style = MaterialTheme.typography.labelSmall)
-            }
-            TextButton(onClick = onMoveUp) {
-                Text("^", style = MaterialTheme.typography.labelSmall)
-            }
-            TextButton(onClick = onMoveDown) {
-                Text("v", style = MaterialTheme.typography.labelSmall)
-            }
-            if (!info.isGroup) {
-                if (!info.hasMask) {
-                    TextButton(onClick = onAddMask) {
-                        Text("M+", style = MaterialTheme.typography.labelSmall)
-                    }
-                } else {
-                    TextButton(onClick = onMaskTarget) {
-                        Text(
-                            if (maskEditing) "[M]" else "M",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-                TextButton(onClick = onClipped) {
-                    Text(
-                        if (info.clipped) "[C]" else "C",
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-            } else {
-                TextButton(onClick = onAddChild) {
-                    Text("+ch", style = MaterialTheme.typography.labelSmall)
-                }
-            }
-        }
-        if (info.isGroup && expanded) {
             Text(
-                stringResource(R.string.layer_children) +
-                    ": " + info.children.joinToString { it.name },
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(start = 8.dp)
+                text = info.name,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("layer-name-${info.index}")
+                    .combinedClickable(
+                        onClick = onSelect,
+                        onDoubleClick = onRenameAsk,
+                        onLongClick = onMenu
+                    )
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(
-                    checked = info.visible,
-                    onCheckedChange = { onVisibility() }
+            // Badges (visual 24dp, reached via the long-press menu).
+            if (info.clipped) {
+                val clipDesc = stringResource(R.string.layer_clipped_on)
+                Text(
+                    "↓",
+                    color = Color(0xFF6FA3FF),
+                    modifier = Modifier
+                        .testTag("layer-badge-clip-${info.index}")
+                        .semantics { contentDescription = clipDesc }
+                        .clickable { onMenu() }
+                )
+            }
+            if (info.hasMask) {
+                val maskDesc = stringResource(
+                    if (maskEditing) R.string.layer_mask_editing
+                    else R.string.layer_add_mask
                 )
                 Text(
-                    if (info.visible) stringResource(R.string.layer_visible)
-                    else stringResource(R.string.layer_hidden),
-                    style = MaterialTheme.typography.labelSmall
+                    if (maskEditing) "◑" else "◐",
+                    color = if (maskEditing) MaterialTheme.colorScheme.primary
+                    else Color(0xFFB8B8C8),
+                    modifier = Modifier
+                        .testTag("layer-badge-mask-${info.index}")
+                        .semantics { contentDescription = maskDesc }
+                        .clickable { onMaskTarget() }
+                )
+            }
+            if (info.hasAdjust) {
+                val fxDesc = stringResource(R.string.layer_fx_present)
+                Text(
+                    "fx",
+                    color = Color(0xFFB388FF),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-fx-${info.index}")
+                        .semantics { contentDescription = fxDesc }
+                        .clickable { onMenu() }
+                )
+            }
+            val visDesc = stringResource(
+                if (info.visible) R.string.layer_visible else R.string.layer_hidden
+            )
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clickable { onVisibility() }
+                    .testTag("layer-vis-${info.index}")
+                    .semantics { contentDescription = visDesc }
+            ) {
+                Text(if (info.visible) "◉" else "○")
+            }
+            // Drag handle: the only drag zone (spec §2).
+            val reorderDesc = stringResource(R.string.layer_reorder_hint)
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("layer-drag-${info.index}")
+                    .semantics { contentDescription = reorderDesc }
+                    .draggable(
+                        state = rememberDraggableState { d -> dragOff += d },
+                        orientation = Orientation.Vertical,
+                        onDragStopped = {
+                            val steps = (dragOff / rowHpx).roundToInt()
+                            dragOff = 0f
+                            if (steps != 0) onMove(info.index, info.index + steps)
+                        }
+                    )
+            ) {
+                Text("≡")
+            }
+        }
+        // Rank 2: opacity slider + % + blend chip (folded in compact mode).
+        if (showRank2) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("layer-opacity-${info.index}"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Slider(
+                        value = slider,
+                        onValueChange = { slider = it },
+                        onValueChangeFinished = { onOpacityRelease(slider) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Text(
+                    stringResource(
+                        R.string.layer_opacity_layer, (slider * 100).toInt()
+                    ),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    maxLines = 1,
+                    modifier = Modifier.width(44.dp)
+                )
+                val blendDesc = stringResource(R.string.layer_blend) + " " +
+                    blendDisplay(info.blend)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .clickable { blendOpen = true }
+                        .testTag("layer-blend-${info.index}")
+                        .semantics { contentDescription = blendDesc }
+                        .padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        blendDisplay(info.blend) + " ▾",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+        if (info.isGroup && expanded && info.children.isNotEmpty()) {
+            Text(
+                info.children.joinToString { it.name },
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                modifier = Modifier.padding(start = 64.dp)
+            )
+        }
+        // Long-press menu: all secondary actions (a11y + tests).
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = onDismissMenu,
+            modifier = Modifier.testTag("layer-menu-${info.index}")
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.layer_rename)) },
+                onClick = onRenameAsk,
+                modifier = Modifier.testTag("layer-menu-rename-${info.index}")
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.layer_move_up)) },
+                onClick = { onMove(info.index, info.index + 1) },
+                modifier = Modifier.testTag("layer-up-${info.index}")
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.layer_move_down)) },
+                onClick = { onMove(info.index, info.index - 1) },
+                modifier = Modifier.testTag("layer-down-${info.index}")
+            )
+            if (!info.isGroup) {
+                if (!info.hasMask) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.layer_add_mask)) },
+                        onClick = onAddMask
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.layer_mask_target)) },
+                        onClick = onMaskTarget
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.layer_clipped)) },
+                    onClick = onClipped
+                )
+            } else {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.layer_children)) },
+                    onClick = onAddChild
+                )
+            }
+            DropdownMenuItem(
+                text = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(stringResource(R.string.layer_tag_color))
+                        TAG_COLORS.forEach { c ->
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(c))
+                                    .clickable { onTag(c) }
+                                    .testTag("layer-tag-${info.index}-$c")
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .border(1.dp, Color.Gray, RoundedCornerShape(12.dp))
+                                .clickable { onTag(null) }
+                        )
+                    }
+                },
+                onClick = {}
+            )
+        }
+        if (blendOpen) {
+            BlendDialog(
+                current = info.blend,
+                onPick = {
+                    blendOpen = false
+                    onBlend(it)
+                },
+                onDismiss = { blendOpen = false }
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LayerThumb(
+    info: LayerInfo,
+    thumb: Bitmap?,
+    selected: Boolean,
+    onTap: () -> Unit,
+    onDoubleTap: () -> Unit
+) {
+    val thumbDesc = info.name
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(48.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color(0xFF1C1C22))
+            .border(
+                if (selected) 2.dp else 1.dp,
+                if (selected) MaterialTheme.colorScheme.primary
+                else Color(0xFF383844),
+                RoundedCornerShape(6.dp)
+            )
+            .combinedClickable(onClick = onTap, onDoubleClick = onDoubleTap)
+            .testTag("layer-thumb-${info.index}")
+            .semantics { contentDescription = thumbDesc }
+    ) {
+        if (thumb != null && !thumb.isRecycled) {
+            Image(
+                bitmap = thumb.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.size(48.dp)
+            )
+        } else {
+            CheckerPlaceholder(
+                empty = !info.visible,
+                modifier = Modifier.size(48.dp)
+            )
+        }
+        if (info.tagColor != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(8.dp)
+                    .background(Color(info.tagColor))
+            )
+        }
+    }
+}
+
+/** Maison checker placeholder (transparency-readable, no tierce). */
+@Composable
+private fun CheckerPlaceholder(empty: Boolean, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val n = 6
+        val s = size.minDimension / n
+        for (y in 0 until n) {
+            for (x in 0 until n) {
+                drawRect(
+                    color = if ((x + y) % 2 == 0) Color(0xFF3A3A44)
+                    else Color(0xFF23232A),
+                    topLeft = androidx.compose.ui.geometry.Offset(x * s, y * s),
+                    size = androidx.compose.ui.geometry.Size(s + 1f, s + 1f)
                 )
             }
         }
     }
+}
+
+@Composable
+private fun BlendDialog(
+    current: String,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val items = remember(query) {
+        val q = query.trim().lowercase()
+        BLEND_NAMES.filter {
+            q.isEmpty() || blendDisplay(it).lowercase().contains(q)
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("blend-dialog"),
+        title = { Text(stringResource(R.string.layer_blend)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text(stringResource(R.string.layer_blend_search)) },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("blend-search")
+                )
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                ) {
+                    items(items.size) { k ->
+                        val b = items[k]
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .clickable { onPick(b) }
+                                .testTag("blend-item-" + blendDisplay(b))
+                        ) {
+                            BlendDot(mode = blendDisplay(b))
+                            Text(
+                                blendDisplay(b),
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (b == current) Text("✓")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.ok)) }
+        }
+    )
+}
+
+/**
+ * Maison 24dp micro-preview: the blend applied (naive per-channel math)
+ * to two fixed witness colors. Pure Compose, never engine pixels.
+ */
+@Composable
+private fun BlendDot(mode: String) {
+    val mixed = remember(mode) {
+        val a = Triple(0x3A, 0x7B, 0xC8)
+        val b = Triple(0xE0, 0x8A, 0x3C)
+        fun ch(x: Int, y: Int): Int = when (mode) {
+            "multiply" -> x * y / 255
+            "screen" -> 255 - (255 - x) * (255 - y) / 255
+            "overlay" -> if (x < 128) 2 * x * y / 255
+            else 255 - 2 * (255 - x) * (255 - y) / 255
+            "plus" -> (x + y).coerceAtMost(255)
+            "soft-light" -> ((x * y / 255 + x) / 2)
+            else -> y
+        }
+        Color(ch(a.first, b.first), ch(a.second, b.second), ch(a.third, b.third))
+    }
+    Box(
+        modifier = Modifier
+            .size(24.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(mixed)
+    )
 }

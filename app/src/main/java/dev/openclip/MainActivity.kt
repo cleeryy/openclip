@@ -61,12 +61,14 @@ import dev.openclip.doc.DocRegistry
 import dev.openclip.ui.CollapsibleDrawer
 import dev.openclip.ui.ColorPanel
 import dev.openclip.ui.ColorStore
+import dev.openclip.ui.BrushPrefs
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.parseHexColor
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.GesturesHelpDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.MaterialsRow
+import dev.openclip.ui.PinnedBrushBar
 import dev.openclip.ui.MenuBar
 import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ReferencePanel
@@ -99,9 +101,14 @@ class MainActivity : ComponentActivity() {
     // Slice 2 color single source of truth (app-side only, persisted JSON).
     lateinit var colorStore: ColorStore
 
+    // Slice 3 brush prefs single source of truth (size/opacity/stabilize,
+    // shared by ToolPalette and the pinned bottom-canvas bar).
+    lateinit var brushPrefs: BrushPrefs
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         colorStore = ColorStore(applicationContext)
+        brushPrefs = BrushPrefs(applicationContext)
         val dpi = resources.displayMetrics.density * 160f
 
         setContent {
@@ -119,6 +126,7 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         if (::colorStore.isInitialized) colorStore.flush()
+        if (::brushPrefs.isInitialized) brushPrefs.flush()
     }
 
     @Composable
@@ -599,6 +607,7 @@ class MainActivity : ComponentActivity() {
                 HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
                 ToolPalette(
                     surface = surface,
+                    prefs = brushPrefs,
                     initialColor = inkHex,
                     navigateMode = navMode.value,
                     onNavigateToggle = { toggleNav() },
@@ -795,6 +804,21 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                    // Slice 3 pinned brush bar (composite-only overlay, never
+                    // engine pixels): size/opacity/stabilize mirror, hidden
+                    // while the timeline sheet is open.
+                    canvas.value?.let { surface ->
+                        PinnedBrushBar(
+                            surface = surface,
+                            prefs = brushPrefs,
+                            hidden = showTimeline.value,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(
+                                    start = 8.dp, end = 8.dp, bottom = 8.dp
+                                )
+                        )
+                    }
                 }
 
                 canvas.value?.let { surface ->
@@ -837,6 +861,7 @@ class MainActivity : ComponentActivity() {
                                 .fillMaxWidth()
                                 .weight(1f)
                                 .verticalScroll(rememberScrollState())
+                                .testTag("dock-scroll")
                                 .padding(8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {

@@ -147,4 +147,19 @@
     <string name="pipette_picked">Échantillonné %1$s</string>
     <string name="pipette_missed">Hors canvas</string>
     <string name="pipette_hold">Maintenir : loupe</string>
+    <string name="layer_search">Chercher</string>
+    <string name="layer_blend_search">Chercher</string>
+    <string name="layer_reorder_hint">Glisser ≡</string>
+    <string name="layer_rename_hint2">Double-toucher : renommer</string>
+    <string name="layer_longpress">Maintenir : plus</string>
+    <string name="layer_opacity_brush">Pinceau %1$d %%</string>
+    <string name="layer_opacity_layer">Calque %1$d %%</string>
+    <string name="layer_clipped_on">Écrêté au-dessous</string>
+    <string name="layer_mask_editing">Masque en cours</string>
+    <string name="layer_fx_present">Réglage actif</string>
+    <string name="layer_tag_color">Repère</string>
+    <string name="layer_thumb_empty">Vide</string>
+    <string name="layer_pinned_hide">Masquer</string>
+    <string name="layer_pinned_show">Tailles</string>
+    <string name="layer_compact_auto">Compacté %1$d</string>
 </resources>

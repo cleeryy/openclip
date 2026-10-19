@@ -19,6 +19,7 @@ import android.view.SurfaceView
 import dev.openclip.R
 import dev.openclip.engine.EngineHost
 import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -74,6 +75,77 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     @Volatile private var needsComposite = true
 
     var onStrokeChanged: (() -> Unit)? = null
+
+    // ---- Slice 3 solo-render (app-side only, no new JNI) ----
+    // While true the render loop skips compositing (needsComposite stays
+    // armed) so a thumbnail worker hiding/restoring layer visibilities
+    // never flashes the on-screen canvas. Guard + engineLock in the spec.
+    @Volatile var suspendRender = false
+
+    /** Test-only spy: successful moveLayer calls since the last reset. */
+    @Volatile var moveCallCount = 0
+
+    /** True while a stroke is open (UI tail or engine-side). */
+    fun isDrawingNow(): Boolean = strokeOpenUi || strokeId != 0L
+
+    /**
+     * Composite of a single layer for the Slice 3 thumbnail pipeline.
+     * Hides every other layer, composites, downscales to a centered
+     * square [thumbPx] bitmap, then restores the snapshot visibilities.
+     * Returns null for hidden/failed layers (UI shows the placeholder).
+     * Runs fully under engineLock; never call from the render thread.
+     */
+    fun soloRenderLayer(index: Int, thumbPx: Int = 48): Bitmap? {
+        if (handle == 0L) return null
+        suspendRender = true
+        try {
+            synchronized(engineLock) {
+                if (handle == 0L) return null
+                val vis = mutableListOf<Pair<Int, Boolean>>()
+                try {
+                    val root = JSONObject(layerState())
+                    val arr = root.optJSONArray("layers") ?: return null
+                    for (i in 0 until arr.length()) {
+                        val e = arr.optJSONObject(i) ?: continue
+                        val s = e.optJSONObject("self") ?: e
+                        vis.add(Pair(i, s.optBoolean("visible", true)))
+                    }
+                } catch (_: Exception) {
+                    return null
+                }
+                if (index < 0 || index >= vis.size || !vis[index].second) return null
+                for ((i, v) in vis) {
+                    if (v && i != index) EngineHost.nSetLayerVisibility(handle, i, false)
+                }
+                val px = IntArray(engineWidth * engineHeight)
+                val n = try {
+                    EngineHost.nCompositeInto(handle, px, engineWidth, engineHeight)
+                } catch (_: Exception) {
+                    0
+                }
+                for ((i, v) in vis) {
+                    if (v && i != index) EngineHost.nSetLayerVisibility(handle, i, true)
+                }
+                needsComposite = true
+                if (n <= 0) return null
+                val full = Bitmap.createBitmap(
+                    engineWidth, engineHeight, Bitmap.Config.ARGB_8888
+                )
+                full.setPixels(px, 0, engineWidth, 0, 0, engineWidth, engineHeight)
+                val side = minOf(engineWidth, engineHeight)
+                val sx = (engineWidth - side) / 2
+                val sy = (engineHeight - side) / 2
+                val square = Bitmap.createBitmap(full, sx, sy, side, side)
+                full.recycle()
+                val small = Bitmap.createScaledBitmap(square, thumbPx, thumbPx, true)
+                square.recycle()
+                return small
+            }
+        } finally {
+            suspendRender = false
+            needsComposite = true
+        }
+    }
 
     // ---- Slice 1 view matrix (app-side only, never engine pixels) ----
     @Volatile private var viewScaleMul = 1f
@@ -551,7 +623,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun moveLayer(from: Int, to: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nMoveLayer(handle, from, to)
-            .also { if (it) needsComposite = true } else false
+            .also { if (it) { needsComposite = true; moveCallCount++ } } else false
     }
 
     fun appendChild(parent: Int, name: String): Int = synchronized(engineLock) {
@@ -1374,6 +1446,12 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                     Thread.sleep(4)
                     continue
                 }
+            }
+            // Slice 3 solo-render window: skip this frame (needsComposite
+            // stays armed) so visibility toggling never flashes on screen.
+            if (suspendRender) {
+                Thread.sleep(4)
+                continue
             }
             needsComposite = false
 

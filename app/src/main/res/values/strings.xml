@@ -160,4 +160,19 @@
     <string name="pipette_picked">Sampled %1$s</string>
     <string name="pipette_missed">Outside canvas</string>
     <string name="pipette_hold">Hold for loupe</string>
+    <string name="layer_search">Search layers</string>
+    <string name="layer_blend_search">Search mode</string>
+    <string name="layer_reorder_hint">Drag ≡ to reorder</string>
+    <string name="layer_rename_hint2">Double-tap to rename</string>
+    <string name="layer_longpress">Hold for more</string>
+    <string name="layer_opacity_brush">Brush %1$d%%</string>
+    <string name="layer_opacity_layer">Layer %1$d%%</string>
+    <string name="layer_clipped_on">Clipped to below</string>
+    <string name="layer_mask_editing">Editing mask</string>
+    <string name="layer_fx_present">Adjustment on</string>
+    <string name="layer_tag_color">Tag</string>
+    <string name="layer_thumb_empty">Empty</string>
+    <string name="layer_pinned_hide">Hide bar</string>
+    <string name="layer_pinned_show">Sizes</string>
+    <string name="layer_compact_auto">Compacted %1$d</string>
 </resources>

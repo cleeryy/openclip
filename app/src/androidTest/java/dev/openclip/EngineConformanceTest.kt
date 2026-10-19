@@ -10,13 +10,19 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
@@ -30,7 +36,9 @@ import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
 import dev.openclip.media.WebdavClient
+import dev.openclip.ui.BrushPrefs
 import dev.openclip.ui.EngineSurface
+import dev.openclip.ui.LayerPanelTestHooks
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -1949,6 +1957,615 @@ class EngineConformanceTest {
             composeRule.activityRule.scenario.onActivity { act ->
                 act.colorStore.clearRecents()
             }
+            try {
+                es.undo()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // ---- Slice 3 pro layers (spec docs/slice3-layers.md §8) ----
+    // Thumbnails prove the app-side solo-render pipeline (no new JNI);
+    // every other chain ends in engine pixels or nLayerState, never
+    // Compose state alone. Each test leaves the doc dirty-tolerant:
+    // layers can only be added (no JNI remove), so tests are
+    // index-agnostic except where they create their own fixtures.
+
+    private fun slice3Prefs() = composeRule.activity.brushPrefs
+
+    private fun resetSlice3() {
+        composeRule.activityRule.scenario.onActivity { act ->
+            val p = act.brushPrefs
+            p.updateRadius(10f)
+            p.updateOpaque(1f)
+            p.updateStabilize(0.15f)
+            p.flush()
+        }
+        uiSync {
+            it.navigateMode = false
+            it.resetView()
+        }
+    }
+
+    private fun dockTop() {
+        // The dock column keeps its scroll offset across tests: rewind it
+        // so panel headers are visible before interacting.
+        try {
+            composeRule.onNodeWithTag("dock-scroll")
+                .performTouchInput { swipeDown() }
+        } catch (_: Exception) {
+        }
+        composeRule.waitForIdle()
+    }
+
+    private fun <T> onUi(op: (EngineSurface) -> T): T {
+        var out: T? = null
+        composeRule.activityRule.scenario.onActivity { act ->
+            out = op(findEngineSurface(act.window.decorView)!!)
+        }
+        @Suppress("UNCHECKED_CAST")
+        return out as T
+    }
+
+    private fun layerNames(es: EngineSurface): List<String> {
+        val names = mutableListOf<String>()
+        try {
+            val arr = org.json.JSONObject(es.layerState()).optJSONArray("layers")
+                ?: return names
+            for (i in 0 until arr.length()) {
+                val e = arr.optJSONObject(i) ?: continue
+                val s = e.optJSONObject("self") ?: e
+                names.add(s.optString("name", "Layer"))
+            }
+        } catch (_: Exception) {
+        }
+        return names
+    }
+
+    private fun activeIndex(es: EngineSurface): Int = try {
+        org.json.JSONObject(es.layerState()).optInt("active", 0)
+    } catch (_: Exception) {
+        0
+    }
+
+    private fun domCount(b: Bitmap, wantR: Boolean): Int {
+        var n = 0
+        var y = 0
+        while (y < b.height) {
+            var x = 0
+            while (x < b.width) {
+                val px = b.getPixel(x, y)
+                if ((px ushr 24) > 10) {
+                    val r = (px shr 16) and 0xFF
+                    val g = (px shr 8) and 0xFF
+                    val bl = px and 0xFF
+                    if (wantR) {
+                        if (r > g + 40 && r > bl + 40) n++
+                    } else {
+                        if (bl > r + 40 && bl > g + 40) n++
+                    }
+                }
+                x += 2
+            }
+            y += 2
+        }
+        return n
+    }
+
+    // Short centered passes: with the dock open the canvas is narrow, so
+    // wide strokes would arm the 32dp edge detector and paint nothing.
+    // ±40px around the center stays clear of every edge band.
+    private fun bigStroke(
+        es: EngineSurface, cx: Float, cy: Float, t0: Long, yOff: Float = 0f
+    ) {
+        for (dy in longArrayOf(-90, -30, 30, 90)) {
+            dispatchAll(
+                es,
+                simpleDown(t0 + dy, cx - 40f, cy + yOff + dy),
+                MotionEvent.obtain(
+                    t0 + dy, t0 + dy + 16, MotionEvent.ACTION_MOVE,
+                    cx, cy + yOff + dy, 1f, 1f, 0, 1f, 1f, 0, 0
+                ),
+                MotionEvent.obtain(
+                    t0 + dy, t0 + dy + 32, MotionEvent.ACTION_MOVE,
+                    cx + 40f, cy + yOff + dy, 1f, 1f, 0, 1f, 1f, 0, 0
+                ),
+                MotionEvent.obtain(
+                    t0 + dy, t0 + dy + 48, MotionEvent.ACTION_UP,
+                    cx + 40f, cy + yOff + dy, 1f, 1f, 0, 1f, 1f, 0, 0
+                )
+            )
+        }
+    }
+
+    /** Stage gate: the full composite must carry red before solo asserts. */
+    private fun assertRedStage(es: EngineSurface) {
+        val b = pullFull(es)
+        val red = countRedDom(b)
+        var ink = 0
+        var y = 0
+        while (y < b.height) {
+            var x = 0
+            while (x < b.width) {
+                if (b.getPixel(x, y) != -1) ink++
+                x += 8
+            }
+            y += 8
+        }
+        b.recycle()
+        assertTrue(
+            "stage gate: stroke must paint red (ink=$ink red=$red " +
+                "layers=${layerNames(es)} active=${activeIndex(es)})",
+            red >= 10
+        )
+    }
+
+    // 1. Solo-render thumbnails without new JNI: red on layer 0, blue on
+    // layer 1; each solo composite is dominant in its own channel; hiding
+    // layer 1 yields the placeholder (null), proving invalidation.
+    @Test
+    fun layerThumbsSoloRender() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            onUi {
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+                it.setActiveLayer(0)
+            }
+            val t0 = SystemClock.uptimeMillis()
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            // Red high, blue low: opaque top layers would otherwise hide
+            // the color under test in the full composite.
+            bigStroke(es, cx, cy, t0, -140f)
+            Thread.sleep(400)
+            val fresh = onUi {
+                val idx = it.addLayerNamed("Blue")
+                it.setActiveLayer(idx)
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#0000FF","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+                idx
+            }
+            bigStroke(es, cx, cy, t0 + 5000, 140f)
+            Thread.sleep(400)
+            assertRedStage(es)
+            // Refresh the panel so the debounced worker picks up both
+            // layers, then let it solo-render (poll: emulator timing).
+            dockTop()
+            composeRule.onNodeWithTag("layer-thumb-0").performClick()
+            composeRule.waitForIdle()
+            var tries = 0
+            while (LayerPanelTestHooks.thumbSnapshot().isEmpty() && tries < 10) {
+                Thread.sleep(500)
+                tries++
+            }
+            assertTrue(
+                "thumb worker must populate the cache " +
+                    "(${LayerPanelTestHooks.lastInfo})",
+                LayerPanelTestHooks.thumbSnapshot().isNotEmpty()
+            )
+            val b0 = onUi { it.soloRenderLayer(0) }
+            assertNotNull("solo render of layer 0 must succeed", b0)
+            assertTrue(
+                "layer 0 thumb must be R-dominant, got ${domCount(b0!!, true)}",
+                domCount(b0, true) >= 20
+            )
+            b0.recycle()
+            val b1 = onUi { it.soloRenderLayer(fresh) }
+            assertNotNull("solo render of layer 1 must succeed", b1)
+            assertTrue(
+                "layer 1 thumb must be B-dominant, got ${domCount(b1!!, false)}",
+                domCount(b1, false) >= 20
+            )
+            b1.recycle()
+            // Hide layer 1 through the UI toggle: placeholder, not blue.
+            composeRule.onNodeWithTag("layer-thumb-$fresh")
+                .performScrollTo()
+            composeRule.onNodeWithTag("layer-vis-$fresh").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(1000)
+            assertTrue(
+                "hidden layer must solo-render to null (placeholder)",
+                onUi { it.soloRenderLayer(fresh) } == null
+            )
+            onUi { it.setLayerVisibility(fresh, true) }
+        } finally {
+            resetSlice3()
+            repeat(20) {
+                try {
+                    if (!es.undo()) return@repeat
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // 2. DnD drop = exactly one engine moveLayer (hook used by the drop
+    // handler), then smoke the ^/v menu alternative.
+    @Test
+    fun layerDragReorderMovesOnce() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            dockTop()
+            // Self-sufficient: add two fresh layers, operate on the tail.
+            val base = layerNames(es).size
+            onUi {
+                it.addLayerNamed("AAA")
+                it.addLayerNamed("BBB")
+            }
+            val n = layerNames(es).size
+            assertTrue("need at least 2 layers", n >= 2)
+            // Refresh the panel past the just-added layers so the drop
+            // guard sees the real size.
+            dockTop()
+            composeRule.onNodeWithTag("layer-thumb-0").performClick()
+            composeRule.waitForIdle()
+            val from = n - 2
+            val to = n - 1
+            val hook = LayerPanelTestHooks.moveOnce
+            assertNotNull("drop hook must be installed", hook)
+            onUi { it.moveCallCount = 0 }
+            val before = layerNames(es)
+            hook!!(from, to)
+            composeRule.waitForIdle()
+            assertEquals("drop must cost exactly one moveLayer", 1, es.moveCallCount)
+            val after = layerNames(es)
+            val expected = before.toMutableList().also {
+                val m = it.removeAt(from)
+                it.add(to, m)
+            }
+            assertEquals("order must reflect the single move", expected, after)
+            // Smoke: ^/v from the long-press menu (non-tactile path).
+            onUi { it.moveCallCount = 0 }
+            composeRule.onNodeWithTag("layer-name-$to").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("layer-name-$to")
+                .performTouchInput { longClick() }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("layer-down-$to").performClick()
+            composeRule.waitForIdle()
+            assertEquals("menu v must cost exactly one moveLayer", 1, es.moveCallCount)
+            assertEquals(
+                "menu v must move the layer back down",
+                before,
+                layerNames(es)
+            )
+            assertTrue(base >= 0)
+        } finally {
+            repeat(4) {
+                try {
+                    es.undo()
+                } catch (_: Exception) {
+                }
+            }
+            resetSlice3()
+        }
+    }
+
+    // 3. Searchable blend dialog: filter, apply, engine proves it.
+    @Test
+    fun blendSearchableApplies() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            onUi {
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#808080","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+                it.setActiveLayer(0)
+            }
+            val t0 = SystemClock.uptimeMillis()
+            bigStroke(es, es.width * 0.5f, es.height * 0.5f, t0)
+            Thread.sleep(400)
+            val idx = onUi {
+                val i = it.addLayerNamed("BlendTop")
+                it.setActiveLayer(i)
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+                i
+            }
+            bigStroke(es, es.width * 0.5f, es.height * 0.5f, t0 + 5000)
+            Thread.sleep(400)
+            val before = pullFull(es)
+            // The panel only learns the new layer through a UI refresh.
+            dockTop()
+            composeRule.onNodeWithTag("layer-thumb-0").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("layer-blend-$idx").performScrollTo()
+            composeRule.onNodeWithTag("layer-blend-$idx").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("blend-search").performTextInput("mult")
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("blend-item-multiply").assertIsDisplayed()
+            composeRule.onNodeWithTag("blend-item-screen").assertDoesNotExist()
+            composeRule.onNodeWithTag("blend-item-multiply").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(600)
+            val blend = try {
+                val arr = org.json.JSONObject(es.layerState()).optJSONArray("layers")
+                val e = arr!!.optJSONObject(idx)
+                (e.optJSONObject("self") ?: e).optString("blend", "")
+            } catch (_: Exception) {
+                ""
+            }
+            assertEquals("engine must hold the picked blend", "svg:multiply", blend)
+            val after = pullFull(es)
+            var diff = 0
+            for (y in 0 until after.height step 8) {
+                for (x in 0 until after.width step 8) {
+                    if (after.getPixel(x, y) != before.getPixel(x, y)) diff++
+                }
+            }
+            before.recycle()
+            after.recycle()
+            assertTrue("multiply must change the composite, got $diff", diff > 0)
+            onUi { it.setLayerBlend(idx, "svg:normal") }
+        } finally {
+            resetSlice3()
+            repeat(20) {
+                try {
+                    if (!es.undo()) return@repeat
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // 4. Pinned bar persists across restart, mirrors ToolPalette, and the
+    // radius actually drives the stroke width (relative proof).
+    @Test
+    fun pinnedBarPersistsAndMirrors() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            composeRule.activityRule.scenario.onActivity { act ->
+                val p = act.brushPrefs
+                p.updateRadius(24f)
+                p.updateOpaque(0.5f)
+                p.flush()
+                act.brushPrefs.bindTool("#141414", false, 0f)
+            }
+            Thread.sleep(800)
+            val f = File(composeRule.activity.filesDir, "brush-defaults.json")
+            assertTrue("brush-defaults.json must be persisted", f.exists())
+            assertTrue(
+                "radius 24 must be persisted, got ${f.readText()}",
+                f.readText().contains("24")
+            )
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            Thread.sleep(500)
+            composeRule.onNodeWithTag("pinned-bar").assertIsDisplayed()
+            // Mirror: the hoisted 24px value shows in the pinned bar and
+            // in ToolPalette (same BrushPrefs, single push path).
+            composeRule.onAllNodes(hasText("24px", substring = true))
+                .assertCountEquals(2)
+            // Relative width proof on engine pixels: 64px opaque stroke
+            // covers more than a 10px one over the same path. NOTE: the
+            // activity (and its EngineSurface) was recreated above, so
+            // re-acquire the live surface — the old handle is retired.
+            val live = surf()
+            awaitSurface(live)
+            val t0 = SystemClock.uptimeMillis()
+            val cx = live.width * 0.5f
+            val cy = live.height * 0.5f
+            onUi {
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+            }
+            strokeAcross(live, cy, t0, cx)
+            Thread.sleep(300)
+            var wide = pullFull(live)
+            val wideN = countInk(wide)
+            wide.recycle()
+            assertTrue(live.undo())
+            onUi {
+                it.setBrush(
+                    """{"radius":10,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+            }
+            strokeAcross(live, cy, t0 + 5000, cx)
+            Thread.sleep(300)
+            var narrow = pullFull(live)
+            val narrowN = countInk(narrow)
+            narrow.recycle()
+            assertTrue("wide stroke must cover more ink ($wideN vs $narrowN)", wideN > narrowN)
+            assertTrue(live.undo())
+        } finally {
+            resetSlice3()
+            try {
+                surf().undo()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // 5. Every layer touch target measures >= 48dp (0.5dp tolerance) on
+    // the current form factor.
+    @Test
+    fun touchTargets48dpLayers() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            dockTop()
+            composeRule.waitForIdle()
+            val act = activeIndex(es)
+            fun tall(tag: String) {
+                composeRule.waitForIdle()
+                val u = composeRule.onNodeWithTag(tag).getUnclippedBoundsInRoot()
+                val h = u.bottom - u.top
+                assertTrue(
+                    "$tag must be >= 48dp, got $h",
+                    h >= (48.dp - 0.5.dp)
+                )
+            }
+            // Rank 2 of the ACTIVE layer is always unfolded (§6).
+            composeRule.onNodeWithTag("layer-row-$act").performScrollTo()
+            listOf(
+                "layer-thumb-$act", "layer-vis-$act", "layer-drag-$act",
+                "layer-blend-$act", "layer-opacity-$act", "layer-search",
+                "layer-add", "pinned-bar", "pinned-size", "pinned-opaque",
+                "pinned-stab"
+            ).forEach { tall(it) }
+        } finally {
+            resetSlice3()
+        }
+    }
+
+    // 6. 50 layers stay readable: compact mode, counter, name search.
+    @Test
+    fun fiftyLayersStayReadable() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            dockTop()
+            val start = layerNames(es).size
+            onUi {
+                for (i in start until 50) it.addLayerNamed("Layer $i")
+            }
+            // Refresh the panel, then prove the counter.
+            composeRule.onNodeWithTag("layer-thumb-0").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(800)
+            composeRule.onNodeWithTag("layer-count").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("layer-count").assertIsDisplayed()
+            val total = layerNames(es).size
+            assertTrue("need 50 layers, got $total", total >= 50)
+            composeRule.onNode(hasText("$total/50", substring = true))
+                .assertIsDisplayed()
+            // Compact: a non-active row folds its rank 2.
+            val act = activeIndex(es)
+            val folded = if (act != 0) 0 else 1
+            composeRule.onNodeWithTag("layer-row-$folded").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("layer-row-$folded").assertIsDisplayed()
+            composeRule.onNodeWithTag("layer-blend-$folded").assertDoesNotExist()
+            // The active row keeps its controls.
+            composeRule.onNodeWithTag("layer-row-$act").performScrollTo()
+            composeRule.onNodeWithTag("layer-blend-$act").assertIsDisplayed()
+            // Name search filters (unique match "Layer 49": substring proof,
+            // single row, always composed as the first lazy item).
+            composeRule.onNodeWithTag("layer-search").performScrollTo()
+            composeRule.onNodeWithTag("layer-search").performClick()
+            composeRule.onNodeWithTag("layer-search").performTextInput("Layer 49")
+            composeRule.waitForIdle()
+            Thread.sleep(500)
+            composeRule.onNodeWithTag("layer-row-49").assertExists()
+            composeRule.onNodeWithTag("layer-row-49").assertIsDisplayed()
+            composeRule.onNodeWithTag("layer-search").performTextClearance()
+            composeRule.waitForIdle()
+        } finally {
+            // Best effort: added layers are undoable one by one.
+            repeat(60) {
+                try {
+                    if (!es.undo()) return@repeat
+                } catch (_: Exception) {
+                    return@repeat
+                }
+            }
+            resetSlice3()
+        }
+    }
+
+    // 7. Clip/mask/fx badges with the right content descriptions; tapping
+    // the mask badge drives maskTarget in the engine.
+    @Test
+    fun clipMaskBadges() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            dockTop()
+            onUi {
+                it.setLayerClipped(0, true)
+                it.addLayerMask(0)
+                it.maskTarget(0, true)
+                it.setLayerAdjustment(0, """{"type":"brightness","amount":0.5}""")
+            }
+            var clipDesc = ""
+            var maskDesc = ""
+            var fxDesc = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                clipDesc = act.getString(R.string.layer_clipped_on)
+                maskDesc = act.getString(R.string.layer_mask_editing)
+                fxDesc = act.getString(R.string.layer_fx_present)
+            }
+            // Refresh the panel through the UI, then prove the badges.
+            composeRule.onNodeWithTag("layer-thumb-0").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(800)
+            composeRule.onNodeWithTag("layer-row-0").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNode(
+                hasTestTag("layer-badge-clip-0").and(
+                    hasContentDescription(clipDesc)
+                )
+            ).assertIsDisplayed()
+            composeRule.onNode(
+                hasTestTag("layer-badge-mask-0").and(
+                    hasContentDescription(maskDesc)
+                )
+            ).assertIsDisplayed()
+            composeRule.onNode(
+                hasTestTag("layer-badge-fx-0").and(
+                    hasContentDescription(fxDesc)
+                )
+            ).assertIsDisplayed()
+            // Slice report screenshot (best effort): badges + pinned bar +
+            // thumbnails in one frame.
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    val shot = InstrumentationRegistry.getInstrumentation()
+                        .uiAutomation.takeScreenshot()
+                    if (shot != null) {
+                        val dst = File(composeRule.activity.cacheDir, "slice3-layers.png")
+                        FileOutputStream(dst).use { o ->
+                            shot.compress(Bitmap.CompressFormat.PNG, 100, o)
+                        }
+                        if (!shot.isRecycled) shot.recycle()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            // Tap the mask badge: engine leaves mask-target mode.
+            composeRule.onNodeWithTag("layer-badge-mask-0").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(400)
+            assertEquals(
+                "mask badge tap must clear maskTarget",
+                -1,
+                try {
+                    org.json.JSONObject(es.layerState()).optInt("maskTarget", 0)
+                } catch (_: Exception) {
+                    0
+                }
+            )
+            onUi {
+                it.setLayerClipped(0, false)
+                it.setLayerAdjustment(0, null)
+            }
+        } finally {
+            resetSlice3()
             try {
                 es.undo()
             } catch (_: Exception) {
