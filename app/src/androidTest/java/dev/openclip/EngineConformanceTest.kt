@@ -12,17 +12,26 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.swipeDown
 import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
@@ -2606,6 +2615,480 @@ class EngineConformanceTest {
             o.write("data".toByteArray())
             o.write(wavInt(pcm.size))
             o.write(pcm)
+        }
+    }
+
+    // ---- Slice 4 practical timeline (spec docs/slice4-timeline.md §7)
+    // App-side only: scrub, onion display mapping, delete guard, fps
+    // transport, drawer budget. Each test recreates the activity for a
+    // pristine reset (onion OFF, fps 12, cur 0, drawer folded, 1 frame)
+    // so order never matters.
+
+    private fun openTimeline() {
+        composeRule.waitForIdle()
+        // Tolerant opener: right after a recreate the rail may not be
+        // composed yet, and mid-teardown the glyph can be briefly
+        // absent — retry both branches instead of failing once.
+        repeat(8) {
+            val trackShown = try {
+                composeRule.onNodeWithTag("timeline-track")
+                    .assertIsDisplayed()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+            if (trackShown) return
+            try {
+                composeRule.onNodeWithText("▸").performClick()
+            } catch (_: AssertionError) {
+                Thread.sleep(500)
+            }
+            composeRule.waitForIdle()
+            Thread.sleep(300)
+        }
+        composeRule.onNodeWithTag("timeline-track").assertIsDisplayed()
+    }
+
+    private fun freshTimeline(): EngineSurface {
+        composeRule.activityRule.scenario.recreate()
+        composeRule.waitForIdle()
+        val es = surf()
+        awaitSurface(es)
+        openTimeline()
+        return es
+    }
+
+    private fun addCels(n: Int) {
+        repeat(n) {
+            tap("cel-add")
+        }
+        Thread.sleep(300)
+    }
+
+    // Scroll-into-view tap for drawer controls: on narrow windows the
+    // transport FlowRow wraps and later items sit below the 175dp
+    // fold; a raw click would land outside the drawer and silently do
+    // nothing. Never use on LazyRow thumbs (userScrollEnabled=false).
+    private fun tap(tag: String) {
+        reveal(tag)
+        composeRule.onNodeWithTag(tag).performClick()
+        composeRule.waitForIdle()
+    }
+
+    // Leave-no-trace cleanup for the next test (spec §7: reset onion
+    // OFF, fps 12, cur 0, drawer folded, single cel — without the churn
+    // of an activity recreate, which races the follower's startup).
+    // Folding the drawer disposes the strip (stops play); the clip is
+    // reset in place via direct engine calls.
+    private fun settleTimeline() {
+        composeRule.waitForIdle()
+        try {
+            composeRule.onNodeWithText("▾").performClick()
+            composeRule.waitForIdle()
+        } catch (_: AssertionError) {
+            // Already folded.
+        }
+        Thread.sleep(200)
+        onUi { es ->
+            try {
+                val n = es.frameCount()
+                for (i in n - 1 downTo 1) {
+                    es.setFrame(i)
+                    es.deleteFrame(i)
+                }
+                es.setFrame(0)
+                es.setOnion(false, false, 0.3f)
+            } catch (_: Exception) {
+            }
+        }
+        Thread.sleep(200)
+    }
+
+    // Scroll a drawer control into view without clicking (for text
+    // asserts below the 175dp fold on narrow windows).
+    private fun reveal(tag: String) {
+        composeRule.onNodeWithTag(tag).performScrollTo()
+        composeRule.waitForIdle()
+    }
+
+    private fun shortStroke(es: EngineSurface, cx: Float, cy: Float, t0: Long) {
+        dispatchAll(
+            es,
+            simpleDown(t0, cx - 40f, cy),
+            MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, cx, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, cx + 40f, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, cx + 40f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+    }
+
+    private fun bitmapPixels(b: Bitmap): IntArray {
+        val px = IntArray(b.width * b.height)
+        b.getPixels(px, 0, b.width, 0, 0, b.width, b.height)
+        return px
+    }
+
+    private fun timelineButtonText(tag: String): String {
+        val node = composeRule.onNodeWithTag(tag).fetchSemanticsNode()
+        return node.config.getOrNull(SemanticsProperties.Text)
+            ?.joinToString("") { it.text } ?: ""
+    }
+
+    // 1. A controlled 48dp horizontal drag on the track seeks exactly
+    // one cel (16dp arm + ~48dp per cel, setFrame only on release);
+    // the landed composite equals the stored pixels of that cel and no
+    // cel is created/deleted.
+    @Test
+    fun scrubChangesCurrentFrame() {
+        try {
+        val es = freshTimeline()
+        addCels(2)
+        assertEquals(3, onUi { it.frameCount() })
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        // Ink cel 1 only: tap its thumb, stroke, wait for the render
+        // thread to settle (two identical pulls), snapshot all frames.
+        composeRule.onNodeWithTag("cel-thumb-1").performClick()
+        composeRule.waitForIdle()
+        shortStroke(es, cx, cy, t0)
+        Thread.sleep(400)
+        val settled = pullFull(es, 1)
+        val settledPx = bitmapPixels(settled)
+        settled.recycle()
+        Thread.sleep(200)
+        val check = pullFull(es, 1)
+        val checkPx = bitmapPixels(check)
+        check.recycle()
+        assertTrue("render thread must settle after a stroke", settledPx.contentEquals(checkPx))
+        val stored = (0 until 3).map { i ->
+            val b = pullFull(es, i)
+            val px = bitmapPixels(b)
+            b.recycle()
+            px
+        }
+        assertTrue("cel 1 stroke must paint ink", stored[1].any { it != -1 })
+        assertTrue("cel 0 must stay blank", stored[0].all { it == -1 })
+        // Back to cel 0, then a single-step 48dp seek right.
+        composeRule.onNodeWithTag("cel-thumb-0").performClick()
+        composeRule.waitForIdle()
+        assertEquals(0, onUi { it.currentFrameIndex() })
+        reveal("timeline-track")
+        // NOTE: performTouchInput coordinates are node-local (0,0 is
+        // the track's top-left), not boundsInRoot.
+        val size = composeRule.onNodeWithTag("timeline-track")
+            .fetchSemanticsNode().size
+        val dxPx = 48f * composeRule.density.density
+        val tcy = size.height / 2f
+        val start = Offset(size.width / 2f - dxPx / 2, tcy)
+        val end = Offset(size.width / 2f + dxPx / 2, tcy)
+        composeRule.onNodeWithTag("timeline-track")
+            .performTouchInput { swipe(start, end, 200L) }
+        // The release lands async: poll instead of a fixed sleep.
+        var landed = -1
+        val deadline = SystemClock.uptimeMillis() + 5000
+        while (landed != 1 && SystemClock.uptimeMillis() < deadline) {
+            Thread.sleep(200)
+            landed = onUi { it.currentFrameIndex() }
+        }
+        assertEquals("one 48dp seek must advance exactly one cel", 1, landed)
+        assertEquals("scrub must not create/delete cels", 3, onUi { it.frameCount() })
+        val now = pullFull(es, landed)
+        val nowPx = bitmapPixels(now)
+        now.recycle()
+        assertTrue(
+            "landed composite must equal the stored cel $landed pixels",
+            nowPx.contentEquals(stored[landed])
+        )
+        composeRule.onNodeWithTag("scrub-candidate").assertDoesNotExist()
+        assertTrue(onUi { it.undo() })
+        } finally {
+            settleTimeline()
+        }
+    }
+
+    // 2. Onion master + counts never touch frame pixels
+    // (nFrameCompositeInto excludes ghosts by engine contract) while
+    // the ghost borders show in the strip hierarchy.
+    @Test
+    fun onionTintTouchesNoPixels() {
+        try {
+        val es = freshTimeline()
+        addCels(2)
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        // After the adds cur=2: step back with prev (auto-scroll keeps
+        // thumbs composed) and ink cels 0 and 1 differently.
+        tap("transport-prev")
+        tap("transport-prev")
+        assertEquals(0, onUi { it.currentFrameIndex() })
+        shortStroke(es, cx, cy - 60f, t0)
+        Thread.sleep(300)
+        tap("transport-next")
+        assertEquals(1, onUi { it.currentFrameIndex() })
+        shortStroke(es, cx, cy + 60f, t0 + 1000)
+        Thread.sleep(400)
+        val plain = pullFull(es, 1)
+        val plainPx = bitmapPixels(plain)
+        plain.recycle()
+        assertTrue("fixture strokes must paint ink", plainPx.any { it != -1 })
+        // Arm onion: master ON (counts default 1/1), strength ~50 %.
+        tap("onion-master")
+        tap("timeline-settings")
+        try {
+            composeRule.onNodeWithTag("onion-strength-slider")
+                .performSemanticsAction(SemanticsActions.SetProgress) { it(0.5f) }
+            composeRule.waitForIdle()
+        } catch (_: Exception) {
+        }
+        val ghosted = pullFull(es, 1)
+        val ghostPx = bitmapPixels(ghosted)
+        ghosted.recycle()
+        assertTrue(
+            "onion display must not alter frame pixels",
+            ghostPx.contentEquals(plainPx)
+        )
+        // The strength slider scrolled the drawer down: bring the
+        // piste back before asserting on its ghost borders.
+        reveal("timeline-track")
+        composeRule.onNodeWithContentDescription("onion_before")
+            .assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("onion_after")
+            .assertIsDisplayed()
+        // Master OFF restores the exact same bytes.
+        tap("onion-master")
+        val off = pullFull(es, 1)
+        val offPx = bitmapPixels(off)
+        off.recycle()
+        assertTrue(
+            "onion OFF must keep byte-identical pixels",
+            offPx.contentEquals(plainPx)
+        )
+        assertTrue(onUi { it.undo() })
+        assertTrue(onUi { it.undo() })
+        } finally {
+            settleTimeline()
+        }
+    }
+
+    // 3. Onion count steppers clamp to 0..4 and drive which thumbs
+    // carry ghost borders (honest p/n mapping), without engine faults.
+    @Test
+    fun onionCountStepperBounds() {
+        try {
+        freshTimeline()
+        addCels(3)
+        assertEquals(4, onUi { it.frameCount() })
+        // cur=3 after the adds: two prev steps to cel 1 (neighbors
+        // both sides, auto-scroll window {0,1,2} keeps them composed).
+        tap("transport-prev")
+        tap("transport-prev")
+        assertEquals(1, onUi { it.currentFrameIndex() })
+        tap("timeline-settings")
+        repeat(5) { tap("onion-before-plus") }
+        reveal("onion-before-count")
+        composeRule.onNodeWithTag("onion-before-count")
+            .assertTextContains("4", substring = true)
+        repeat(6) { tap("onion-before-minus") }
+        reveal("onion-before-count")
+        composeRule.onNodeWithTag("onion-before-count")
+            .assertTextContains("0", substring = true)
+        repeat(5) { tap("onion-after-plus") }
+        reveal("onion-after-count")
+        composeRule.onNodeWithTag("onion-after-count")
+            .assertTextContains("4", substring = true)
+        repeat(6) { tap("onion-after-minus") }
+        reveal("onion-after-count")
+        composeRule.onNodeWithTag("onion-after-count")
+            .assertTextContains("0", substring = true)
+        // Mapping: master ON with 0/0 shows no ghosts; 1/1 shows both
+        // sides (cur=1 of 4 has neighbors either way).
+        tap("onion-master")
+        composeRule.onNodeWithContentDescription("onion_before")
+            .assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("onion_after")
+            .assertDoesNotExist()
+        tap("onion-before-plus")
+        tap("onion-after-plus")
+        // The stepper taps scrolled the drawer down: bring the piste
+        // back into view before asserting on its ghost borders.
+        reveal("timeline-track")
+        composeRule.onNodeWithContentDescription("onion_before")
+            .assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("onion_after")
+            .assertIsDisplayed()
+        assertEquals("bounds must not fault the engine", 4, onUi { it.frameCount() })
+        // Master back off (each test recreates the activity anyway).
+        tap("onion-master")
+        } finally {
+            settleTimeline()
+        }
+    }
+
+    // 4. Delete guard: disabled at 1 cel, 1-tap 3 s arm, auto-disarm on
+    // timeout, cur folds back after the last delete.
+    @Test
+    fun celDeleteGuardSingleFrame() {
+        try {
+        freshTimeline()
+        composeRule.onNodeWithTag("cel-delete").assertIsNotEnabled()
+        addCels(1)
+        assertEquals(2, onUi { it.frameCount() })
+        tap("cel-delete")
+        val armed = timelineButtonText("cel-delete")
+        assertTrue(
+            "first tap must arm the confirm, got '$armed'",
+            armed == "Tap again to confirm" || armed == "Toucher pour confirmer"
+        )
+        tap("cel-delete")
+        Thread.sleep(300)
+        assertEquals(1, onUi { it.frameCount() })
+        assertEquals(0, onUi { it.currentFrameIndex() })
+        composeRule.onNodeWithTag("cel-delete").assertIsNotEnabled()
+        // Timeout path: arm, wait out the 3 s (4.5 s sleep keeps margin
+        // on a loaded emulator), next tap re-arms only. The pre-assert
+        // proves the timer disarmed before the tap, separating a timer
+        // fault from a click fault.
+        addCels(1)
+        assertEquals(2, onUi { it.frameCount() })
+        tap("cel-delete")
+        Thread.sleep(4500)
+        reveal("cel-delete")
+        val disarmed = timelineButtonText("cel-delete")
+        assertTrue(
+            "guard must auto-disarm after 3 s, got '$disarmed'",
+            disarmed == "Delete" || disarmed == "Supprimer"
+        )
+        tap("cel-delete")
+        Thread.sleep(300)
+        assertEquals("timeout must disarm (no delete)", 2, onUi { it.frameCount() })
+        val rearmed = timelineButtonText("cel-delete")
+        assertTrue(
+            "timeout tap must re-arm, got '$rearmed'",
+            rearmed == "Tap again to confirm" || rearmed == "Toucher pour confirmer"
+        )
+        tap("cel-delete")
+        Thread.sleep(300)
+        assertEquals(1, onUi { it.frameCount() })
+        } finally {
+            settleTimeline()
+        }
+    }
+
+    // 5. fps clamps 1..60, play steps the clip, folding the drawer
+    // pauses (fresh strip shows play on reopen).
+    @Test
+    fun fpsClampAndPlaySteps() {
+        try {
+        val es = freshTimeline()
+        addCels(2)
+        assertEquals(3, onUi { it.frameCount() })
+        tap("timeline-settings")
+        // NOTE: this Compose version's SetProgress takes the raw value
+        // in range units (verified: 1f lands on fps 1, not max).
+        composeRule.onNodeWithTag("fps-slider")
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(60f) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("fps-value")
+            .assertTextContains("60", substring = true)
+        composeRule.onNodeWithTag("fps-slider")
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(1f) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("fps-value")
+            .assertTextContains("1", substring = true)
+        // Stepper holds the bounds too (no 0 / 61).
+        tap("fps-minus")
+        composeRule.onNodeWithTag("fps-value")
+            .assertTextContains("1", substring = true)
+        repeat(3) { tap("fps-plus") }
+        composeRule.onNodeWithTag("fps-value")
+            .assertTextContains("4", substring = true)
+        // Play ~2.4 s at 4 fps: the current frame must advance.
+        val seen = mutableSetOf<Int>()
+        tap("transport-play")
+        assertEquals("playing must show pause glyph", "⏸", timelineButtonText("transport-play"))
+        repeat(4) {
+            Thread.sleep(600)
+            seen.add(onUi { it.currentFrameIndex() })
+        }
+        assertTrue("play must advance frames, saw $seen", seen.size >= 2)
+        assertEquals("play must not create/delete cels", 3, onUi { it.frameCount() })
+        // Folding the drawer pauses: reopen shows a fresh play glyph.
+        composeRule.onNodeWithText("▾").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("timeline-track").assertDoesNotExist()
+        composeRule.onNodeWithText("▸").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("timeline-track").assertIsDisplayed()
+        assertEquals("reopen must show play (paused)", "▶", timelineButtonText("transport-play"))
+        } finally {
+            settleTimeline()
+        }
+    }
+
+    // 6. Open drawer fits the 175dp budget, every transport target is
+    // >= 48dp, one tap folds it back; also captures the slice report
+    // screenshot (open drawer, tinted onion, fps visible).
+    @Test
+    fun drawerKeepsMaxHeightPhoneFolded() {
+        try {
+        val es = freshTimeline()
+        addCels(2)
+        val t0 = SystemClock.uptimeMillis()
+        shortStroke(es, es.width * 0.5f, es.height * 0.5f, t0)
+        Thread.sleep(400)
+        tap("onion-master")
+        tap("timeline-settings")
+        val hDp = composeRule.onNodeWithTag("timeline-drawer")
+            .getUnclippedBoundsInRoot().let { it.bottom - it.top }
+        assertTrue(
+            "open drawer must fit 175dp, got $hDp",
+            hDp <= 176.dp
+        )
+        fun tall(tag: String) {
+            composeRule.waitForIdle()
+            val u = composeRule.onNodeWithTag(tag).getUnclippedBoundsInRoot()
+            val h = u.bottom - u.top
+            assertTrue(
+                "$tag must be >= 48dp, got $h",
+                h >= (48.dp - 0.5.dp)
+            )
+        }
+        listOf(
+            "transport-prev", "transport-play", "transport-next",
+            "fps-minus", "fps-plus", "onion-master",
+            "cel-add", "cel-duplicate", "cel-delete", "timeline-settings"
+        ).forEach { tall(it) }
+        // Slice report screenshot (best effort, never fails the gate):
+        // piste + transport in view (thumbs, onion tint, fps).
+        reveal("timeline-track")
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val shot = InstrumentationRegistry.getInstrumentation()
+                    .uiAutomation.takeScreenshot()
+                if (shot != null) {
+                    val dst = File(composeRule.activity.cacheDir, "slice4-timeline.png")
+                    FileOutputStream(dst).use { o ->
+                        shot.compress(Bitmap.CompressFormat.PNG, 100, o)
+                    }
+                    if (!shot.isRecycled) shot.recycle()
+                }
+            }
+        } catch (_: Exception) {
+        }
+        // One tap folds; canvas keeps full width; one tap reopens.
+        composeRule.onNodeWithText("▾").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("timeline-track").assertDoesNotExist()
+        assertTrue(
+            "folded drawer must leave a full-width canvas",
+            es.width > 200 && es.height > 200
+        )
+        composeRule.onNodeWithText("▸").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("timeline-track").assertIsDisplayed()
+        } finally {
+            settleTimeline()
         }
     }
 }

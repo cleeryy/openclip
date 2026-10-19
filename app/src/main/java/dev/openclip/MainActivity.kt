@@ -918,6 +918,7 @@ class MainActivity : ComponentActivity() {
                             .background(Color(0xFF1C1C22))
                             .verticalScroll(rememberScrollState())
                             .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .testTag("timeline-drawer")
                     ) {
                         TimelineStrip(
                             surface = surface,
