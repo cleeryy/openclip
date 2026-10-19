@@ -71,6 +71,10 @@ fun PinnedBrushBar(
         }
         return
     }
+    // Slice 5: mirrors the ACTIVE tool memory (brush or eraser) through
+    // the single hoisted push path.
+    val shownRadius = prefs.activeRadius()
+    val shownOpaque = prefs.activeOpaque()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -84,7 +88,7 @@ fun PinnedBrushBar(
             .testTag("pinned-bar")
     ) {
         Text(
-            "${prefs.radius.toInt()}px",
+            "${shownRadius.toInt()}px",
             style = MaterialTheme.typography.labelSmall.copy(
                 fontFamily = FontFamily.Monospace
             ),
@@ -103,15 +107,19 @@ fun PinnedBrushBar(
         contentAlignment = Alignment.Center
     ) {
         Slider(
-            value = prefs.radius,
-            onValueChange = { prefs.updateRadius(it); push() },
+            value = shownRadius,
+            onValueChange = {
+                if (prefs.isEraser) prefs.updateEraserRadius(it)
+                else prefs.updateRadius(it)
+                push()
+            },
             valueRange = 1f..128f,
             modifier = Modifier.fillMaxWidth()
         )
     }
         Text(
             stringResource(
-                R.string.layer_opacity_brush, (prefs.opaque * 100).toInt()
+                R.string.layer_opacity_brush, (shownOpaque * 100).toInt()
             ),
             style = MaterialTheme.typography.labelSmall.copy(
                 fontFamily = FontFamily.Monospace
@@ -128,8 +136,12 @@ fun PinnedBrushBar(
         contentAlignment = Alignment.Center
     ) {
         Slider(
-            value = prefs.opaque,
-            onValueChange = { prefs.updateOpaque(it); push() },
+            value = shownOpaque,
+            onValueChange = {
+                if (prefs.isEraser) prefs.updateEraserOpaque(it)
+                else prefs.updateOpaque(it)
+                push()
+            },
             modifier = Modifier.fillMaxWidth()
         )
     }
@@ -162,7 +174,9 @@ fun PinnedBrushBar(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .size(48.dp)
-                .clickable { collapsed = true }
+                .clickable {
+                    collapsed = true
+                }
                 .testTag("pinned-hide")
         ) {
             Text("–", color = Color(0xFFB8B8C8))

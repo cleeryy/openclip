@@ -191,4 +191,18 @@
     <string name="layer_pinned_hide">Hide bar</string>
     <string name="layer_pinned_show">Sizes</string>
     <string name="layer_compact_auto">Compacted %1$d</string>
+    <string name="cursor_brush">Brush %1$dpx</string>
+    <string name="cursor_eraser">Eraser %1$dpx</string>
+    <string name="cursor_offpaper">Outside canvas</string>
+    <string name="cursor_blocked">Layer hidden</string>
+    <string name="curve_title">Pressure curve</string>
+    <string name="curve_linear">Soft</string>
+    <string name="curve_firm">Firm</string>
+    <string name="curve_linear_reset">Linear</string>
+    <string name="curve_hint">Shape the stroke response</string>
+    <string name="eraser_covers_hint">Eraser paints light (engine)</string>
+    <string name="eraser_learn_more">Learn more</string>
+    <string name="brush_hud">%1$dpx · %2$d%%</string>
+    <string name="brush_help">Brush feeling…</string>
+    <string name="brush_help_body">The ring shows the dab size at average pressure. The curve graph maps to the engine pressure exponent. The eraser paints light over raster (real erase on vector layers only). Undo repairs any stroke.</string>
 </resources>

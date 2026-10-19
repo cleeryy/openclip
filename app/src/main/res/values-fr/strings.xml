@@ -178,4 +178,18 @@
     <string name="layer_pinned_hide">Masquer</string>
     <string name="layer_pinned_show">Tailles</string>
     <string name="layer_compact_auto">Compacté %1$d</string>
+    <string name="cursor_brush">Pinceau %1$d px</string>
+    <string name="cursor_eraser">Gomme %1$d px</string>
+    <string name="cursor_offpaper">Hors canvas</string>
+    <string name="cursor_blocked">Calque masqué</string>
+    <string name="curve_title">Courbe pression</string>
+    <string name="curve_linear">Doux</string>
+    <string name="curve_firm">Ferme</string>
+    <string name="curve_linear_reset">Linéaire</string>
+    <string name="curve_hint">Façonnez la réponse</string>
+    <string name="eraser_covers_hint">Gomme = peinture claire (moteur)</string>
+    <string name="eraser_learn_more">En savoir plus</string>
+    <string name="brush_hud">%1$d px · %2$d %%</string>
+    <string name="brush_help">Feeling pinceau…</string>
+    <string name="brush_help_body">L’anneau montre le diamètre à pression moyenne. Le graphe règle l’exposant de pression du moteur. La gomme peint clair sur raster (vrai effacement sur calques vectoriels). Annuler répare tout trait.</string>
 </resources>

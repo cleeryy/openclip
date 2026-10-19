@@ -3091,6 +3091,607 @@ class EngineConformanceTest {
             settleTimeline()
         }
     }
+    // ---- Slice 5 brush feeling (spec docs/slice5-brushfeel.md §7) ----
+    // App-side only: cursor ring, curve graph -> engine scalar, honest
+    // eraser tool, HUD pastille. Every chain ends in engine pixels or
+    // test-only hooks, never Compose state alone.
+
+    private fun resetBrushFeel() {
+        resetSlice3()
+        composeRule.activityRule.scenario.onActivity { act ->
+            val p = act.brushPrefs
+            p.setTool(false)
+            p.updateEraserRadius(48f)
+            p.updateEraserOpaque(1f)
+            p.updateCurveScalar(0f)
+            p.flush()
+        }
+        uiSync {
+            it.navigateMode = false
+            it.resetView()
+            it.clearHoverForTest()
+            it.lastStrokeLatencyMs = -1
+        }
+    }
+
+    private fun pushTestBrush(
+        radius: Float = 24f,
+        opaque: Float = 1f,
+        eraser: Boolean = false,
+        curve: Float = 0f
+    ) {
+        composeRule.activityRule.scenario.onActivity { act ->
+            val p = act.brushPrefs
+            if (eraser) {
+                p.updateEraserRadius(radius)
+                p.updateEraserOpaque(opaque)
+            } else {
+                p.updateRadius(radius)
+                p.updateOpaque(opaque)
+            }
+            p.setTool(eraser)
+            p.updateCurveScalar(curve)
+            p.bindTool("#141414", eraser, p.curve)
+            findEngineSurface(act.window.decorView)!!.setBrush(p.currentJson())
+        }
+    }
+
+    private fun stylusProps() = arrayOf(
+        MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_STYLUS
+        }
+    )
+
+    private fun stylusCoords(x: Float, y: Float) = arrayOf(
+        MotionEvent.PointerCoords().apply {
+            this.x = x
+            this.y = y
+            pressure = 0.8f
+            size = 1f
+        }
+    )
+
+    private fun hoverStylus(t0: Long, x: Float, y: Float, action: Int): MotionEvent =
+        MotionEvent.obtain(
+            t0, t0, action, 1, stylusProps(), stylusCoords(x, y),
+            0, 0, 1f, 1f, 0, 0,
+            android.view.InputDevice.SOURCE_STYLUS, 0
+        )
+
+    private fun strokeAcrossP(es: EngineSurface, y: Float, t0: Long, cx: Float, press: Float) {
+        dispatchAll(
+            es,
+            MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, cx - 80f, y, press, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, cx, y, press, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, cx + 80f, y, press, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, cx + 80f, y, press, 1f, 0, 1f, 1f, 0, 0)
+        )
+    }
+
+    /** Exact non-white pixel count (step 1 over the raw buffer). */
+    private fun countInkExact(b: Bitmap): Int {
+        val px = bitmapPixels(b)
+        var n = 0
+        for (v in px) if (v != -1) n++
+        return n
+    }
+
+    /** Clearly-painted core pixels (all channels below threshold). */
+    private fun countDark(b: Bitmap, thresh: Int = 200): Int {
+        val px = bitmapPixels(b)
+        var n = 0
+        for (v in px) {
+            val r = (v shr 16) and 0xFF
+            val g = (v shr 8) and 0xFF
+            val bl = v and 0xFF
+            if (r < thresh && g < thresh && bl < thresh) n++
+        }
+        return n
+    }
+
+    // 1. The hover ring matches the brush diameter through the Slice 1
+    // view matrix; finger lift hides it; hover never touches pixels.
+    @Test
+    fun cursorMatchesBrushDiameter() {
+        val es = surf()
+        awaitSurface(es)
+        resetBrushFeel()
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 24f, curve = 0f)
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            val before = pullFull(es)
+            val beforePx = bitmapPixels(before)
+            before.recycle()
+            val t0 = SystemClock.uptimeMillis()
+            val hov = hoverStylus(t0, cx, cy, MotionEvent.ACTION_HOVER_MOVE)
+            composeRule.activityRule.scenario.onActivity { es.onHoverEvent(hov) }
+            hov.recycle()
+            Thread.sleep(400)
+            val ring = es.cursorRingForTest()
+            assertNotNull("stylus hover must show the cursor ring", ring)
+            assertFalse("brush ring must not be the eraser style", ring!!.eraser)
+            // dab at nominal 0.6 pressure: 24*(0.25+0.75*0.6) = 16.8px
+            // motor; screen = motor * fitScale * viewScale (== 1 here).
+            val fit = minOf(
+                (es.width - 24f) / 2048f,
+                (es.height - 24f) / 1536f
+            )
+            val expected = 16.8f * fit
+            assertTrue(
+                "ring radius ${ring.radiusScreen} must match 16.8*fit=$expected",
+                kotlin.math.abs(ring.radiusScreen - expected) <= 2f
+            )
+            // Finger lift hides the ring; hover leaves pixels untouched.
+            val exit = hoverStylus(t0 + 100, cx, cy, MotionEvent.ACTION_HOVER_EXIT)
+            composeRule.activityRule.scenario.onActivity { es.onHoverEvent(exit) }
+            exit.recycle()
+            Thread.sleep(300)
+            assertTrue(
+                "hover exit must hide the ring",
+                es.cursorRingForTest() == null
+            )
+            val after = pullFull(es)
+            val afterPx = bitmapPixels(after)
+            after.recycle()
+            assertTrue(
+                "hover overlay must not touch engine pixels",
+                beforePx.contentEquals(afterPx)
+            )
+        } finally {
+            resetBrushFeel()
+        }
+    }
+
+    // 2. The pressure scalar drives rendering; the 4-point graph fits
+    // onto it; points survive a restart.
+    @Test
+    fun curveChangesRendering() {
+        val es = surf()
+        awaitSurface(es)
+        resetBrushFeel()
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 24f, curve = 0f)
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            // Simulated 0.5 pressure: raw 0.25 (pressureOf doubles).
+            strokeAcrossP(es, cy, SystemClock.uptimeMillis(), cx, 0.25f)
+            Thread.sleep(400)
+            var b = pullFull(es)
+            val linDark = countDark(b)
+            b.recycle()
+            assertTrue("linear stroke at 0.5 must paint a core, got $linDark", linDark > 100)
+            assertTrue(es.undo())
+            // curve=1 -> exponent 4: 0.5^4 = 0.0625, dab nearly invisible.
+            pushTestBrush(radius = 24f, curve = 1f)
+            strokeAcrossP(es, cy, SystemClock.uptimeMillis() + 5000, cx, 0.25f)
+            Thread.sleep(400)
+            b = pullFull(es)
+            val firmDark = countDark(b)
+            b.recycle()
+            assertTrue(
+                "curve=1 must shrink the painted core ($firmDark vs $linDark)",
+                firmDark * 2 < linDark
+            )
+            assertTrue(es.undo())
+            // 4-point "firm" graph -> scalar fit ~= 0.7.
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.brushPrefs.updateCurvePts(
+                    dev.openclip.ui.curvePresetPts("firm")
+                )
+            }
+            var fitted = -1f
+            var jsonCurve = -1f
+            composeRule.activityRule.scenario.onActivity { act ->
+                val p = act.brushPrefs
+                fitted = p.curve
+                p.bindTool("#141414", false, p.curve)
+                val j = p.currentJson()
+                jsonCurve = Regex("\"curve\"\\s*:\\s*(-?[0-9.]+)")
+                    .find(j)?.groupValues?.get(1)?.toFloatOrNull() ?: -1f
+                findEngineSurface(act.window.decorView)!!.setBrush(j)
+                p.flush()
+            }
+            assertTrue("firm graph must fit curve ~= 0.7, got $fitted", kotlin.math.abs(fitted - 0.7f) <= 0.15f)
+            assertTrue("pushed JSON must carry the fitted curve, got $jsonCurve", kotlin.math.abs(jsonCurve - 0.7f) <= 0.15f)
+            Thread.sleep(700)
+            val f = File(composeRule.activity.filesDir, "brush-defaults.json")
+            assertTrue("curve points must be persisted", f.readText().contains("curvePts"))
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            Thread.sleep(500)
+            var restored = floatArrayOf()
+            var restoredCurve = -1f
+            composeRule.activityRule.scenario.onActivity { act ->
+                restored = act.brushPrefs.curvePts.copyOf()
+                restoredCurve = act.brushPrefs.curve
+            }
+            assertEquals(4, restored.size)
+            val want = dev.openclip.ui.curvePresetPts("firm")
+            for (i in 0..3) {
+                assertTrue(
+                    "curve point $i must survive restart (${restored[i]} vs ${want[i]})",
+                    kotlin.math.abs(restored[i] - want[i]) <= 0.02f
+                )
+            }
+            assertTrue(
+                "curve scalar must survive restart, got $restoredCurve",
+                kotlin.math.abs(restoredCurve - 0.7f) <= 0.15f
+            )
+        } finally {
+            resetBrushFeel()
+            try {
+                es.undo()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // 3. The raster eraser only ever touches the active layer (honest
+    // white-paint limit documented). TODO(alpha-erase): a real dest-out
+    // erase (ARCHITECTURE.md first) must keep this test green while
+    // revealing transparency instead of white.
+    @Test
+    fun eraserSparesOtherLayers() {
+        val es = surf()
+        awaitSurface(es)
+        resetBrushFeel()
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            val t0 = SystemClock.uptimeMillis()
+            val liRed = onUi {
+                val i = it.addLayerNamed("S5Red")
+                it.setActiveLayer(i)
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+                i
+            }
+            bigStroke(es, cx, cy, t0, -140f)
+            Thread.sleep(400)
+            val liBlue = onUi {
+                val i = it.addLayerNamed("S5Blue")
+                it.setActiveLayer(i)
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#0000FF","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+                i
+            }
+            bigStroke(es, cx, cy, t0 + 5000, 140f)
+            Thread.sleep(400)
+            val soloBefore = onUi { it.soloRenderLayer(liRed) }
+            assertNotNull("solo render of the red layer must succeed", soloBefore)
+            val beforePx = IntArray(soloBefore!!.width * soloBefore.height)
+            soloBefore.getPixels(beforePx, 0, soloBefore.width, 0, 0, soloBefore.width, soloBefore.height)
+            soloBefore.recycle()
+            // Eraser stroke on the active (blue) layer, across its band
+            // (blue covers cy+50..cy+230; an eraser pass at cy would land
+            // on bare white and change nothing).
+            pushTestBrush(radius = 48f, eraser = true)
+            val fullBefore = pullFull(es)
+            val fullBeforePx = bitmapPixels(fullBefore)
+            fullBefore.recycle()
+            strokeAcross(es, cy + 140f, t0 + 9000, cx)
+            Thread.sleep(400)
+            val soloAfter = onUi { it.soloRenderLayer(liRed) }
+            assertNotNull("solo render after erase must succeed", soloAfter)
+            val afterPx = IntArray(soloAfter!!.width * soloAfter.height)
+            soloAfter.getPixels(afterPx, 0, soloAfter.width, 0, 0, soloAfter.width, soloAfter.height)
+            soloAfter.recycle()
+            assertTrue(
+                "eraser must leave the bottom layer pixel-identical (white-paint limit)",
+                beforePx.contentEquals(afterPx)
+            )
+            val fullAfter = pullFull(es)
+            val fullAfterPx = bitmapPixels(fullAfter)
+            fullAfter.recycle()
+            assertTrue(
+                "eraser stroke must change the composite",
+                !fullBeforePx.contentEquals(fullAfterPx)
+            )
+            var white = 0
+            var ink = 0
+            var i = 0
+            while (i < fullAfterPx.size) {
+                if (fullAfterPx[i] != -1) ink++ else white++
+                i += 2
+            }
+            assertTrue("composite must keep ink, got $ink", ink > 20)
+            assertTrue("composite must keep white, got $white", white > 20)
+            repeat(4) {
+                try {
+                    es.undo()
+                } catch (_: Exception) {
+                }
+            }
+        } finally {
+            resetBrushFeel()
+            repeat(10) {
+                try {
+                    if (!es.undo()) return@repeat
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // 4. Eraser tool separation: own size/opacity memory, amber dashed
+    // cursor, honest banner on multi-layer stacks; vector layers route
+    // to the real vector eraser.
+    @Test
+    fun eraserToolSeparation() {
+        val es = surf()
+        awaitSurface(es)
+        resetBrushFeel()
+        try {
+            ensureDockOpen()
+            uiSync { it.navigateMode = false; it.resetView() }
+            // Guarantee a multi-layer stack for the banner proof.
+            onUi { it.addLayerNamed("S5Sep") }
+            pushTestBrush(radius = 24f, opaque = 1f, eraser = false)
+            pushTestBrush(radius = 48f, opaque = 0.5f, eraser = true)
+            pushTestBrush(radius = 24f, opaque = 1f, eraser = false)
+            var brushR = -1f
+            var eraserR = -1f
+            var brushJson = ""
+            var eraserJson = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                val p = act.brushPrefs
+                brushR = p.radius
+                eraserR = p.eraserRadius
+                p.bindTool("#141414", false, p.curve)
+                brushJson = p.currentJson()
+                p.bindTool("#141414", true, p.curve)
+                eraserJson = p.currentJson()
+            }
+            assertEquals(24f, brushR)
+            assertEquals(48f, eraserR)
+            assertTrue("brush JSON must carry mode brush: $brushJson", brushJson.contains("\"brush\""))
+            assertTrue("eraser JSON must carry mode eraser: $eraserJson", eraserJson.contains("\"eraser\""))
+            // Amber dashed cursor in eraser mode.
+            pushTestBrush(radius = 48f, eraser = true)
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            composeRule.activityRule.scenario.onActivity { es.hoverForTest(cx, cy) }
+            Thread.sleep(300)
+            val ring = es.cursorRingForTest()
+            assertNotNull("eraser hover must show the ring", ring)
+            assertTrue("eraser ring must carry the eraser style", ring!!.eraser)
+            composeRule.activityRule.scenario.onActivity { es.clearHoverForTest() }
+            // Honest banner on a 2-layer stack, gone in brush mode.
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("eraser-banner").assertIsDisplayed()
+            pushTestBrush(radius = 24f, eraser = false)
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("eraser-banner").assertDoesNotExist()
+            // Vector routing: a real path removed by an eraser touch stroke.
+            val vi = onUi {
+                val i = it.addVectorLayer("S5Vec")
+                it.setActiveLayer(i)
+                i
+            }
+            onUi {
+                it.appendVectorPath(
+                    vi,
+                    """{"pts":[{"x":100,"y":600},{"x":1900,"y":900}]}"""
+                )
+            }
+            Thread.sleep(300)
+            var b = pullFull(es)
+            assertTrue("vector path must paint ink", countInk(b) > 20)
+            b.recycle()
+            pushTestBrush(radius = 48f, eraser = true)
+            onUi { it.setActiveLayer(vi) }
+            val t0 = SystemClock.uptimeMillis()
+            strokeAcross(es, cy, t0, cx)
+            Thread.sleep(400)
+            b = pullFull(es)
+            assertTrue(
+                "vector eraser stroke must remove the path (got ${countInk(b)} ink)",
+                countInk(b) == 0
+            )
+            b.recycle()
+        } finally {
+            resetBrushFeel()
+            repeat(10) {
+                try {
+                    es.undo()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // 5. Strokes stay incremental and the HUD pastille lives (10 Hz text,
+    // 800 ms TTL) with a measurable sub-500 ms down-to-ink latency.
+    @Test
+    fun strokeStaysIncrementalAndHudLives() {
+        val es = surf()
+        awaitSurface(es)
+        resetBrushFeel()
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 24f, curve = 0f)
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            val t0 = SystemClock.uptimeMillis()
+            dispatchAll(es, simpleDown(t0, cx - 80f, cy))
+            // Wait for the render thread to open the stroke (bounded:
+            // a loaded box can stall the loop, fixed sleeps would lie).
+            var started = false
+            for (k in 0 until 50) {
+                if (es.lastStrokeLatencyMs >= 0) {
+                    started = true
+                    break
+                }
+                Thread.sleep(200)
+            }
+            assertTrue("render thread must open the stroke", started)
+            dispatchAll(
+                es,
+                MotionEvent.obtain(t0, t0 + 100, MotionEvent.ACTION_MOVE, cx, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+            dispatchAll(
+                es,
+                MotionEvent.obtain(t0, t0 + 200, MotionEvent.ACTION_MOVE, cx + 80f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+            // Incremental proof: poll until ink is composited pre-UP.
+            var inkN = 0
+            for (k in 0 until 50) {
+                val b = pullFull(es)
+                inkN = countInk(b)
+                b.recycle()
+                if (inkN > 0) break
+                Thread.sleep(200)
+            }
+            assertTrue(
+                "composite must carry ink mid-stroke (incremental)",
+                inkN > 0
+            )
+            // HUD pastille visible with the live diameter (polled: the
+            // render thread posts at 10 Hz, recomposition follows).
+            var hudShown = false
+            for (k in 0 until 15) {
+                try {
+                    composeRule.onNodeWithTag("brush-hud").assertIsDisplayed()
+                    composeRule.onNodeWithTag("brush-hud-text")
+                        .assertTextContains("24", substring = true)
+                    hudShown = true
+                    break
+                } catch (_: AssertionError) {
+                    Thread.sleep(200)
+                }
+            }
+            assertTrue("HUD pastille must show 24px mid-stroke", hudShown)
+            dispatchAll(
+                es,
+                MotionEvent.obtain(t0, t0 + 300, MotionEvent.ACTION_UP, cx + 80f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+            Thread.sleep(1300)
+            composeRule.onNodeWithTag("brush-hud").assertDoesNotExist()
+            val lat = es.lastStrokeLatencyMs
+            assertTrue(
+                "down-to-ink latency must be measurable and < 500 ms, got $lat",
+                lat >= 0 && lat < 500
+            )
+            assertTrue(es.undo())
+        } finally {
+            resetBrushFeel()
+            try {
+                es.undo()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // 6. Every brush touch target >= 48dp; slice report screenshot (ring
+    // + curve graph + eraser, best effort, never fails the gate). The
+    // dock is folded first: on narrow windows the pinned bar overflows
+    // its parent and the hide pastille is unreachable by tap.
+    @Test
+    fun touchTargets48dpBrush() {
+        val es = surf()
+        awaitSurface(es)
+        resetBrushFeel()
+        try {
+            val dockWasOpen = try {
+                composeRule.onNodeWithTag("color-panel").assertIsDisplayed()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+            if (dockWasOpen) {
+                composeRule.onNodeWithTag("dock-toggle").performClick()
+                composeRule.waitForIdle()
+            }
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 48f, eraser = true)
+            // The palette row scrolls horizontally: bring the gear into
+            // view like a real user before tapping (raw performClick on
+            // an off-screen chip lands nowhere).
+            composeRule.onNodeWithTag("advanced-toggle").performScrollTo()
+            composeRule.onNodeWithTag("advanced-toggle").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(300)
+            fun tall(tag: String) {
+                composeRule.waitForIdle()
+                val u = composeRule.onNodeWithTag(tag).getUnclippedBoundsInRoot()
+                val h = u.bottom - u.top
+                assertTrue(
+                    "$tag must be >= 48dp, got $h",
+                    h >= (48.dp - 0.5.dp)
+                )
+            }
+            listOf(
+                "curve-point-0", "curve-point-1", "curve-point-2",
+                "curve-point-3", "curve-preset-linear", "curve-preset-soft",
+                "curve-preset-firm", "curve-slider-box", "tool-brush",
+                "tool-eraser", "pinned-hide"
+            ).forEach { tall(it) }
+            // Slice report screenshot: amber eraser chip + curve graph +
+            // banner + cursor ring in one frame.
+            composeRule.activityRule.scenario.onActivity { act ->
+                findEngineSurface(act.window.decorView)!!
+                    .hoverForTest(es.width * 0.5f, es.height * 0.5f)
+            }
+            Thread.sleep(400)
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    val shot = InstrumentationRegistry.getInstrumentation()
+                        .uiAutomation.takeScreenshot()
+                    if (shot != null) {
+                        val dst = File(composeRule.activity.cacheDir, "slice5-brushfeel.png")
+                        FileOutputStream(dst).use { o ->
+                            shot.compress(Bitmap.CompressFormat.PNG, 100, o)
+                        }
+                        if (!shot.isRecycled) shot.recycle()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            composeRule.activityRule.scenario.onActivity { act ->
+                findEngineSurface(act.window.decorView)!!.clearHoverForTest()
+            }
+            // Collapse the bar (poll: a tap landing mid-recomposition can
+            // be swallowed) then prove the 48dp pastille.
+            for (k in 0 until 15) {
+                val expanded = try {
+                    composeRule.onNodeWithTag("pinned-hide").assertExists()
+                    true
+                } catch (_: AssertionError) {
+                    false
+                }
+                val collapsed = try {
+                    composeRule.onNodeWithTag("pinned-show").assertExists()
+                    true
+                } catch (_: AssertionError) {
+                    false
+                }
+                if (collapsed && !expanded) break
+                if (expanded) {
+                    composeRule.onNodeWithTag("pinned-hide").performClick()
+                }
+                composeRule.waitForIdle()
+                Thread.sleep(200)
+            }
+            composeRule.onNodeWithTag("pinned-show").assertExists()
+            tall("pinned-show")
+            composeRule.onNodeWithTag("pinned-show").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("pinned-bar").assertIsDisplayed()
+            composeRule.onNodeWithTag("advanced-toggle").performScrollTo()
+            composeRule.onNodeWithTag("advanced-toggle").performClick()
+            composeRule.waitForIdle()
+            ensureDockOpen()
+        } finally {
+            resetBrushFeel()
+        }
+    }
 }
 
 private fun IntArray.contentNotEquals(other: IntArray): Boolean {

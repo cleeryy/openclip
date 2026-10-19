@@ -8,6 +8,7 @@ package dev.openclip.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.RectF
 import android.os.SystemClock
@@ -18,6 +19,9 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import dev.openclip.R
 import dev.openclip.engine.EngineHost
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 import kotlin.math.abs
@@ -33,7 +37,8 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         val x: Float,
         val y: Float,
         val pressure: Float,
-        val action: Int
+        val action: Int,
+        val t: Long = 0L
     )
 
     private data class FilterRequest(
@@ -55,6 +60,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         const val EDGE_BAND_DP = 32f
         const val EDGE_SWIPE_MIN_DP = 64f
         const val LOUPE_MS = 800L
+        const val HUD_TTL_MS = 800L
         const val SCALE_MIN = 0.25f
         const val SCALE_MAX = 8f
         const val EDGE_LEFT = 0
@@ -84,6 +90,127 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     /** Test-only spy: successful moveLayer calls since the last reset. */
     @Volatile var moveCallCount = 0
+
+    // ---- Slice 5 brush feeling (app-side only, overlays composite-only)
+    // Cursor ring: real-size dab annulus (motor -> screen via the Slice 1
+    // view matrix), dashed amber for the eraser. HUD: live size/pressure
+    // pastille (Compose overlay, 10 Hz throttle, 800 ms TTL). No JNI.
+    @Volatile var brushRadiusEngine = 8f
+        private set
+    @Volatile var brushOpaqueEngine = 1f
+        private set
+    @Volatile var brushIsEraser = false
+        private set
+
+    @Volatile private var hoverX = 0f
+    @Volatile private var hoverY = 0f
+    @Volatile private var hoverActive = false
+    @Volatile private var hoverPressure = 0.6f
+    @Volatile private var lastHoverArmMs = 0L
+
+    @Volatile var hudVisible = false
+    @Volatile var hudDiamPx = 0
+    @Volatile var hudPressurePct = 0
+    @Volatile var onHudChanged: (() -> Unit)? = null
+    /** Compose-observable HUD (UI-thread writes only, via post). */
+    data class HudData(val diamPx: Int, val pct: Int)
+    var hudUi by mutableStateOf<HudData?>(null)
+        private set
+    @Volatile private var hudUntilMs = 0L
+    @Volatile private var lastHudPostMs = 0L
+
+    /** Test-only hook: ACTION_DOWN -> first stamp latency on the render thread. */
+    @Volatile var lastStrokeLatencyMs: Long = -1
+
+    data class CursorRing(
+        val x: Float,
+        val y: Float,
+        val radiusScreen: Float,
+        val eraser: Boolean,
+        val dimmed: Boolean,
+        val barred: Boolean
+    )
+
+    private fun parseBrushJson(json: String) {
+        try {
+            val r = Regex("\"radius\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)")
+                .find(json)?.groupValues?.get(1)?.toFloatOrNull()
+            if (r != null) brushRadiusEngine = r.coerceIn(1f, 128f)
+            val o = Regex("\"opaque\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)")
+                .find(json)?.groupValues?.get(1)?.toFloatOrNull()
+            if (o != null) brushOpaqueEngine = o.coerceIn(0f, 1f)
+            val mode = Regex("\"mode\"\\s*:\\s*\"([^\"]*)\"")
+                .find(json)?.groupValues?.get(1)
+            if (mode == "eraser") brushIsEraser = true
+            else if (mode == "brush") brushIsEraser = false
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Active layer index, or -1 when it is a tracked vector layer. */
+    private fun activeVectorLayer(): Int {
+        return try {
+            val st = org.json.JSONObject(layerState())
+            val a = st.optInt("active", 0)
+            if (vectorLayers.contains(a)) a else -1
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    private fun activeLayerVisible(): Boolean {
+        return try {
+            val st = org.json.JSONObject(layerState())
+            val a = st.optInt("active", 0)
+            val arr = st.optJSONArray("layers") ?: return true
+            val e = arr.optJSONObject(a) ?: return true
+            val s = e.optJSONObject("self") ?: e
+            s.optBoolean("visible", true)
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    /**
+     * Test-only cursor probe: the ring the render loop would draw (null
+     * when masked). Radius proves the motor -> screen matrix (Slice 1).
+     */
+    fun cursorRingForTest(): CursorRing? {
+        if (!hoverActive) return null
+        if (navigating || suspendRender || navigateMode || pipetteArmed) return null
+        val vw = width
+        val vh = height
+        if (vw <= 0 || vh <= 0) return null
+        val s = fitScale(vw, vh) * viewScaleMul
+        if (s <= 1e-6f) return null
+        val pr = if (strokeOpenUi) hoverPressure else 0.6f
+        val dab = brushRadiusEngine * (0.25f + 0.75f * pr)
+        val (ex, ey) = screenToEngine(hoverX, hoverY)
+        val onPaper = ex >= 0f && ex < engineWidth && ey >= 0f && ey < engineHeight
+        return CursorRing(hoverX, hoverY, dab * s, brushIsEraser, !onPaper, !activeLayerVisible())
+    }
+
+    /** Test-only hover injector (the emulator has no stylus hover). */
+    fun hoverForTest(x: Float, y: Float) {
+        hoverX = x
+        hoverY = y
+        hoverPressure = 0.6f
+        hoverActive = true
+        needsComposite = true
+    }
+
+    fun clearHoverForTest() {
+        hoverActive = false
+        needsComposite = true
+    }
+
+    private fun armHoverFrame() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastHoverArmMs > 33) {
+            lastHoverArmMs = now
+            needsComposite = true
+        }
+    }
 
     /** True while a stroke is open (UI tail or engine-side). */
     fun isDrawingNow(): Boolean = strokeOpenUi || strokeId != 0L
@@ -409,6 +536,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     }
 
     fun setBrush(json: String) {
+        parseBrushJson(json)
         synchronized(engineLock) {
             if (handle != 0L) EngineHost.nSetBrush(handle, json)
         }
@@ -488,12 +616,22 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun addVectorLayer(name: String): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAddVectorLayer(handle, name)
-            .also { if (it >= 0) needsComposite = true } else -1
+            .also {
+                if (it >= 0) {
+                    vectorLayers.add(it)
+                    needsComposite = true
+                }
+            } else -1
     }
 
     fun setVectorMode(index: Int, on: Boolean): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetVectorMode(handle, index, on)
-            .also { if (it) needsComposite = true } else false
+            .also {
+                if (it) {
+                    if (on) vectorLayers.add(index) else vectorLayers.remove(index)
+                    needsComposite = true
+                }
+            } else false
     }
 
     fun appendVectorPath(index: Int, pathJson: String): Int = synchronized(engineLock) {
@@ -623,7 +761,24 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun moveLayer(from: Int, to: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nMoveLayer(handle, from, to)
-            .also { if (it) { needsComposite = true; moveCallCount++ } } else false
+            .also {
+                if (it) {
+                    needsComposite = true
+                    moveCallCount++
+                    // Keep the vector-layer index set in step with the move.
+                    val shifted = vectorLayers.toList()
+                    vectorLayers.clear()
+                    for (i in shifted) {
+                        val j = when {
+                            i == from -> to
+                            from < to && i in (from + 1)..to -> i - 1
+                            from > to && i in to..(from - 1) -> i + 1
+                            else -> i
+                        }
+                        vectorLayers.add(j)
+                    }
+                }
+            } else false
     }
 
     fun appendChild(parent: Int, name: String): Int = synchronized(engineLock) {
@@ -751,6 +906,14 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     // edge-swipe = reopen a folded panel. Priority is evaluated before
     // any stroke; nothing here touches engine pixels.
     private var stylusId = -1
+    // Slice 5: app-side index of vector layers (for explicit eraser
+    // routing to nVectorEraser). Guarded by engineLock like all engine
+    // calls; indexes shift on moveLayer (adjusted below).
+    private val vectorLayers = mutableSetOf<Int>()
+    // Slice 5: in-flight vector-erase accumulation (render thread only).
+    private var vecEraseActive = false
+    private var vecEraseIndex = -1
+    private val vecErasePts = mutableListOf<Pair<Float, Float>>()
     private var strokePointerId = -1
     private var strokeOpenUi = false
     private var downTimeMs = 0L
@@ -1177,6 +1340,9 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                     }
                     strokePointerId = -1
                     strokeOpenUi = false
+                    // Slice 5: finger lifted = ring hidden (no capacitive hover).
+                    hoverActive = false
+                    needsComposite = true
                 }
             }
         }
@@ -1213,6 +1379,25 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         }
     }
 
+    // Slice 5: stylus/mouse hover drives the real-size cursor ring
+    // (overlay-only). Throttled to 30 Hz (armHoverFrame).
+    override fun onHoverEvent(event: MotionEvent): Boolean {
+        if (handle == 0L || !running.get()) return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_MOVE -> {
+                hoverX = event.getX()
+                hoverY = event.getY()
+                hoverActive = true
+                armHoverFrame()
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> {
+                hoverActive = false
+                needsComposite = true
+            }
+        }
+        return true
+    }
+
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         if (handle != 0L && running.get() &&
             (event.source and InputDevice.SOURCE_CLASS_POINTER) != 0 &&
@@ -1229,6 +1414,16 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     }
 
     private fun enqueueMove(event: MotionEvent, idx: Int, pressure: Float, action: Int) {
+        // Slice 5: every drawing point also feeds the cursor ring (finger
+        // or stylus tip position + live pressure).
+        if (!navigating && !pipetteArmed) {
+            hoverX = event.getX(idx)
+            hoverY = event.getY(idx)
+            hoverPressure = pressure
+            hoverActive = true
+            armHoverFrame()
+        }
+        val now = SystemClock.uptimeMillis()
         if (action == MotionEvent.ACTION_MOVE) {
             for (i in 0 until event.historySize) {
                 val (hx, hy) = viewToEngine(
@@ -1238,20 +1433,27 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                 )
                 val hp = (event.getHistoricalPressure(idx, i) * 2f).coerceIn(0.05f, 1f)
                 synchronized(queue) {
-                    queue.add(QueuedPoint(hx, hy, hp, MotionEvent.ACTION_MOVE))
+                    queue.add(QueuedPoint(hx, hy, hp, MotionEvent.ACTION_MOVE, now))
                 }
             }
         }
         val (cx, cy) = viewToEngine(event.getX(idx), event.getY(idx), width, height)
         synchronized(queue) {
-            queue.add(QueuedPoint(cx, cy, pressure, action))
+            queue.add(QueuedPoint(cx, cy, pressure, action, now))
         }
     }
 
     private fun enqueueAt(vx: Float, vy: Float, pressure: Float, action: Int) {
+        if (!navigating && !pipetteArmed) {
+            hoverX = vx
+            hoverY = vy
+            hoverPressure = pressure
+            hoverActive = true
+            armHoverFrame()
+        }
         val (ex, ey) = viewToEngine(vx, vy, width, height)
         synchronized(queue) {
-            queue.add(QueuedPoint(ex, ey, pressure, action))
+            queue.add(QueuedPoint(ex, ey, pressure, action, SystemClock.uptimeMillis()))
         }
     }
 
@@ -1306,7 +1508,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                 drained = queue.toList()
                 queue.clear()
             }
-            if (drained.isNotEmpty() || (strokeId != 0L && (navigating || rollbackOpen))) {
+            if (drained.isNotEmpty() || (strokeId != 0L && (navigating || rollbackOpen)) || (vecEraseActive && (navigating || rollbackOpen))) {
                 synchronized(engineLock) {
                     if (strokeId != 0L && (navigating || rollbackOpen)) {
                         // A navigation gesture (or the stylus taking over)
@@ -1320,33 +1522,75 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                         notifyStrokeChanged()
                         needsComposite = true
                     }
+                    if (vecEraseActive && (navigating || rollbackOpen)) {
+                        // Same rollback for an in-flight vector erase.
+                        vecEraseActive = false
+                        vecEraseIndex = -1
+                        vecErasePts.clear()
+                        needsComposite = true
+                    }
                     rollbackOpen = false
                     if (!navigating) {
                     for (pt in drained) {
                         when (pt.action) {
                             MotionEvent.ACTION_DOWN -> {
-                                if (strokeId != 0L) {
+                                // Slice 5: eraser on a vector layer routes
+                                // to the real vector eraser (path removal),
+                                // never to raster stamps.
+                                val vIdx = if (brushIsEraser) activeVectorLayer() else -1
+                                if (vIdx >= 0) {
+                                    vecEraseActive = true
+                                    vecEraseIndex = vIdx
+                                    vecErasePts.clear()
+                                    vecErasePts.add(Pair(pt.x, pt.y))
+                                    lastStrokeLatencyMs =
+                                        SystemClock.uptimeMillis() - pt.t
+                                    showHud(pt.pressure)
+                                } else if (strokeId != 0L) {
                                     EngineHost.nStrokeEnd(handle, strokeId)
-                                }
-                                strokeId = EngineHost.nStrokeBegin(
-                                    handle, pt.x, pt.y, pt.pressure
-                                )
-                                needsComposite = true
-                            }
-                            MotionEvent.ACTION_MOVE -> {
-                                if (strokeId == 0L) {
                                     strokeId = EngineHost.nStrokeBegin(
                                         handle, pt.x, pt.y, pt.pressure
                                     )
+                                    lastStrokeLatencyMs =
+                                        SystemClock.uptimeMillis() - pt.t
+                                    showHud(pt.pressure)
+                                    needsComposite = true
+                                } else {
+                                    strokeId = EngineHost.nStrokeBegin(
+                                        handle, pt.x, pt.y, pt.pressure
+                                    )
+                                    lastStrokeLatencyMs =
+                                        SystemClock.uptimeMillis() - pt.t
+                                    showHud(pt.pressure)
+                                    needsComposite = true
+                                }
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                if (vecEraseActive) {
+                                    vecErasePts.add(Pair(pt.x, pt.y))
+                                    showHud(pt.pressure)
+                                } else if (strokeId == 0L) {
+                                    strokeId = EngineHost.nStrokeBegin(
+                                        handle, pt.x, pt.y, pt.pressure
+                                    )
+                                    showHud(pt.pressure)
                                 } else {
                                     EngineHost.nStrokeMove(
                                         handle, strokeId, pt.x, pt.y, pt.pressure
                                     )
+                                    showHud(pt.pressure)
                                 }
                                 needsComposite = true
                             }
                             MotionEvent.ACTION_UP -> {
-                                if (strokeId != 0L) {
+                                if (vecEraseActive) {
+                                    vecErasePts.add(Pair(pt.x, pt.y))
+                                    fireVectorErase()
+                                    vecEraseActive = false
+                                    vecEraseIndex = -1
+                                    vecErasePts.clear()
+                                    notifyStrokeChanged()
+                                } else if (strokeId != 0L) {
                                     EngineHost.nStrokeMove(
                                         handle, strokeId, pt.x, pt.y, pt.pressure
                                     )
@@ -1354,6 +1598,8 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                                     strokeId = 0L
                                     notifyStrokeChanged()
                                 }
+                                hudUntilMs = SystemClock.uptimeMillis() + HUD_TTL_MS
+                                postHud(force = true)
                                 needsComposite = true
                             }
                         }
@@ -1442,6 +1688,18 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                     // One final clean frame so the loupe vanishes.
                     loupeDrawn = false
                     needsComposite = true
+                } else if (hudVisible && strokeId == 0L &&
+                    SystemClock.uptimeMillis() > hudUntilMs
+                ) {
+                    // Slice 5: HUD TTL expired — hide the pastille and
+                    // repaint once without it.
+                    hudVisible = false
+                    needsComposite = true
+                    val cb = onHudChanged
+                    post {
+                        hudUi = null
+                        cb?.invoke()
+                    }
                 } else {
                     Thread.sleep(4)
                     continue
@@ -1489,11 +1747,150 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                         c.drawText(label, lx + 44f, ly + 43f, loupeTextPaint)
                         loupeDrawn = true
                     }
+                    drawCursorRing(c, dst, ang)
                 } finally {
                     holder.unlockCanvasAndPost(c)
                 }
             }
         }
         frame.recycle()
+    }
+
+    // ---- Slice 5 cursor ring (overlay-only, never engine pixels) ----
+    private val ringPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        color = 0xE6FFFFFF.toInt()
+        isAntiAlias = true
+    }
+    private val ringShadowPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        color = 0x80000000.toInt()
+        isAntiAlias = true
+    }
+    private val ringEraserPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        color = 0xFFE0A050.toInt()
+        isAntiAlias = true
+        pathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
+    }
+    private val ringEraserShadowPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        color = 0x80000000.toInt()
+        isAntiAlias = true
+        pathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
+    }
+    private val ringBarPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        color = 0xE6FFFFFF.toInt()
+        isAntiAlias = true
+    }
+    private var lastRingDesc: String? = null
+
+    private fun drawCursorRing(c: android.graphics.Canvas, dst: RectF, ang: Float) {
+        if (!hoverActive || navigating || suspendRender || navigateMode || pipetteArmed) {
+            postRingDesc(null)
+            return
+        }
+        val vw = width
+        val vh = height
+        if (vw <= 0 || vh <= 0) {
+            postRingDesc(null)
+            return
+        }
+        val s = fitScale(vw, vh) * viewScaleMul
+        if (s <= 1e-6f) {
+            postRingDesc(null)
+            return
+        }
+        // Nominal pressure at rest: the ring shows the dab at average
+        // pressure, not the max (honest size).
+        val pr = if (strokeOpenUi) hoverPressure else 0.6f
+        val dab = brushRadiusEngine * (0.25f + 0.75f * pr)
+        val r = dab * s
+        if (r < 1f) {
+            postRingDesc(null)
+            return
+        }
+        val (ex, ey) = screenToEngine(hoverX, hoverY)
+        val onPaper = ex >= 0f && ex < engineWidth && ey >= 0f && ey < engineHeight
+        val barred = !activeLayerVisible()
+        val sx = dst.centerX() + (ex - engineWidth * 0.5f) * s
+        val sy = dst.centerY() + (ey - engineHeight * 0.5f) * s
+        val dimmed = !onPaper
+        val ring = if (brushIsEraser) ringEraserPaint else ringPaint
+        val shadow = if (brushIsEraser) ringEraserShadowPaint else ringShadowPaint
+        if (dimmed) {
+            ring.alpha = 77
+            shadow.alpha = 38
+        } else {
+            ring.alpha = 255
+            shadow.alpha = 255
+        }
+        c.save()
+        if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+        c.drawCircle(sx, sy, r + 1f, shadow)
+        c.drawCircle(sx, sy, r, ring)
+        if (barred) {
+            c.drawLine(sx - r, sy - r, sx + r, sy + r, ringBarPaint)
+        }
+        c.restore()
+        val diam = dab.toInt()
+        postRingDesc(
+            when {
+                barred -> context.getString(R.string.cursor_blocked)
+                !onPaper -> context.getString(R.string.cursor_offpaper)
+                brushIsEraser -> context.getString(R.string.cursor_eraser, diam)
+                else -> context.getString(R.string.cursor_brush, diam)
+            }
+        )
+    }
+
+    private fun postRingDesc(desc: String?) {
+        if (desc == lastRingDesc) return
+        lastRingDesc = desc
+        post { contentDescription = desc }
+    }
+
+    // ---- Slice 5 HUD + vector-erase helpers (render thread) ----
+    private fun showHud(pressure: Float) {
+        hudDiamPx = (brushRadiusEngine * (0.25f + 0.75f * pressure)).toInt()
+        hudPressurePct = (pressure * 100f).toInt()
+        if (!hudVisible) {
+            hudVisible = true
+            hudUntilMs = SystemClock.uptimeMillis() + HUD_TTL_MS
+        }
+        postHud(force = false)
+    }
+
+    private fun postHud(force: Boolean) {
+        val now = SystemClock.uptimeMillis()
+        if (!force && now - lastHudPostMs < 100) return
+        lastHudPostMs = now
+        val cb = onHudChanged
+        val d = hudDiamPx
+        val p = hudPressurePct
+        post {
+            hudUi = HudData(d, p)
+            cb?.invoke()
+        }
+    }
+
+    private fun fireVectorErase() {
+        if (vecEraseIndex < 0 || vecErasePts.size < 2) return
+        val sb = StringBuilder("{\"pts\":[")
+        for ((i, p) in vecErasePts.withIndex()) {
+            if (i > 0) sb.append(',')
+            sb.append(String.format(java.util.Locale.US, "{\"x\":%.1f,\"y\":%.1f}", p.first, p.second))
+        }
+        sb.append("]}")
+        try {
+            EngineHost.nVectorEraser(handle, vecEraseIndex, true, sb.toString())
+        } catch (_: Exception) {
+        }
     }
 }

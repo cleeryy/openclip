@@ -47,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -65,6 +66,7 @@ import dev.openclip.ui.BrushPrefs
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.parseHexColor
 import dev.openclip.ui.ExportDialog
+import dev.openclip.ui.BrushHelpDialog
 import dev.openclip.ui.GesturesHelpDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.MaterialsRow
@@ -162,6 +164,10 @@ class MainActivity : ComponentActivity() {
         val loupeTick = remember { mutableStateOf(0) }
         val loupeOn = remember { mutableStateOf(false) }
         val showHelp = remember { mutableStateOf(false) }
+        // Slice 5: brush-feeling HUD tick (render thread posts), eraser
+        // banner help sheet.
+        val hudTick = remember { mutableStateOf(0) }
+        val showBrushHelp = remember { mutableStateOf(false) }
 
         fun toggleNav() {
             navMode.value = !navMode.value
@@ -653,6 +659,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                                 cv.onViewChanged = { loupeTick.value++ }
+                                cv.onHudChanged = { hudTick.value++ }
                                 cv.onStrokeChanged = {
                                     refreshKey.value++
                                     docRegistry.markActiveDirty(true)
@@ -764,6 +771,37 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                    // Slice 5 HUD pastille: live dab size + pressure while
+                    // stroking (and 800 ms after UP). Composite-only
+                    // overlay, never engine pixels. The surface posts a
+                    // Compose state (10 Hz throttle), so this recomposes
+                    // on its own.
+                    val hud = surf?.hudUi
+                    if (hud != null) {
+                        val hudLabel = if (compact) stringResource(
+                            R.string.cursor_brush, hud.diamPx
+                        ) else stringResource(
+                            R.string.brush_hud, hud.diamPx, hud.pct
+                        )
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(8.dp)
+                                .background(Color(0xCC101014))
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                                .testTag("brush-hud"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                hudLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFECECF1),
+                                maxLines = 1,
+                                modifier = Modifier.testTag("brush-hud-text")
+                            )
+                        }
+                    }
                     // Slice 2 pipette loupe (composite-only Compose overlay,
                     // never engine pixels): enlarged witness + live hex while
                     // armed. Anchored top-center (never under the finger);
@@ -807,7 +845,50 @@ class MainActivity : ComponentActivity() {
                     // Slice 3 pinned brush bar (composite-only overlay, never
                     // engine pixels): size/opacity/stabilize mirror, hidden
                     // while the timeline sheet is open.
+                    // Slice 5 honest-eraser banner: the raster eraser paints
+                    // light (engine limitation, no alpha-erase yet) — never
+                    // silent white. Shown when the eraser is armed on a
+                    // multi-layer stack; a single opaque layer hides it.
                     canvas.value?.let { surface ->
+                        if (brushPrefs.isEraser && surface.layerCount() > 1) {
+                            Row(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(
+                                        start = 8.dp, end = 8.dp, bottom = 64.dp
+                                    )
+                                    .background(Color(0xEB3A2A18))
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                                    .testTag("eraser-banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    stringResource(R.string.eraser_covers_hint),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFE0A050),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = { showBrushHelp.value = true },
+                                    contentPadding = PaddingValues(
+                                        horizontal = 8.dp, vertical = 0.dp
+                                    ),
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("eraser-learn-more")
+                                ) {
+                                    Text(
+                                        stringResource(R.string.eraser_learn_more),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF90B8FF),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
                         PinnedBrushBar(
                             surface = surface,
                             prefs = brushPrefs,
@@ -833,6 +914,7 @@ class MainActivity : ComponentActivity() {
                         expandGlyph = "⟨",
                         collapseGlyph = "⟩",
                         showTitleWhenCollapsed = false,
+                        toggleTag = "dock-toggle",
                         headerExtra = {
                             FilterChip(
                                 selected = dockTab.value == 0,
@@ -1055,6 +1137,9 @@ class MainActivity : ComponentActivity() {
                 }
                 if (showHelp.value) {
                     GesturesHelpDialog(onDismiss = { showHelp.value = false })
+                }
+                if (showBrushHelp.value) {
+                    BrushHelpDialog(onDismiss = { showBrushHelp.value = false })
                 }
                 if (showExport.value) {
                     ExportDialog(

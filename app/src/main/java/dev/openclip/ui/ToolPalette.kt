@@ -1,6 +1,8 @@
-// OpenClip — compact studio top toolbar: brush/eraser mode, inline size &
-// opacity sliders, collapsible stabilization/pressure/symmetry bar, and
-// undo/redo/filter/file actions.
+// OpenClip — compact studio top toolbar: brush/eraser tool, inline size &
+// opacity sliders, collapsible stabilization/pressure-curve/symmetry bar,
+// and undo/redo/filter/file actions. Slice 5: the eraser is a dedicated
+// tool with its own size/opacity memory (BrushPrefs), and the pressure
+// curve is an editable graph fitted onto the engine scalar.
 package dev.openclip.ui
 
 import androidx.compose.foundation.background
@@ -17,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -30,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
@@ -69,8 +73,9 @@ fun ToolPalette(
     onNavigateToggle: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var isBrush by remember { mutableStateOf(true) }
-    var curve by remember { mutableStateOf(0f) }
+    // Slice 5: the tool lives in the hoisted BrushPrefs (persisted);
+    // isBrush here is a read-through, never a second source of truth.
+    val isBrush = !prefs.isEraser
     var inkColor by remember { mutableStateOf(initialColor) }
     var canUndo by remember { mutableStateOf(false) }
     var canRedo by remember { mutableStateOf(false) }
@@ -80,7 +85,7 @@ fun ToolPalette(
     var symY by remember { mutableStateOf(false) }
 
     fun pushBrush() {
-        prefs.bindTool(inkColor, !isBrush, curve)
+        prefs.bindTool(inkColor, !isBrush, prefs.curve)
         surface.setBrush(prefs.currentJson())
     }
 
@@ -110,6 +115,8 @@ fun ToolPalette(
     }
 
     val compactPad = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+    val shownRadius = prefs.activeRadius()
+    val shownOpaque = prefs.activeOpaque()
 
     Column(
         modifier = modifier
@@ -126,13 +133,23 @@ fun ToolPalette(
         ) {
             FilterChip(
                 selected = isBrush,
-                onClick = { isBrush = true; pushBrush() },
-                label = { Text(stringResource(R.string.brush)) }
+                onClick = { prefs.setTool(false); pushBrush() },
+                label = { Text(stringResource(R.string.brush)) },
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-brush")
             )
             FilterChip(
                 selected = !isBrush,
-                onClick = { isBrush = false; pushBrush() },
-                label = { Text(stringResource(R.string.eraser)) }
+                onClick = { prefs.setTool(true); pushBrush() },
+                label = { Text(stringResource(R.string.eraser)) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFF4A3520),
+                    selectedLabelColor = Color(0xFFE0A050)
+                ),
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-eraser")
             )
             FilterChip(
                 selected = navigateMode,
@@ -147,20 +164,24 @@ fun ToolPalette(
                 }
             )
 
-            // Compact inline Brush Size slider (hoisted BrushPrefs mirror).
+            // Compact inline size slider (active tool memory).
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 4.dp)
             ) {
                 Text(
-                    "${prefs.radius.toInt()}px",
+                    "${shownRadius.toInt()}px",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFFD0D0DC),
                     modifier = Modifier.width(38.dp)
                 )
                 Slider(
-                    value = prefs.radius,
-                    onValueChange = { prefs.updateRadius(it); pushBrush() },
+                    value = shownRadius,
+                    onValueChange = {
+                        if (isBrush) prefs.updateRadius(it)
+                        else prefs.updateEraserRadius(it)
+                        pushBrush()
+                    },
                     valueRange = 1f..128f,
                     modifier = Modifier
                         .width(110.dp)
@@ -168,19 +189,23 @@ fun ToolPalette(
                 )
             }
 
-            // Compact inline Opacity slider (hoisted BrushPrefs mirror).
+            // Compact inline opacity slider (active tool memory).
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 4.dp)
             ) {
                 Text(
-                    stringResource(R.string.opacity, (prefs.opaque * 100).toInt()),
+                    stringResource(R.string.opacity, (shownOpaque * 100).toInt()),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFFD0D0DC)
                 )
                 Slider(
-                    value = prefs.opaque,
-                    onValueChange = { prefs.updateOpaque(it); pushBrush() },
+                    value = shownOpaque,
+                    onValueChange = {
+                        if (isBrush) prefs.updateOpaque(it)
+                        else prefs.updateEraserOpaque(it)
+                        pushBrush()
+                    },
                     modifier = Modifier
                         .width(96.dp)
                         .height(28.dp)
@@ -190,7 +215,8 @@ fun ToolPalette(
             FilterChip(
                 selected = showAdvanced,
                 onClick = { showAdvanced = !showAdvanced },
-                label = { Text("⚙") }
+                label = { Text("⚙") },
+                modifier = Modifier.testTag("advanced-toggle")
             )
 
             OutlinedButton(
@@ -268,19 +294,6 @@ fun ToolPalette(
                         .width(110.dp)
                         .height(26.dp)
                 )
-                Text(
-                    stringResource(R.string.curve, (curve * 100).toInt()),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFB8B8C8)
-                )
-                Slider(
-                    value = curve,
-                    onValueChange = { curve = it; pushBrush() },
-                    valueRange = 0f..1f,
-                    modifier = Modifier
-                        .width(110.dp)
-                        .height(26.dp)
-                )
                 FilterChip(
                     selected = symX,
                     onClick = { symX = !symX; pushSymmetry() },
@@ -292,6 +305,13 @@ fun ToolPalette(
                     label = { Text("Sym Y", style = MaterialTheme.typography.labelSmall) }
                 )
             }
+            PressureCurveEditor(
+                prefs = prefs,
+                onCommit = { pushBrush() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+            )
         }
 
         if (showFilters) {

@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -38,6 +39,7 @@ fun CollapsibleDrawer(
     expandGlyph: String = "⟨",
     collapseGlyph: String = "⟩",
     showTitleWhenCollapsed: Boolean = true,
+    toggleTag: String? = null,
     headerExtra: @Composable RowScope.() -> Unit = {},
     content: @Composable ColumnScope.() -> Unit
 ) {
@@ -60,10 +62,17 @@ fun CollapsibleDrawer(
                 )
                 headerExtra()
                 Box(Modifier.weight(1f))
+                val toggleMod = if (toggleTag != null) {
+                    Modifier
+                        .height(28.dp)
+                        .testTag(toggleTag)
+                } else {
+                    Modifier.height(28.dp)
+                }
                 TextButton(
                     onClick = onToggle,
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                    modifier = Modifier.height(28.dp)
+                    modifier = toggleMod
                 ) {
                     Text(collapseGlyph, color = Color(0xFFB8B8C8))
                 }
