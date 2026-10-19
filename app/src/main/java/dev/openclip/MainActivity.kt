@@ -53,13 +53,18 @@ import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
 import dev.openclip.media.WebdavClient
+import dev.openclip.doc.DocRegistry
+import dev.openclip.ui.CollapsibleDrawer
 import dev.openclip.ui.ColorPicker
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.MaterialsRow
+import dev.openclip.ui.MenuBar
 import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ReferencePanel
+import dev.openclip.ui.StudioMenu
+import dev.openclip.ui.StudioMenuItem
 import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 import dev.openclip.ui.WebdavDialog
@@ -122,6 +127,16 @@ class MainActivity : ComponentActivity() {
         val dockTab = remember { mutableStateOf(0) }
         val showTimeline = remember { mutableStateOf(false) }
 
+        // Slice 0 single-doc registry: one entry ("doc-1") bound to the
+        // live EngineSurface; ready for N docs, explicit dispose.
+        val docRegistry = remember { DocRegistry() }
+        DisposableEffect(Unit) {
+            onDispose {
+                canvas.value?.dispose()
+                docRegistry.dispose()
+            }
+        }
+
         val openDoc = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocument()
         ) { uri: Uri? ->
@@ -130,6 +145,10 @@ class MainActivity : ComponentActivity() {
                 val dst = java.io.File(ctx.cacheDir, name)
                 copyTo(ctx, uri, dst)
                 canvas.value?.loadFrom(dst.absolutePath) { ok ->
+                    if (ok) {
+                        docRegistry.open("doc-1", name)
+                        docRegistry.markActiveDirty(false)
+                    }
                     status.value = if (ok)
                         ctx.getString(R.string.import_ok) + " " + name
                     else ctx.getString(R.string.import_failed)
@@ -149,6 +168,7 @@ class MainActivity : ComponentActivity() {
                 )
                 canvas.value?.saveTo(dst.absolutePath, fmt) { ok ->
                     if (ok) {
+                        docRegistry.markActiveDirty(false)
                         copyFromTo(ctx, dst, uri)
                         dst.delete()
                         status.value = ctx.getString(R.string.export_ok)
@@ -333,11 +353,184 @@ class MainActivity : ComponentActivity() {
                 .background(Color(0xFF141418))
                 .systemBarsPadding()
         ) {
-            // 1. Top Studio Toolbar
+            // 1. Top Studio Menu Bar + Toolbar (slice 0 shell: every
+            // entry reuses an existing SAF/export/engine action).
             canvas.value?.let { surface ->
                 DisposableEffect(surface) {
                     onDispose { clipAudio.clear() }
                 }
+                val filterMenuItems = listOf(
+                    "gaussianBlur" to stringResource(R.string.filter_gaussian_blur),
+                    "sharpen" to stringResource(R.string.filter_sharpen),
+                    "motionBlur" to stringResource(R.string.filter_motion_blur),
+                    "radialBlur" to stringResource(R.string.filter_radial_blur),
+                    "posterize" to stringResource(R.string.filter_posterize),
+                    "levels" to stringResource(R.string.filter_levels),
+                    "chromaticAberration" to stringResource(R.string.filter_chromatic_aberration),
+                    "addNoise" to stringResource(R.string.filter_add_noise),
+                    "mosaic" to stringResource(R.string.filter_mosaic),
+                    "gradientMap" to stringResource(R.string.filter_gradient_map)
+                ).map { (name, label) ->
+                    StudioMenuItem(
+                        label = label,
+                        onClick = {
+                            surface.applyFilter(name, "{}") { ok ->
+                                status.value = if (ok)
+                                    ctx.getString(R.string.filter_applied)
+                                else ctx.getString(R.string.filter_failed)
+                                if (ok) {
+                                    docRegistry.markActiveDirty(true)
+                                    refreshKey.value++
+                                }
+                            }
+                        }
+                    )
+                }
+                MenuBar(
+                    menus = listOf(
+                        StudioMenu(
+                            title = stringResource(R.string.file_menu),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.import_doc),
+                                    onClick = { openDoc.launch(arrayOf("*/*")) }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.export_title),
+                                    onClick = { showExport.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.export_webm),
+                                    onClick = {
+                                        createWebm.launch(
+                                            "openclip-${System.currentTimeMillis()}.webm"
+                                        )
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.webdav),
+                                    onClick = { showWebdav.value = true }
+                                )
+                            )
+                        ),
+                        StudioMenu(
+                            title = stringResource(R.string.menu_edit),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.undo),
+                                    onClick = {
+                                        if (surface.undo()) {
+                                            docRegistry.markActiveDirty(true)
+                                            refreshKey.value++
+                                        }
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.redo),
+                                    onClick = {
+                                        if (surface.redo()) {
+                                            docRegistry.markActiveDirty(true)
+                                            refreshKey.value++
+                                        }
+                                    }
+                                )
+                            )
+                        ),
+                        StudioMenu(
+                            title = stringResource(R.string.menu_layer),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.add_layer),
+                                    onClick = {
+                                        surface.addLayer()
+                                        docRegistry.markActiveDirty(true)
+                                        refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.layer_add_group),
+                                    onClick = {
+                                        surface.addGroup(
+                                            ctx.getString(R.string.layer_group_default)
+                                        )
+                                        docRegistry.markActiveDirty(true)
+                                        refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.layer_add_vector),
+                                    onClick = {
+                                        surface.addVectorLayer(
+                                            ctx.getString(R.string.vector_layer_default)
+                                        )
+                                        docRegistry.markActiveDirty(true)
+                                        refreshKey.value++
+                                    }
+                                )
+                            )
+                        ),
+                        StudioMenu(
+                            title = stringResource(R.string.menu_selection),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.select_all),
+                                    enabled = false
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.deselect),
+                                    enabled = false
+                                )
+                            )
+                        ),
+                        StudioMenu(
+                            title = stringResource(R.string.menu_filter),
+                            items = filterMenuItems
+                        ),
+                        StudioMenu(
+                            title = stringResource(R.string.menu_display),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.reference_show),
+                                    enabled = refModelName.value != null,
+                                    onClick = { surface.setRefVisible(true) }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.reference_clear),
+                                    enabled = refModelName.value != null,
+                                    onClick = { surface.setRefVisible(false) }
+                                )
+                            )
+                        ),
+                        StudioMenu(
+                            title = stringResource(R.string.menu_window),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.window_dock),
+                                    onClick = { dockOpen.value = !dockOpen.value }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.timeline),
+                                    onClick = { showTimeline.value = !showTimeline.value }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.window_studio),
+                                    onClick = {
+                                        dockTab.value = 0
+                                        dockOpen.value = true
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.window_tones),
+                                    onClick = {
+                                        dockTab.value = 1
+                                        dockOpen.value = true
+                                    }
+                                )
+                            )
+                        )
+                    )
+                )
+                HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
                 ToolPalette(
                     surface = surface,
                     initialColor = inkColor.value,
@@ -363,8 +556,17 @@ class MainActivity : ComponentActivity() {
                         factory = { c ->
                             EngineSurface(c).also { cv ->
                                 cv.start(dpi)
-                                cv.onStrokeChanged = { refreshKey.value++ }
+                                cv.onStrokeChanged = {
+                                    refreshKey.value++
+                                    docRegistry.markActiveDirty(true)
+                                }
                                 canvas.value = cv
+                                if (docRegistry.size == 0) {
+                                    docRegistry.open(
+                                        "doc-1",
+                                        c.getString(R.string.doc_untitled)
+                                    )
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxSize()
@@ -372,92 +574,94 @@ class MainActivity : ComponentActivity() {
                 }
 
                 canvas.value?.let { surface ->
-                    if (dockOpen.value) {
-                        VerticalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
+                    VerticalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
+                    CollapsibleDrawer(
+                        title = stringResource(R.string.window_dock),
+                        open = dockOpen.value,
+                        onToggle = { dockOpen.value = !dockOpen.value },
+                        modifier = Modifier
+                            .width(if (dockOpen.value) 290.dp else 56.dp)
+                            .fillMaxHeight(),
+                        expandGlyph = "⟨",
+                        collapseGlyph = "⟩",
+                        showTitleWhenCollapsed = false,
+                        headerExtra = {
+                            FilterChip(
+                                selected = dockTab.value == 0,
+                                onClick = { dockTab.value = 0 },
+                                label = {
+                                    Text(
+                                        stringResource(R.string.window_studio),
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            )
+                            FilterChip(
+                                selected = dockTab.value == 1,
+                                onClick = { dockTab.value = 1 },
+                                label = {
+                                    Text(
+                                        stringResource(R.string.window_tones),
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            )
+                        }
+                    ) {
                         Column(
                             modifier = Modifier
-                                .width(290.dp)
-                                .fillMaxHeight()
-                                .background(Color(0xFF1C1C22))
+                                .fillMaxWidth()
+                                .weight(1f)
+                                .verticalScroll(rememberScrollState())
+                                .padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            // Studio Dock Header Tabs
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFF22222A))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                FilterChip(
-                                    selected = dockTab.value == 0,
-                                    onClick = { dockTab.value = 0 },
-                                    label = { Text("Studio", style = MaterialTheme.typography.labelSmall) }
+                            if (dockTab.value == 0) {
+                                LayerPanel(
+                                    surface = surface,
+                                    refreshKey = refreshKey.value,
+                                    modifier = Modifier.fillMaxWidth()
                                 )
-                                FilterChip(
-                                    selected = dockTab.value == 1,
-                                    onClick = { dockTab.value = 1 },
-                                    label = { Text("3D & Tones", style = MaterialTheme.typography.labelSmall) }
+                                ColorPicker(
+                                    initialColor = inkColor.value,
+                                    onColorChanged = { hex ->
+                                        inkColor.value = hex
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
                                 )
-                                Box(Modifier.weight(1f))
-                                TextButton(
-                                    onClick = { dockOpen.value = false },
-                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                                    modifier = Modifier.height(28.dp)
-                                ) {
-                                    Text("⟩", color = Color(0xFFB8B8C8))
-                                }
-                            }
-                            HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
-
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                                    .verticalScroll(rememberScrollState())
-                                    .padding(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                if (dockTab.value == 0) {
-                                    LayerPanel(
-                                        surface = surface,
-                                        refreshKey = refreshKey.value,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    ColorPicker(
-                                        initialColor = inkColor.value,
-                                        onColorChanged = { hex ->
-                                            inkColor.value = hex
-                                        },
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    PresetGallery(
-                                        surface = surface,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                } else {
-                                    ReferencePanel(
-                                        surface = surface,
-                                        onImportGlb = { openGlb.launch(arrayOf("*/*")) },
-                                        modelName = refModelName.value,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    MaterialsRow(
-                                        surface = surface,
-                                        onWebdav = { showWebdav.value = true },
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
+                                PresetGallery(
+                                    surface = surface,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                ReferencePanel(
+                                    surface = surface,
+                                    onImportGlb = { openGlb.launch(arrayOf("*/*")) },
+                                    modelName = refModelName.value,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                MaterialsRow(
+                                    surface = surface,
+                                    onWebdav = { showWebdav.value = true },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
                     }
                 }
             }
 
-            // 3. Collapsible Bottom Timeline Drawer & Footer Bar
+            // 3. Collapsible Bottom Timeline Drawer + Slim Status Footer
             canvas.value?.let { surface ->
                 HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
-                if (showTimeline.value) {
+                CollapsibleDrawer(
+                    title = stringResource(R.string.timeline),
+                    open = showTimeline.value,
+                    onToggle = { showTimeline.value = !showTimeline.value },
+                    modifier = Modifier.fillMaxWidth(),
+                    expandGlyph = "▸",
+                    collapseGlyph = "▾"
+                ) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -491,10 +695,11 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
-                    HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
                 }
+                HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
 
-                // Slim Studio Status & Drawer Toggle Bar
+                // Slim Studio Status Bar (drawer toggles live in the
+                // drawer headers above — one tap each).
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -504,18 +709,6 @@ class MainActivity : ComponentActivity() {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    TextButton(
-                        onClick = { showTimeline.value = !showTimeline.value },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.height(28.dp)
-                    ) {
-                        Text(
-                            (if (showTimeline.value) "▾ " else "▸ ") +
-                                stringResource(R.string.timeline),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF90B8FF)
-                        )
-                    }
                     TextButton(
                         onClick = { showWebdav.value = true },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
@@ -528,10 +721,18 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     Text(
-                        "2048×1536",
+                        "${surface.canvasWidth()}×${surface.canvasHeight()}",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF787888)
                     )
+                    val doc = docRegistry.active()
+                    if (doc != null) {
+                        Text(
+                            doc.name + if (doc.dirty) " •" else "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF787888)
+                        )
+                    }
                     if (status.value.isNotEmpty()) {
                         Text(
                             status.value,
@@ -540,19 +741,6 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     Box(Modifier.weight(1f))
-                    if (!dockOpen.value) {
-                        TextButton(
-                            onClick = { dockOpen.value = true },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.height(28.dp)
-                        ) {
-                            Text(
-                                "⟨ " + stringResource(R.string.layers),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF90B8FF)
-                            )
-                        }
-                    }
                 }
 
                 if (showWebdav.value) {

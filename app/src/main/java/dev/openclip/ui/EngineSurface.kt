@@ -42,6 +42,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     private val engineHeight: Int = 1536
     private val engineLock = Any()
     @Volatile private var handle: Long = 0
+    @Volatile private var navigating = false
     private var strokeId = 0L
     private val queue = ArrayDeque<QueuedPoint>()
     private val filterQueue = ArrayDeque<FilterRequest>()
@@ -439,8 +440,26 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         }
     }
 
+    // Slice 0 shell contract: exactly one pointer draws; two or more
+    // pointers are a view-navigation gesture and must never start or
+    // corrupt a stroke. Navigation consumes the gesture (no stroke is
+    // queued); the render loop drops any in-flight points and rolls the
+    // partial stroke back via end + undo.
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (handle == 0L || !running.get()) return false
+        if (event.pointerCount >= 2) {
+            navigating = true
+            requestParentDisallowInterceptTouchEvent()
+            return true
+        }
+        if (navigating) {
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL
+            ) {
+                navigating = false
+            }
+            return true
+        }
         val rawP = event.getPressure(0)
         val pressure = (if (rawP <= 0f) 0.5f else rawP * 2f).coerceIn(0.05f, 1f)
         when (event.actionMasked) {
@@ -515,6 +534,17 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             }
             if (drained.isNotEmpty()) {
                 synchronized(engineLock) {
+                    if (navigating) {
+                        // A navigation gesture interrupted the stroke:
+                        // end it and roll it back so the pinch leaves no ink.
+                        if (strokeId != 0L) {
+                            EngineHost.nStrokeEnd(handle, strokeId)
+                            strokeId = 0L
+                            EngineHost.nUndo(handle)
+                            notifyStrokeChanged()
+                        }
+                        needsComposite = true
+                    } else {
                     for (pt in drained) {
                         when (pt.action) {
                             MotionEvent.ACTION_DOWN -> {
@@ -550,6 +580,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                                 needsComposite = true
                             }
                         }
+                    }
                     }
                 }
             }

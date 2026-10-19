@@ -100,4 +100,18 @@
     <string name="webdav_pass">Mot de passe</string>
     <string name="webdav_ok">WebDAV réussi.</string>
     <string name="webdav_failed">Échec WebDAV.</string>
+    <string name="menu_edit">Édition</string>
+    <string name="menu_layer">Calque</string>
+    <string name="menu_selection">Sélection</string>
+    <string name="menu_filter">Filtre</string>
+    <string name="menu_display">Affichage</string>
+    <string name="menu_window">Fenêtre</string>
+    <string name="select_all">Tout sélectionner</string>
+    <string name="deselect">Désélectionner</string>
+    <string name="layer_group_default">Groupe</string>
+    <string name="vector_layer_default">Vecteur</string>
+    <string name="window_dock">Panneau latéral</string>
+    <string name="window_studio">Studio</string>
+    <string name="window_tones">3D &amp; Tons</string>
+    <string name="doc_untitled">Sans titre</string>
 </resources>
