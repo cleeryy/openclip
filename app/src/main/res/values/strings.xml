@@ -139,4 +139,25 @@
     <string name="redo_touch">Redo (three-finger tap)</string>
     <string name="gestures_help">Canvas gestures…</string>
     <string name="gestures_help_body">One finger: draw (or pan in Navigate mode). The stylus always draws. Two fingers: pan, pinch: zoom, twist: rotate the view. Two-finger tap: undo. Three-finger tap: redo. Swipe from a screen edge: reopen a folded panel. Symmetry follows zoom and rotation.</string>
+    <string name="color_wheel">Wheel</string>
+    <string name="color_sliders">Sliders</string>
+    <string name="color_sets">Sets</string>
+    <string name="color_recent">Recent</string>
+    <string name="color_hue">Hue %1$d°</string>
+    <string name="color_sat">Sat %1$d%%</string>
+    <string name="color_val">Value %1$d%%</string>
+    <string name="color_hex">#%1$s</string>
+    <string name="color_hex_invalid">Invalid code — kept %1$s</string>
+    <string name="color_set_base">Base</string>
+    <string name="color_set_new">New set</string>
+    <string name="color_set_add">Add current</string>
+    <string name="color_set_rename">Rename…</string>
+    <string name="color_set_delete">Delete</string>
+    <string name="color_recent_empty">Draw to fill recents</string>
+    <string name="color_recent_clear">Clear</string>
+    <string name="pipette">Picker</string>
+    <string name="pipette_armed">Tap canvas to sample</string>
+    <string name="pipette_picked">Sampled %1$s</string>
+    <string name="pipette_missed">Outside canvas</string>
+    <string name="pipette_hold">Hold for loupe</string>
 </resources>

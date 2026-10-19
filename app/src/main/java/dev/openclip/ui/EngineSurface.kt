@@ -84,6 +84,18 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     @Volatile var edgeBottomEnabled = false
     @Volatile private var lastNavTime = 0L
 
+    // ---- Slice 2 pipette (app-side only, no JNI): when armed, the next
+    // canvas tap samples the displayed composite instead of drawing.
+    // Tap mode samples once then the host disarms; loupe mode streams
+    // MOVE samples and the host finalizes on UP. Multitouch/navigation
+    // still wins over an armed pipette (no sample, stays armed).
+    @Volatile var pipetteArmed = false
+    @Volatile var pipetteLoupe = false
+    var onPipetteDown: ((vx: Float, vy: Float) -> Unit)? = null
+    var onPipetteMove: ((vx: Float, vy: Float) -> Unit)? = null
+    var onPipetteUp: (() -> Unit)? = null
+    @Volatile private var currentFrameIdx = 0
+
     @Volatile var onGestureUndo: (() -> Unit)? = null
     @Volatile var onGestureRedo: (() -> Unit)? = null
     @Volatile var onEdgeSwipe: ((edge: Int) -> Unit)? = null
@@ -146,12 +158,18 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     /** Screen -> engine through the inverse view matrix (rotation-aware). */
     private fun viewToEngine(vx: Float, vy: Float, viewW: Int, viewH: Int): Pair<Float, Float> {
-        if (viewW <= 0 || viewH <= 0) {
-            return Pair(
-                vx.coerceIn(0f, engineWidth - 1f),
-                vy.coerceIn(0f, engineHeight - 1f)
-            )
-        }
+        val (ex, ey) = screenToEngine(vx, vy)
+        return Pair(
+            ex.coerceIn(0f, engineWidth - 1f),
+            ey.coerceIn(0f, engineHeight - 1f)
+        )
+    }
+
+    /** Unclamped inverse mapping (for pipette on-paper tests). */
+    fun screenToEngine(vx: Float, vy: Float): Pair<Float, Float> {
+        val viewW = width
+        val viewH = height
+        if (viewW <= 0 || viewH <= 0) return Pair(0f, 0f)
         val s = fitScale(viewW, viewH) * viewScaleMul
         if (s <= 1e-6f) return Pair(0f, 0f)
         val cx = viewW * 0.5f + viewOffX
@@ -164,9 +182,58 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         // Inverse of canvas rotate(a): rotate by -a.
         val rx = dx * cosA + dy * sinA
         val ry = -dx * sinA + dy * cosA
-        val ex = (rx / s + engineWidth * 0.5f).coerceIn(0f, engineWidth - 1f)
-        val ey = (ry / s + engineHeight * 0.5f).coerceIn(0f, engineHeight - 1f)
-        return Pair(ex, ey)
+        return Pair(rx / s + engineWidth * 0.5f, ry / s + engineHeight * 0.5f)
+    }
+
+    /** True when the view point lands on engine paper (pipette hit). */
+    fun isOnPaper(vx: Float, vy: Float): Boolean {
+        val (ex, ey) = screenToEngine(vx, vy)
+        return ex >= 0f && ex < engineWidth && ey >= 0f && ey < engineHeight
+    }
+
+    /**
+     * Sample the displayed composite at a view point (Slice 2 pipette).
+     * Calls back on the UI thread with an #RRGGBB hex, or (null, false)
+     * when the point misses the paper. Falls back to frame 0 when the
+     * tracked frame index yields nothing (e.g. after a document load).
+     */
+    fun sampleCompositeAt(vx: Float, vy: Float, cb: (hex: String?, onPaper: Boolean) -> Unit) {
+        if (!isOnPaper(vx, vy)) {
+            post { cb(null, false) }
+            return
+        }
+        val (ex, ey) = screenToEngine(vx, vy)
+        val px = ex.toInt().coerceIn(0, engineWidth - 1)
+        val py = ey.toInt().coerceIn(0, engineHeight - 1)
+        val idx = currentFrameIdx
+        pullFrameFull(idx) { bmp ->
+            val got = bmp
+            if (got != null) {
+                val argb = got.getPixel(
+                    px.coerceIn(0, got.width - 1),
+                    py.coerceIn(0, got.height - 1)
+                )
+                got.recycle()
+                val hex = String.format("#%06X", argb and 0xFFFFFF)
+                post { cb(hex, true) }
+            } else if (idx != 0) {
+                pullFrameFull(0) { fb ->
+                    if (fb == null) {
+                        post { cb(null, true) }
+                    } else {
+                        val argb = fb.getPixel(
+                            px.coerceIn(0, fb.width - 1),
+                            py.coerceIn(0, fb.height - 1)
+                        )
+                        fb.recycle()
+                        val hex = String.format("#%06X", argb and 0xFFFFFF)
+                        post { cb(hex, true) }
+                    }
+                }
+            } else {
+                post { cb(null, true) }
+            }
+        }
     }
 
     private fun markNavChanged() {
@@ -382,23 +449,35 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun addFrame(): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAddFrame(handle)
-            .also { if (it >= 0) needsComposite = true } else -1
+            .also { if (it >= 0) { currentFrameIdx = it; needsComposite = true } } else -1
     }
 
     fun duplicateFrame(): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nDuplicateFrame(handle)
-            .also { if (it >= 0) needsComposite = true } else -1
+            .also { if (it >= 0) { currentFrameIdx = it; needsComposite = true } } else -1
     }
 
     fun deleteFrame(index: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nDeleteFrame(handle, index)
-            .also { if (it) needsComposite = true } else false
+            .also {
+                if (it) {
+                    currentFrameIdx = currentFrameIdx.coerceIn(
+                        0, (frameCount() - 1).coerceAtLeast(0)
+                    )
+                    needsComposite = true
+                }
+            } else false
     }
 
     fun setFrame(index: Int): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetFrame(handle, index)
-            .also { if (it) needsComposite = true } else false
+            .also { if (it) { currentFrameIdx = index; needsComposite = true } } else false
     }
+
+    fun currentFrameIndex(): Int = currentFrameIdx
+
+    /** True once the render thread runs (strokes/samples accepted). */
+    fun isReady(): Boolean = running.get() && handle != 0L
 
     fun frameOp(op: EngineSurface.() -> Unit) = runOnEngine(op)
 
@@ -772,6 +851,13 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             val p = pressureOf(event.getPressure(stylusIdx))
             when (action) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                    // Slice 2 pipette: an armed pipette samples even from the
+                    // stylus (no parasite ink) and consumes the tap.
+                    if (pipetteArmed) {
+                        onPipetteDown?.invoke(event.getX(stylusIdx), event.getY(stylusIdx))
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     // Stylus-first: drop the interrupted finger tail and
                     // roll the open finger stroke back on the render
                     // thread; the stylus points below start a clean stroke.
@@ -790,10 +876,24 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                     enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_DOWN)
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    // Slice 2 pipette loupe: drag streams live samples; a
+                    // tap-armed pipette swallows moves (no stroke starts).
+                    if (pipetteArmed) {
+                        if (pipetteLoupe) {
+                            onPipetteMove?.invoke(event.getX(stylusIdx), event.getY(stylusIdx))
+                        }
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     if (stylusId == sid) enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_MOVE)
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP,
                 MotionEvent.ACTION_CANCEL -> {
+                    if (pipetteArmed) {
+                        onPipetteUp?.invoke()
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     if (stylusId == sid || action == MotionEvent.ACTION_CANCEL) {
                         enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_UP)
                         stylusId = -1
@@ -916,6 +1016,12 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                 edgeFired = false
                 val x = event.getX(0)
                 val y = event.getY(0)
+                // Slice 2 pipette: armed tap samples instead of drawing.
+                if (pipetteArmed) {
+                    onPipetteDown?.invoke(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 val edge = edgeAt(x, y, edgeBandPx)
                 if (edge >= 0) {
                     // Armed: no stroke starts from the band until the
@@ -941,6 +1047,13 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             MotionEvent.ACTION_MOVE -> {
                 val x = event.getX(0)
                 val y = event.getY(0)
+                // Slice 2 pipette loupe: drag streams live samples; a
+                // tap-armed pipette swallows moves (no stroke starts).
+                if (pipetteArmed) {
+                    if (pipetteLoupe) onPipetteMove?.invoke(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 if (edgeArmed >= 0) {
                     if (checkEdgeSwipe(x, y, edgeSwipePx)) {
                         fireEdge(edgeArmed)
@@ -961,6 +1074,16 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP,
             MotionEvent.ACTION_CANCEL -> {
+                // Slice 2 pipette: UP finalizes a loupe drag (or is a no-op
+                // after a tap sample already disarmed); never draws.
+                if (pipetteArmed) {
+                    onPipetteUp?.invoke()
+                    edgeArmed = -1
+                    pendingStroke = false
+                    edgeFired = false
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 if (edgeArmed >= 0) {
                     disarmEdge()
                     if (pendingStroke) {

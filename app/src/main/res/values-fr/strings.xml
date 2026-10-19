@@ -126,4 +126,25 @@
     <string name="redo_touch">Rétablir (tap 3 doigts)</string>
     <string name="gestures_help">Gestes canvas…</string>
     <string name="gestures_help_body">Un doigt : dessiner, ou déplacer en mode Naviguer. Le stylet dessine toujours. Deux doigts : déplacer, pincer pour le zoom, pivoter pour la rotation. Tap à deux doigts : annuler. Tap à trois doigts : rétablir. Depuis un bord : rouvre un panneau. La symétrie suit le zoom et la rotation.</string>
+    <string name="color_wheel">Roue</string>
+    <string name="color_sliders">Curseurs</string>
+    <string name="color_sets">Nuanciers</string>
+    <string name="color_recent">Récentes</string>
+    <string name="color_hue">Teinte %1$d°</string>
+    <string name="color_sat">Sat. %1$d%%</string>
+    <string name="color_val">Val. %1$d%%</string>
+    <string name="color_hex">#%1$s</string>
+    <string name="color_hex_invalid">Code invalide — %1$s conservé</string>
+    <string name="color_set_base">Base</string>
+    <string name="color_set_new">Nouveau</string>
+    <string name="color_set_add">Ajouter actuelle</string>
+    <string name="color_set_rename">Renommer…</string>
+    <string name="color_set_delete">Supprimer</string>
+    <string name="color_recent_empty">Dessinez pour remplir</string>
+    <string name="color_recent_clear">Effacer</string>
+    <string name="pipette">Pipette</string>
+    <string name="pipette_armed">Touchez le canvas</string>
+    <string name="pipette_picked">Échantillonné %1$s</string>
+    <string name="pipette_missed">Hors canvas</string>
+    <string name="pipette_hold">Maintenir : loupe</string>
 </resources>

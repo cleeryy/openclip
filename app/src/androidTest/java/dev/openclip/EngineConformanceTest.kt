@@ -11,8 +11,18 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performImeAction
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextClearance
+import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.openclip.engine.EngineHost
@@ -48,9 +58,12 @@ class EngineConformanceTest {
     private val w = 256
     private val h = 256
 
-    // a. MainActivity starts and its Compose UI renders.
+    // a. MainActivity starts and its Compose UI renders. On compact
+    // phones the dock starts folded (Slice 0 §3): open it first so the
+    // Studio tab (Layers) is composed on every form factor.
     @Test
     fun activityLaunchesAndRendersUi() {
+        ensureDockOpen()
         composeRule.onNodeWithText("Brush").assertIsDisplayed()
         composeRule.onNodeWithText("Eraser").assertIsDisplayed()
         composeRule.onNodeWithText("Layers").assertIsDisplayed()
@@ -1068,6 +1081,24 @@ class EngineConformanceTest {
     // composite, which must stay ink-free through every navigation
     // gesture. The view is reset after each test.
 
+    private fun countRedDom(b: Bitmap): Int {
+        var red = 0
+        var y = 0
+        while (y < b.height) {
+            var x = 0
+            while (x < b.width) {
+                val px = b.getPixel(x, y)
+                val r = (px shr 16) and 0xFF
+                val g = (px shr 8) and 0xFF
+                val bl = px and 0xFF
+                if (r > g + 40 && r > bl + 40) red++
+                x += 4
+            }
+            y += 4
+        }
+        return red
+    }
+
     private fun surf(): EngineSurface {
         composeRule.waitForIdle()
         var surface: EngineSurface? = null
@@ -1076,6 +1107,19 @@ class EngineConformanceTest {
         }
         assertNotNull("EngineSurface must be attached to MainActivity", surface)
         return surface!!
+    }
+
+    /** Poll until the render thread accepts input (cold-start safe). */
+    private fun awaitSurface(es: EngineSurface) {
+        var tries = 0
+        while (tries < 50 && (es.width <= 200 || es.height <= 200 || !es.isReady())) {
+            Thread.sleep(100)
+            tries++
+        }
+        assertTrue(
+            "surface must become ready (w=${es.width} h=${es.height} ready=${es.isReady()})",
+            es.width > 200 && es.height > 200 && es.isReady()
+        )
     }
 
     private fun uiSync(op: (EngineSurface) -> Unit) {
@@ -1494,6 +1538,422 @@ class EngineConformanceTest {
         assertTrue("edge swipe must paint no ink", countInk(b) == 0)
         b.recycle()
         uiSync { it.onEdgeSwipe = null; it.resetView() }
+    }
+
+    // ---- Slice 2 pro color (spec docs/slice2-color.md §7) ----
+    // Color = engine pixels: every chain is proven through real strokes or
+    // pullFrameFull, never Compose state alone. Each test resets inkHex to
+    // #141414 + active set Base in setup and teardown.
+
+    private fun slice2Store() = composeRule.activity.colorStore
+
+    private fun resetColorState() {
+        composeRule.activityRule.scenario.onActivity { act ->
+            act.colorStore.disarmPipette()
+            act.colorStore.selectSet("Base")
+            act.colorStore.pick("#141414")
+        }
+        uiSync {
+            it.navigateMode = false
+            it.resetView()
+            it.pipetteArmed = false
+            it.pipetteLoupe = false
+        }
+    }
+
+    private fun ensureDockOpen() {
+        composeRule.waitForIdle()
+        val shown = try {
+            composeRule.onNodeWithTag("color-panel")
+                .assertIsDisplayed()
+            true
+        } catch (_: AssertionError) {
+            false
+        }
+        if (!shown) {
+            composeRule.onNodeWithText("⟨").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("color-panel")
+                .assertIsDisplayed()
+        }
+    }
+
+    // 1. Sets tab pick drives the engine: red swatch -> 1-finger stroke ->
+    // composite carries R-dominant pixels. Also captures the slice report
+    // screenshot (wheel tab visible, pipette + sets chips in frame).
+    @Test
+    fun wheelDrivesEngine() {
+        val es = surf()
+        awaitSurface(es)
+        resetColorState()
+        try {
+            ensureDockOpen()
+            composeRule.onNodeWithTag("color-tab-wheel")
+                .performClick()
+            composeRule.waitForIdle()
+            // Scroll the bottom bar into view: dock viewport then shows
+            // tabs + wheel + pastille/hex/pipette in a single shot.
+            composeRule.onNodeWithTag("pipette-btn")
+                .performScrollTo()
+            composeRule.waitForIdle()
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    val shot = InstrumentationRegistry.getInstrumentation()
+                        .uiAutomation.takeScreenshot()
+                    if (shot != null) {
+                        val dst = File(composeRule.activity.cacheDir, "slice2-color.png")
+                        FileOutputStream(dst).use { o ->
+                            shot.compress(Bitmap.CompressFormat.PNG, 100, o)
+                        }
+                        if (!shot.isRecycled) shot.recycle()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            composeRule.onNodeWithTag("color-tab-sets")
+                .performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("set-chip-0")
+                .performClick()
+            composeRule.onNodeWithTag("swatch-2")
+                .performClick()
+            composeRule.waitForIdle()
+            assertEquals("#E53935", slice2Store().inkHex)
+            val t0 = SystemClock.uptimeMillis()
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            strokeAcross(es, cy, t0, cx)
+            Thread.sleep(400)
+            val b = pullFull(es)
+            var red = 0
+            var y = 0
+            while (y < b.height) {
+                var x = 0
+                while (x < b.width) {
+                    val px = b.getPixel(x, y)
+                    val r = (px shr 16) and 0xFF
+                    val g = (px shr 8) and 0xFF
+                    val bl = px and 0xFF
+                    if (r > g + 40 && r > bl + 40) red++
+                    x += 4
+                }
+                y += 4
+            }
+            b.recycle()
+            assertTrue(
+                "red stroke must paint R-dominant pixels, got $red",
+                red >= 10
+            )
+            assertTrue(es.undo())
+        } finally {
+            resetColorState()
+            try {
+                es.undo()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // 2. Sets persist across an activity restart; corrupt JSON falls back
+    // to Base without crashing.
+    @Test
+    fun recentsSurviveRestart() {
+        resetColorState()
+        try {
+            composeRule.activityRule.scenario.onActivity { act ->
+                val s = act.colorStore
+                s.newSet("Test")
+                s.selectSet("Test")
+                s.pick("#FF0000")
+                s.addCurrentToActive()
+                s.pick("#00FF00")
+                s.addCurrentToActive()
+            }
+            Thread.sleep(900)
+            // Synchronous flush: the debounce write above proves the timer
+            // path (file exists); flush nails the content before recreate so
+            // a wedged main looper cannot lose the last edit.
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.colorStore.flush()
+            }
+            val f = File(composeRule.activity.filesDir, "color-sets.json")
+            assertTrue("color-sets.json must be persisted", f.exists())
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            var okSets = false
+            var okActive = false
+            composeRule.activityRule.scenario.onActivity { act ->
+                val s = act.colorStore
+                okSets = s.sets.any {
+                    it.name == "Test" && it.colors == listOf("#FF0000", "#00FF00")
+                }
+                okActive = s.activeSet == "Test"
+            }
+            assertTrue("set Test must survive restart with 2 colors", okSets)
+            assertTrue("active set must survive restart", okActive)
+            composeRule.activityRule.scenario.onActivity { act ->
+                File(act.filesDir, "color-sets.json").writeText("{{{")
+            }
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            var okBase = false
+            composeRule.activityRule.scenario.onActivity { act ->
+                val s = act.colorStore
+                okBase = s.activeSet == "Base" &&
+                    s.sets.any { it.name == "Base" && it.colors.size == 10 }
+            }
+            assertTrue("corrupt JSON must fall back to Base", okBase)
+        } finally {
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.colorStore.deleteSet("Test")
+                act.colorStore.selectSet("Base")
+                act.colorStore.pick("#141414")
+                act.colorStore.flush()
+            }
+            Thread.sleep(700)
+        }
+    }
+
+    // 3. Pipette samples the drawn red stroke at the canvas center (±8 LSB
+    // per channel); a tap on the checker background misses and keeps ink.
+    @Test
+    fun pipetteSamplesRightColor() {
+        val es = surf()
+        awaitSurface(es)
+        resetColorState()
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.colorStore.pick("#FF0000")
+            }
+            composeRule.waitForIdle()
+            Thread.sleep(400)
+            val t0 = SystemClock.uptimeMillis()
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            strokeAcross(es, cy, t0, cx)
+            Thread.sleep(400)
+            // Stage gate: the stroke itself must be red at the center before
+            // testing the pipette (separates brush/stroke faults from
+            // sampling faults).
+            var pre = pullFull(es)
+            val preRed = countRedDom(pre)
+            pre.recycle()
+            assertTrue(
+                "stroke must paint red before pipette test, got $preRed",
+                preRed >= 10
+            )
+            ensureDockOpen()
+            // BottomBar sits below the fold (LayerPanel + wheel above it):
+            // scroll it into view like a real user before tapping. Re-read
+            // the canvas geometry: opening the dock resized the view.
+            composeRule.onNodeWithTag("pipette-btn")
+                .performScrollTo()
+            composeRule.waitForIdle()
+            val tx = es.width * 0.5f
+            val ty = es.height * 0.5f
+            composeRule.onNodeWithTag("pipette-btn")
+                .performClick()
+            composeRule.waitForIdle()
+            assertTrue(slice2Store().pipetteArmed)
+            dispatchAll(
+                es,
+                simpleDown(t0 + 5000, tx, ty),
+                MotionEvent.obtain(
+                    t0 + 5000, t0 + 5016, MotionEvent.ACTION_UP,
+                    tx, ty, 1f, 1f, 0, 1f, 1f, 0, 0
+                )
+            )
+            Thread.sleep(900)
+            val picked = slice2Store().inkHex
+            val b = pullFull(es)
+            val center = b.getPixel(b.width / 2, b.height / 2)
+            b.recycle()
+            fun chan(v: Int, shift: Int) = (v shr shift) and 0xFF
+            val pr = chan(android.graphics.Color.parseColor(picked), 16)
+            val pg = chan(android.graphics.Color.parseColor(picked), 8)
+            val pb = chan(android.graphics.Color.parseColor(picked), 0)
+            assertTrue(
+                "pipette $picked must match engine center (±8 LSB)",
+                kotlin.math.abs(pr - chan(center, 16)) <= 8 &&
+                    kotlin.math.abs(pg - chan(center, 8)) <= 8 &&
+                    kotlin.math.abs(pb - chan(center, 0)) <= 8
+            )
+            // Miss on the checker background: ink unchanged, disarmed.
+            composeRule.onNodeWithTag("pipette-btn")
+                .performScrollTo()
+            composeRule.onNodeWithTag("pipette-btn")
+                .performClick()
+            composeRule.waitForIdle()
+            assertTrue(slice2Store().pipetteArmed)
+            dispatchAll(
+                es,
+                simpleDown(t0 + 9000, 8f, 8f),
+                MotionEvent.obtain(
+                    t0 + 9000, t0 + 9016, MotionEvent.ACTION_UP,
+                    8f, 8f, 1f, 1f, 0, 1f, 1f, 0, 0
+                )
+            )
+            Thread.sleep(900)
+            assertEquals("miss must not change ink", picked, slice2Store().inkHex)
+            assertFalse(slice2Store().pipetteArmed)
+            assertTrue(es.undo())
+        } finally {
+            resetColorState()
+            try {
+                es.undo()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // 4. Sliders tab: pick updates the hex readout; typed hex updates the
+    // store; invalid hex keeps the color and raises the status message.
+    @Test
+    fun slidersAndHexAgree() {
+        resetColorState()
+        try {
+            ensureDockOpen()
+            composeRule.onNodeWithTag("color-tab-sliders")
+                .performClick()
+            composeRule.waitForIdle()
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.colorStore.pick("#00FF00")
+            }
+            composeRule.waitForIdle()
+            composeRule.onNode(
+                hasTestTag("color-hex") and hasText("#00FF00")
+            ).performScrollTo()
+            composeRule.onNode(
+                hasTestTag("color-hex") and hasText("#00FF00")
+            ).assertIsDisplayed()
+            assertEquals("#00FF00", slice2Store().inkHex)
+            composeRule.onNodeWithTag("hex-field")
+                .performClick()
+            composeRule.onNodeWithTag("hex-field")
+                .performTextClearance()
+            composeRule.onNodeWithTag("hex-field")
+                .performTextInput("0000FF")
+            composeRule.waitForIdle()
+            Thread.sleep(300)
+            assertEquals("#0000FF", slice2Store().inkHex)
+            composeRule.onNodeWithTag("hex-field")
+                .performTextClearance()
+            composeRule.onNodeWithTag("hex-field")
+                .performTextInput("ZZZZZZ")
+            composeRule.onNodeWithTag("hex-field")
+                .performImeAction()
+            composeRule.waitForIdle()
+            Thread.sleep(300)
+            assertEquals("#0000FF", slice2Store().inkHex)
+            var expected = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                expected = act.getString(R.string.color_hex_invalid, "#0000FF")
+            }
+            composeRule.onNodeWithText(expected)
+                .assertIsDisplayed()
+        } finally {
+            resetColorState()
+        }
+    }
+
+    // 5. Every color touch target measures >= 48dp high (0.5dp tolerance).
+    @Test
+    fun touchTargets48dp() {
+        resetColorState()
+        try {
+            ensureDockOpen()
+            // Touch-target size is the node's OWN size (unclipped): targets
+            // below the dock fold still measure full height.
+            fun tall(tag: String) {
+                composeRule.waitForIdle()
+                val u = composeRule.onNodeWithTag(tag).getUnclippedBoundsInRoot()
+                val h = u.bottom - u.top
+                assertTrue(
+                    "$tag must be >= 48dp, got $h",
+                    h >= (48.dp - 0.5.dp)
+                )
+            }
+            listOf(
+                "color-tab-wheel", "color-tab-sliders", "color-tab-sets",
+                "color-tab-recent", "pipette-btn", "color-current"
+            ).forEach { tall(it) }
+            composeRule.onNodeWithTag("color-tab-sliders")
+                .performClick()
+            composeRule.waitForIdle()
+            listOf(
+                "slider-hue", "slider-sat", "slider-val2", "slider-red",
+                "slider-green", "slider-blue", "hex-field"
+            ).forEach { tall(it) }
+            composeRule.onNodeWithTag("color-tab-sets")
+                .performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("set-chip-0")
+                .performClick()
+            tall("swatch-0")
+            tall("set-add")
+            tall("set-new")
+            composeRule.onNodeWithTag("color-tab-recent")
+                .performClick()
+            composeRule.waitForIdle()
+            tall("recent-clear")
+        } finally {
+            resetColorState()
+        }
+    }
+
+    // 6. Recents fill on finished strokes only: slider picks alone stay out;
+    // repeats dedupe and bubble to the front.
+    @Test
+    fun recentsFillOnStrokeOnly() {
+        val es = surf()
+        awaitSurface(es)
+        resetColorState()
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            composeRule.activityRule.scenario.onActivity { act ->
+                val s = act.colorStore
+                s.clearRecents()
+                s.pick("#FF0000")
+            }
+            Thread.sleep(700)
+            assertTrue(
+                "slider-only pick must not fill recents",
+                slice2Store().recents.isEmpty()
+            )
+            val t0 = SystemClock.uptimeMillis()
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            strokeAcross(es, cy, t0, cx)
+            Thread.sleep(500)
+            assertEquals(listOf("#FF0000"), slice2Store().recents)
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.colorStore.pick("#0000FF")
+            }
+            Thread.sleep(300)
+            strokeAcross(es, cy + 60f, t0 + 2000, cx)
+            Thread.sleep(500)
+            assertEquals(listOf("#0000FF", "#FF0000"), slice2Store().recents)
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.colorStore.pick("#FF0000")
+            }
+            Thread.sleep(300)
+            strokeAcross(es, cy + 120f, t0 + 4000, cx)
+            Thread.sleep(500)
+            assertEquals(listOf("#FF0000", "#0000FF"), slice2Store().recents)
+            assertTrue(es.undo())
+            assertTrue(es.undo())
+            assertTrue(es.undo())
+        } finally {
+            resetColorState()
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.colorStore.clearRecents()
+            }
+            try {
+                es.undo()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     // 8 kHz mono 16-bit 1 s 440 Hz sine: generated in-code so no binary

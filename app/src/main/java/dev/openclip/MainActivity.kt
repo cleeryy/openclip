@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -48,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -57,8 +59,10 @@ import dev.openclip.media.ExportWebm
 import dev.openclip.media.WebdavClient
 import dev.openclip.doc.DocRegistry
 import dev.openclip.ui.CollapsibleDrawer
-import dev.openclip.ui.ColorPicker
+import dev.openclip.ui.ColorPanel
+import dev.openclip.ui.ColorStore
 import dev.openclip.ui.EngineSurface
+import dev.openclip.ui.parseHexColor
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.GesturesHelpDialog
 import dev.openclip.ui.LayerPanel
@@ -92,8 +96,12 @@ private val StudioColorScheme = darkColorScheme(
 
 class MainActivity : ComponentActivity() {
 
+    // Slice 2 color single source of truth (app-side only, persisted JSON).
+    lateinit var colorStore: ColorStore
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        colorStore = ColorStore(applicationContext)
         val dpi = resources.displayMetrics.density * 160f
 
         setContent {
@@ -108,11 +116,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        if (::colorStore.isInitialized) colorStore.flush()
+    }
+
     @Composable
     private fun OpenClipScreen(dpi: Float) {
         val canvas = remember { mutableStateOf<EngineSurface?>(null) }
         val refreshKey = remember { mutableStateOf(0) }
-        val inkColor = remember { mutableStateOf("#141414") }
+        val store = colorStore
+        val inkHex = store.inkHex
         val status = remember { mutableStateOf("") }
         val showExport = remember { mutableStateOf(false) }
         val exportFormat = remember { mutableStateOf("ora") }
@@ -585,7 +599,7 @@ class MainActivity : ComponentActivity() {
                 HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
                 ToolPalette(
                     surface = surface,
-                    initialColor = inkColor.value,
+                    initialColor = inkHex,
                     navigateMode = navMode.value,
                     onNavigateToggle = { toggleNav() },
                     onFileClicked = { showExport.value = true },
@@ -633,6 +647,53 @@ class MainActivity : ComponentActivity() {
                                 cv.onStrokeChanged = {
                                     refreshKey.value++
                                     docRegistry.markActiveDirty(true)
+                                    // Slice 2 recents fill on finished strokes
+                                    // only (no slider-drag pollution).
+                                    store.pushRecent(store.inkHex)
+                                }
+                                // Slice 2 pipette wiring (app-side sample of
+                                // the displayed composite, no JNI).
+                                cv.onPipetteDown = { vx, vy ->
+                                    cv.sampleCompositeAt(vx, vy) { hex, onPaper ->
+                                        if (!onPaper) {
+                                            status.value = ctx.getString(R.string.pipette_missed)
+                                            store.disarmPipette()
+                                            cv.pipetteArmed = false
+                                            cv.pipetteLoupe = false
+                                        } else if (hex != null) {
+                                            if (store.pipetteLoupe) {
+                                                store.preview(hex)
+                                            } else {
+                                                store.pick(hex)
+                                                store.pushRecent(hex)
+                                                status.value = ctx.getString(
+                                                    R.string.pipette_picked, hex
+                                                )
+                                                store.disarmPipette()
+                                                cv.pipetteArmed = false
+                                                cv.pipetteLoupe = false
+                                            }
+                                        }
+                                    }
+                                }
+                                cv.onPipetteMove = { vx, vy ->
+                                    cv.sampleCompositeAt(vx, vy) { hex, onPaper ->
+                                        if (hex != null && onPaper) store.preview(hex)
+                                    }
+                                }
+                                cv.onPipetteUp = {
+                                    // Loupe drag release: freeze the live hex.
+                                    val live = store.pipetteLive
+                                    if (store.pipetteLoupe && live != null) {
+                                        store.pick(live)
+                                        store.pushRecent(live)
+                                        status.value = ctx.getString(
+                                            R.string.pipette_picked, live
+                                        )
+                                    }
+                                    store.disarmPipette()
+                                    cv.pipetteArmed = false
+                                    cv.pipetteLoupe = false
                                 }
                                 canvas.value = cv
                                 if (docRegistry.size == 0) {
@@ -646,6 +707,8 @@ class MainActivity : ComponentActivity() {
                         update = { cv ->
                             cv.navigateMode = navMode.value
                             cv.edgeBottomEnabled = compact
+                            cv.pipetteArmed = store.pipetteArmed
+                            cv.pipetteLoupe = store.pipetteLoupe
                         },
                         modifier = Modifier.fillMaxSize()
                     )
@@ -685,6 +748,46 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 Text(
                                     stringResource(R.string.view_reset),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF90B8FF),
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                    // Slice 2 pipette loupe (composite-only Compose overlay,
+                    // never engine pixels): enlarged witness + live hex while
+                    // armed. Anchored top-center (never under the finger);
+                    // the bottom-bar pastille follows the same live hex.
+                    if (store.pipetteArmed) {
+                        val liveHex = store.pipetteLive ?: inkHex
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(8.dp)
+                                .background(Color(0xCC101014))
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                .testTag("pipette-loupe"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(parseHexColor(liveHex))
+                            )
+                            Column {
+                                Text(
+                                    liveHex,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = Color(0xFFECECF1),
+                                    maxLines = 1
+                                )
+                                Text(
+                                    stringResource(
+                                        if (store.pipetteLoupe) R.string.pipette_hold
+                                        else R.string.pipette_armed
+                                    ),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFF90B8FF),
                                     maxLines = 1
@@ -743,11 +846,11 @@ class MainActivity : ComponentActivity() {
                                     refreshKey = refreshKey.value,
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                                ColorPicker(
-                                    initialColor = inkColor.value,
-                                    onColorChanged = { hex ->
-                                        inkColor.value = hex
-                                    },
+                                // Slice 2: controlled color panel (single
+                                // inkHex source of truth, pipette included).
+                                ColorPanel(
+                                    store = store,
+                                    onStatus = { status.value = it },
                                     modifier = Modifier.fillMaxWidth()
                                 )
                                 PresetGallery(
