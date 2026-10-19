@@ -64,6 +64,8 @@ fun ToolPalette(
     initialColor: String = DEFAULT_INK,
     onFileClicked: () -> Unit = {},
     onImportClicked: () -> Unit = {},
+    navigateMode: Boolean = false,
+    onNavigateToggle: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var isBrush by remember { mutableStateOf(true) }
@@ -132,6 +134,18 @@ fun ToolPalette(
                 selected = !isBrush,
                 onClick = { isBrush = false; pushBrush() },
                 label = { Text(stringResource(R.string.eraser)) }
+            )
+            FilterChip(
+                selected = navigateMode,
+                onClick = onNavigateToggle,
+                label = {
+                    Text(
+                        stringResource(
+                            if (navigateMode) R.string.nav_mode_move
+                            else R.string.nav_mode_draw
+                        )
+                    )
+                }
             )
 
             // Compact inline Brush Size slider

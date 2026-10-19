@@ -127,4 +127,16 @@
     <string name="window_studio">Studio</string>
     <string name="window_tones">3D &amp; Tones</string>
     <string name="doc_untitled">Untitled</string>
+    <string name="menu_help">Help</string>
+    <string name="nav_mode_draw">Draw</string>
+    <string name="nav_mode_move">Navigate</string>
+    <string name="view_reset">Reset view</string>
+    <string name="view_zoom_fit">%1$d%%</string>
+    <string name="view_angle">%1$d°</string>
+    <string name="status_nav_draw">Draw mode</string>
+    <string name="status_nav_move">Navigate mode</string>
+    <string name="undo_touch">Undo (two-finger tap)</string>
+    <string name="redo_touch">Redo (three-finger tap)</string>
+    <string name="gestures_help">Canvas gestures…</string>
+    <string name="gestures_help_body">One finger: draw (or pan in Navigate mode). The stylus always draws. Two fingers: pan, pinch: zoom, twist: rotate the view. Two-finger tap: undo. Three-finger tap: redo. Swipe from a screen edge: reopen a folded panel. Symmetry follows zoom and rotation.</string>
 </resources>

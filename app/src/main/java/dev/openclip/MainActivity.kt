@@ -40,11 +40,13 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -58,6 +60,7 @@ import dev.openclip.ui.CollapsibleDrawer
 import dev.openclip.ui.ColorPicker
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.ExportDialog
+import dev.openclip.ui.GesturesHelpDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.MaterialsRow
 import dev.openclip.ui.MenuBar
@@ -68,6 +71,8 @@ import dev.openclip.ui.StudioMenuItem
 import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 import dev.openclip.ui.WebdavDialog
+import kotlinx.coroutines.delay
+import kotlin.math.abs
 
 private val StudioColorScheme = darkColorScheme(
     primary = Color(0xFF5C9DFF),
@@ -123,9 +128,32 @@ class MainActivity : ComponentActivity() {
 
         // Studio workspace state: right dock open + selected tab (0 = Draw/Layers, 1 = 3D & Tones)
         // and bottom timeline drawer collapsed by default so the canvas gets maximum space.
-        val dockOpen = remember { mutableStateOf(true) }
+        // Phone fallback (slice 0 §3 / slice 1 §4): everything folded by default on compact widths.
+        val compact = LocalConfiguration.current.screenWidthDp < 600
+        val dockOpen = remember { mutableStateOf(!compact) }
         val dockTab = remember { mutableStateOf(0) }
         val showTimeline = remember { mutableStateOf(false) }
+
+        // Slice 1 canvas gestures: 1-finger draw vs navigate mode (default
+        // draw), loupe overlay tick, gestures help sheet.
+        val navMode = remember { mutableStateOf(false) }
+        val loupeTick = remember { mutableStateOf(0) }
+        val loupeOn = remember { mutableStateOf(false) }
+        val showHelp = remember { mutableStateOf(false) }
+
+        fun toggleNav() {
+            navMode.value = !navMode.value
+            canvas.value?.navigateMode = navMode.value
+            status.value = ctx.getString(
+                if (navMode.value) R.string.status_nav_move else R.string.status_nav_draw
+            )
+        }
+        LaunchedEffect(loupeTick.value) {
+            if (loupeTick.value == 0) return@LaunchedEffect
+            loupeOn.value = true
+            delay(850)
+            loupeOn.value = false
+        }
 
         // Slice 0 single-doc registry: one entry ("doc-1") bound to the
         // live EngineSurface; ready for N docs, explicit dispose.
@@ -490,6 +518,21 @@ class MainActivity : ComponentActivity() {
                             title = stringResource(R.string.menu_display),
                             items = listOf(
                                 StudioMenuItem(
+                                    label = stringResource(R.string.view_reset),
+                                    onClick = { surface.resetView() }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(
+                                        if (navMode.value) R.string.nav_mode_move
+                                        else R.string.nav_mode_draw
+                                    ),
+                                    onClick = { toggleNav() }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.gestures_help),
+                                    onClick = { showHelp.value = true }
+                                ),
+                                StudioMenuItem(
                                     label = stringResource(R.string.reference_show),
                                     enabled = refModelName.value != null,
                                     onClick = { surface.setRefVisible(true) }
@@ -527,6 +570,15 @@ class MainActivity : ComponentActivity() {
                                     }
                                 )
                             )
+                        ),
+                        StudioMenu(
+                            title = stringResource(R.string.menu_help),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.gestures_help),
+                                    onClick = { showHelp.value = true }
+                                )
+                            )
                         )
                     )
                 )
@@ -534,6 +586,8 @@ class MainActivity : ComponentActivity() {
                 ToolPalette(
                     surface = surface,
                     initialColor = inkColor.value,
+                    navigateMode = navMode.value,
+                    onNavigateToggle = { toggleNav() },
                     onFileClicked = { showExport.value = true },
                     onImportClicked = { openDoc.launch(arrayOf("*/*")) }
                 )
@@ -556,6 +610,26 @@ class MainActivity : ComponentActivity() {
                         factory = { c ->
                             EngineSurface(c).also { cv ->
                                 cv.start(dpi)
+                                cv.navigateMode = navMode.value
+                                cv.edgeBottomEnabled = compact
+                                cv.onGestureUndo = {
+                                    docRegistry.markActiveDirty(true)
+                                    refreshKey.value++
+                                    status.value = ctx.getString(R.string.undo)
+                                }
+                                cv.onGestureRedo = {
+                                    docRegistry.markActiveDirty(true)
+                                    refreshKey.value++
+                                    status.value = ctx.getString(R.string.redo)
+                                }
+                                cv.onEdgeSwipe = { edge ->
+                                    if (edge == EngineSurface.EDGE_BOTTOM) {
+                                        showTimeline.value = true
+                                    } else {
+                                        dockOpen.value = true
+                                    }
+                                }
+                                cv.onViewChanged = { loupeTick.value++ }
                                 cv.onStrokeChanged = {
                                     refreshKey.value++
                                     docRegistry.markActiveDirty(true)
@@ -569,8 +643,55 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
+                        update = { cv ->
+                            cv.navigateMode = navMode.value
+                            cv.edgeBottomEnabled = compact
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
+                    // Slice 1 loupe chip: zoom % + angle + 1-tap view reset,
+                    // visible while the canvas reports navigation.
+                    val surf = canvas.value
+                    if (surf != null && loupeOn.value) {
+                        var loupeLabel = stringResource(
+                            R.string.view_zoom_fit, surf.viewZoomPercent()
+                        )
+                        if (abs(surf.viewAngle()) >= 0.5f) {
+                            loupeLabel += " " + stringResource(
+                                R.string.view_angle, surf.viewAngle().toInt()
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(8.dp)
+                                .background(Color(0xCC101014))
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                loupeLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFECECF1),
+                                maxLines = 1
+                            )
+                            TextButton(
+                                onClick = { surf.resetView() },
+                                contentPadding = PaddingValues(
+                                    horizontal = 8.dp, vertical = 0.dp
+                                ),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text(
+                                    stringResource(R.string.view_reset),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF90B8FF),
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
                 }
 
                 canvas.value?.let { surface ->
@@ -802,6 +923,9 @@ class MainActivity : ComponentActivity() {
                             }.start()
                         }
                     )
+                }
+                if (showHelp.value) {
+                    GesturesHelpDialog(onDismiss = { showHelp.value = false })
                 }
                 if (showExport.value) {
                     ExportDialog(

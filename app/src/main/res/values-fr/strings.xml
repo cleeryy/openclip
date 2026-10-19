@@ -112,6 +112,18 @@
     <string name="vector_layer_default">Vecteur</string>
     <string name="window_dock">Panneau latéral</string>
     <string name="window_studio">Studio</string>
-    <string name="window_tones">3D &amp; Tons</string>
+    <string name="window_tones">3D et Tons</string>
     <string name="doc_untitled">Sans titre</string>
+    <string name="menu_help">Aide</string>
+    <string name="nav_mode_draw">Dessin</string>
+    <string name="nav_mode_move">Naviguer</string>
+    <string name="view_reset">Réinitialiser vue</string>
+    <string name="view_zoom_fit">%1$d %%</string>
+    <string name="view_angle">%1$d°</string>
+    <string name="status_nav_draw">Mode dessin</string>
+    <string name="status_nav_move">Mode navigation</string>
+    <string name="undo_touch">Annuler (tap 2 doigts)</string>
+    <string name="redo_touch">Rétablir (tap 3 doigts)</string>
+    <string name="gestures_help">Gestes canvas…</string>
+    <string name="gestures_help_body">Un doigt : dessiner, ou déplacer en mode Naviguer. Le stylet dessine toujours. Deux doigts : déplacer, pincer pour le zoom, pivoter pour la rotation. Tap à deux doigts : annuler. Tap à trois doigts : rétablir. Depuis un bord : rouvre un panneau. La symétrie suit le zoom et la rotation.</string>
 </resources>

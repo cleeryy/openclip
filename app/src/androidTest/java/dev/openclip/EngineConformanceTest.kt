@@ -36,6 +36,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlin.math.sqrt
 
 @RunWith(AndroidJUnit4::class)
 class EngineConformanceTest {
@@ -1059,6 +1060,440 @@ class EngineConformanceTest {
             nonWhite > 20
         )
         assertTrue("undo after touch stroke must succeed", es.undo())
+    }
+
+    // ---- Slice 1 canvas gestures (spec docs/slice1-gestures.md §8) ----
+    // Each test drives the live EngineSurface with synthetic MotionEvents
+    // (the KVM emulator has no stylus) and asserts on the engine
+    // composite, which must stay ink-free through every navigation
+    // gesture. The view is reset after each test.
+
+    private fun surf(): EngineSurface {
+        composeRule.waitForIdle()
+        var surface: EngineSurface? = null
+        composeRule.activityRule.scenario.onActivity { act ->
+            surface = findEngineSurface(act.window.decorView)
+        }
+        assertNotNull("EngineSurface must be attached to MainActivity", surface)
+        return surface!!
+    }
+
+    private fun uiSync(op: (EngineSurface) -> Unit) {
+        composeRule.activityRule.scenario.onActivity { act ->
+            op(findEngineSurface(act.window.decorView)!!)
+        }
+    }
+
+    private fun dispatchAll(es: EngineSurface, vararg events: MotionEvent) {
+        composeRule.activityRule.scenario.onActivity {
+            for (e in events) es.dispatchTouchEvent(e)
+        }
+        for (e in events) e.recycle()
+    }
+
+    private fun simpleDown(t0: Long, x: Float, y: Float): MotionEvent =
+        MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, x, y, 1f, 1f, 0, 1f, 1f, 0, 0)
+
+    private fun fingerProps(vararg ids: Int): Array<MotionEvent.PointerProperties> =
+        ids.map { id ->
+            MotionEvent.PointerProperties().apply {
+                this.id = id
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+        }.toTypedArray()
+
+    private fun fingerCoords(vararg xy: Pair<Float, Float>): Array<MotionEvent.PointerCoords> =
+        xy.map { (x, y) ->
+            MotionEvent.PointerCoords().apply {
+                this.x = x
+                this.y = y
+                pressure = 1f
+                size = 1f
+            }
+        }.toTypedArray()
+
+    private fun multiObtain(
+        downTime: Long,
+        eventTime: Long,
+        action: Int,
+        props: Array<MotionEvent.PointerProperties>,
+        coords: Array<MotionEvent.PointerCoords>
+    ): MotionEvent = MotionEvent.obtain(
+        downTime, eventTime, action, props.size, props, coords,
+        0, 0, 1f, 1f, 0, 0, 0, 0
+    )
+
+    private fun pullFull(es: EngineSurface, idx: Int = 0): Bitmap {
+        var bmp: Bitmap? = null
+        val lock = Object()
+        es.pullFrameFull(idx) { b ->
+            synchronized(lock) {
+                bmp = b
+                lock.notifyAll()
+            }
+        }
+        synchronized(lock) {
+            if (bmp == null) lock.wait(8000)
+        }
+        assertNotNull("pullFrameFull must return a bitmap", bmp)
+        return bmp!!
+    }
+
+    private fun countInk(b: Bitmap): Int {
+        var n = 0
+        var y = 0
+        while (y < b.height) {
+            var x = 0
+            while (x < b.width) {
+                if (b.getPixel(x, y) != -1) n++
+                x += 8
+            }
+            y += 8
+        }
+        return n
+    }
+
+    private fun strokeAcross(es: EngineSurface, y: Float, t0: Long, cx: Float) {
+        dispatchAll(
+            es,
+            simpleDown(t0, cx - 80f, y),
+            MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, cx, y, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, cx + 80f, y, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, cx + 80f, y, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+    }
+
+    private fun twoFingerTap(es: EngineSurface, x: Float, y: Float, t0: Long) {
+        val props = fingerProps(0, 1)
+        val c = fingerCoords(Pair(x, y), Pair(x + 20f, y))
+        val down = 1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT
+        dispatchAll(
+            es,
+            simpleDown(t0, x, y),
+            multiObtain(t0, t0 + 10, MotionEvent.ACTION_POINTER_DOWN or down, props, c),
+            multiObtain(t0, t0 + 60, MotionEvent.ACTION_POINTER_UP or down, props, c),
+            MotionEvent.obtain(t0, t0 + 80, MotionEvent.ACTION_UP, x, y, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+    }
+
+    private fun threeFingerTap(es: EngineSurface, x: Float, y: Float, t0: Long) {
+        val props2 = fingerProps(0, 1)
+        val props3 = fingerProps(0, 1, 2)
+        val c2 = fingerCoords(Pair(x, y), Pair(x + 20f, y))
+        val c3 = fingerCoords(Pair(x, y), Pair(x + 20f, y), Pair(x + 10f, y + 20f))
+        val d1 = 1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT
+        val d2 = 2 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT
+        dispatchAll(
+            es,
+            simpleDown(t0, x, y),
+            multiObtain(t0, t0 + 10, MotionEvent.ACTION_POINTER_DOWN or d1, props2, c2),
+            multiObtain(t0, t0 + 20, MotionEvent.ACTION_POINTER_DOWN or d2, props3, c3),
+            multiObtain(t0, t0 + 60, MotionEvent.ACTION_POINTER_UP or d2, props3, c3),
+            multiObtain(t0, t0 + 80, MotionEvent.ACTION_POINTER_UP or d1, props2, c2),
+            MotionEvent.obtain(t0, t0 + 100, MotionEvent.ACTION_UP, x, y, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+    }
+
+    // 1. A stroke cancelled by a second finger + pinch spread leaves no
+    // ink, and there is nothing left to undo (Slice 0 rollback already
+    // cleaned it).
+    @Test
+    fun pinchZoomLeavesNoInk() {
+        val es = surf()
+        uiSync { it.navigateMode = false; it.resetView() }
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        val props2 = fingerProps(0, 1)
+        dispatchAll(
+            es,
+            simpleDown(t0, cx - 80f, cy),
+            MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, cx, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            multiObtain(
+                t0, t0 + 32,
+                MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                props2, fingerCoords(Pair(cx, cy), Pair(cx + 40f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 48, MotionEvent.ACTION_MOVE,
+                props2, fingerCoords(Pair(cx - 80f, cy), Pair(cx + 80f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 64, MotionEvent.ACTION_MOVE,
+                props2, fingerCoords(Pair(cx - 120f, cy), Pair(cx + 120f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 80,
+                MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                props2, fingerCoords(Pair(cx - 120f, cy), Pair(cx + 120f, cy))
+            ),
+            MotionEvent.obtain(t0, t0 + 96, MotionEvent.ACTION_UP, cx - 120f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(400)
+        val b = pullFull(es)
+        val ink = countInk(b)
+        b.recycle()
+        assertTrue("pinch must leave no ink, got $ink", ink == 0)
+        assertFalse("rolled-back stroke leaves nothing to undo", es.undo())
+        uiSync { it.resetView() }
+    }
+
+    // 2. Two-finger tap undoes a stroke; a second tap inside the 400 ms
+    // debounce window is swallowed (exactly one undo).
+    @Test
+    fun twoFingerTapUndoesStroke() {
+        val es = surf()
+        uiSync { it.navigateMode = false; it.resetView() }
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        strokeAcross(es, cy, t0, cx)
+        Thread.sleep(300)
+        strokeAcross(es, cy + 100f, t0 + 1000, cx)
+        Thread.sleep(300)
+        var b = pullFull(es)
+        assertTrue("two strokes must paint ink", countInk(b) > 20)
+        b.recycle()
+        twoFingerTap(es, cx, cy, t0 + 2000)
+        Thread.sleep(300)
+        b = pullFull(es)
+        assertTrue("first tap must undo stroke B but keep A", countInk(b) > 20)
+        b.recycle()
+        twoFingerTap(es, cx, cy, t0 + 2100)
+        Thread.sleep(300)
+        b = pullFull(es)
+        assertTrue("debounced tap must not consume stroke A", countInk(b) > 20)
+        b.recycle()
+        assertTrue("stroke A must still be undoable", es.undo())
+        assertFalse("nothing left to undo after A", es.undo())
+        uiSync { it.resetView() }
+    }
+
+    // 3. Three-finger tap redoes the stroke undone by (2).
+    @Test
+    fun threeFingerTapRedoesStroke() {
+        val es = surf()
+        uiSync { it.navigateMode = false; it.resetView() }
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        strokeAcross(es, cy, t0, cx)
+        Thread.sleep(300)
+        var b = pullFull(es)
+        assertTrue("stroke must paint ink", countInk(b) > 20)
+        b.recycle()
+        twoFingerTap(es, cx, cy, t0 + 2000)
+        Thread.sleep(300)
+        b = pullFull(es)
+        assertTrue("two-finger tap must undo the stroke", countInk(b) == 0)
+        b.recycle()
+        threeFingerTap(es, cx, cy, t0 + 3000)
+        Thread.sleep(300)
+        b = pullFull(es)
+        assertTrue("three-finger tap must redo the stroke", countInk(b) > 20)
+        b.recycle()
+        assertTrue("redone stroke must be undoable for cleanup", es.undo())
+        uiSync { it.resetView() }
+    }
+
+    // 4. Two-finger drag pans the view without ink, and a later stroke
+    // still lands at the engine center (inverse mapping is sane).
+    @Test
+    fun twoFingerDragPansWithoutInk() {
+        val es = surf()
+        uiSync { it.navigateMode = false; it.resetView() }
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        val props2 = fingerProps(0, 1)
+        dispatchAll(
+            es,
+            simpleDown(t0, cx, cy),
+            multiObtain(
+                t0, t0 + 10,
+                MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                props2, fingerCoords(Pair(cx, cy), Pair(cx + 40f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 30, MotionEvent.ACTION_MOVE,
+                props2, fingerCoords(Pair(cx + 100f, cy), Pair(cx + 140f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 50, MotionEvent.ACTION_MOVE,
+                props2, fingerCoords(Pair(cx + 200f, cy), Pair(cx + 240f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 70,
+                MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                props2, fingerCoords(Pair(cx + 200f, cy), Pair(cx + 240f, cy))
+            ),
+            MotionEvent.obtain(t0, t0 + 90, MotionEvent.ACTION_UP, cx + 200f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(300)
+        var b = pullFull(es)
+        assertTrue("two-finger drag must paint no ink", countInk(b) == 0)
+        b.recycle()
+        val (ox, oy) = es.viewOffset()
+        val moved = sqrt((ox * ox + oy * oy).toDouble())
+        assertTrue("drag must pan the view, got offset ($ox,$oy)", moved > 50)
+        // A later stroke still lands at the engine center.
+        strokeAcross(es, cy, t0 + 2000, cx)
+        Thread.sleep(300)
+        b = pullFull(es)
+        assertTrue("stroke after pan must paint ink", countInk(b) > 20)
+        b.recycle()
+        assertTrue(es.undo())
+        uiSync { it.resetView() }
+    }
+
+    // 5. A two-finger twist tilts the view without ink; resetView clears
+    // the angle. Also captures the loupe screenshot for the report.
+    @Test
+    fun rotateGestureTiltsWithoutInk() {
+        val es = surf()
+        uiSync { it.navigateMode = false; it.resetView() }
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        val r = 60f
+        fun ring(deg: Double): Pair<Pair<Float, Float>, Pair<Float, Float>> {
+            val rad = Math.toRadians(deg)
+            val dx = (r * Math.cos(rad)).toFloat()
+            val dy = (r * Math.sin(rad)).toFloat()
+            return Pair(Pair(cx - dx, cy - dy), Pair(cx + dx, cy + dy))
+        }
+        val props2 = fingerProps(0, 1)
+        val (a0, b0) = ring(0.0)
+        val (a1, b1) = ring(5.0)
+        val (a2, b2) = ring(10.0)
+        val (a3, b3) = ring(15.0)
+        dispatchAll(
+            es,
+            MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, a0.first, a0.second, 1f, 1f, 0, 1f, 1f, 0, 0),
+            multiObtain(
+                t0, t0 + 10,
+                MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                props2, fingerCoords(a0, b0)
+            ),
+            multiObtain(t0, t0 + 30, MotionEvent.ACTION_MOVE, props2, fingerCoords(a1, b1)),
+            multiObtain(t0, t0 + 50, MotionEvent.ACTION_MOVE, props2, fingerCoords(a2, b2)),
+            multiObtain(t0, t0 + 70, MotionEvent.ACTION_MOVE, props2, fingerCoords(a3, b3)),
+            multiObtain(
+                t0, t0 + 90,
+                MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                props2, fingerCoords(a3, b3)
+            ),
+            MotionEvent.obtain(t0, t0 + 110, MotionEvent.ACTION_UP, a3.first, a3.second, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(300)
+        val b = pullFull(es)
+        assertTrue("rotation must paint no ink", countInk(b) == 0)
+        b.recycle()
+        val ang = es.viewAngle()
+        assertTrue("view angle must be ~15 deg, got $ang", ang > 13f && ang < 17f)
+        // Loupe screenshot for the slice report (best effort, never fails
+        // the gate): the loupe is still visible < 800 ms after the twist.
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val shot = InstrumentationRegistry.getInstrumentation()
+                    .uiAutomation.takeScreenshot()
+                if (shot != null) {
+                    val dst = File(composeRule.activity.cacheDir, "slice1-loupe.png")
+                    FileOutputStream(dst).use { o ->
+                        shot.compress(Bitmap.CompressFormat.PNG, 100, o)
+                    }
+                    if (!shot.isRecycled) shot.recycle()
+                }
+            }
+        } catch (_: Exception) {
+        }
+        uiSync { it.resetView() }
+        assertEquals("resetView must clear the angle", 0f, es.viewAngle())
+    }
+
+    // 6. In navigate mode 1 finger pans (no ink) but the stylus still
+    // draws; in draw mode 1 finger draws (non-regression).
+    @Test
+    fun oneFingerDrawsInBothModes() {
+        val es = surf()
+        uiSync { it.navigateMode = false; it.resetView() }
+        val t0 = SystemClock.uptimeMillis()
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        strokeAcross(es, cy, t0, cx)
+        Thread.sleep(300)
+        var b = pullFull(es)
+        assertTrue("draw mode: 1 finger must draw", countInk(b) > 20)
+        b.recycle()
+        assertTrue(es.undo())
+        // Navigate mode: 1-finger drag pans, paints nothing.
+        uiSync { it.navigateMode = true }
+        dispatchAll(
+            es,
+            simpleDown(t0 + 2000, cx, cy),
+            MotionEvent.obtain(t0 + 2000, t0 + 2016, MotionEvent.ACTION_MOVE, cx + 50f, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0 + 2000, t0 + 2032, MotionEvent.ACTION_MOVE, cx + 100f, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0 + 2000, t0 + 2048, MotionEvent.ACTION_UP, cx + 100f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(300)
+        b = pullFull(es)
+        assertTrue("navigate mode: 1 finger must paint no ink", countInk(b) == 0)
+        b.recycle()
+        val (ox, oy) = es.viewOffset()
+        assertTrue("navigate mode: 1 finger must pan", sqrt((ox * ox + oy * oy).toDouble()) > 20)
+        // Stylus still draws in navigate mode.
+        val sprops = arrayOf(
+            MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_STYLUS
+            }
+        )
+        fun scoords(x: Float, y: Float) = arrayOf(
+            MotionEvent.PointerCoords().apply {
+                this.x = x
+                this.y = y
+                pressure = 0.8f
+                size = 1f
+            }
+        )
+        dispatchAll(
+            es,
+            multiObtain(t0 + 3000, t0 + 3000, MotionEvent.ACTION_DOWN, sprops, scoords(cx - 80f, cy)),
+            multiObtain(t0 + 3000, t0 + 3016, MotionEvent.ACTION_MOVE, sprops, scoords(cx, cy)),
+            multiObtain(t0 + 3000, t0 + 3032, MotionEvent.ACTION_MOVE, sprops, scoords(cx + 80f, cy)),
+            multiObtain(t0 + 3000, t0 + 3048, MotionEvent.ACTION_UP, sprops, scoords(cx + 80f, cy))
+        )
+        Thread.sleep(300)
+        b = pullFull(es)
+        assertTrue("stylus must draw even in navigate mode", countInk(b) > 20)
+        b.recycle()
+        assertTrue(es.undo())
+        uiSync { it.navigateMode = false; it.resetView() }
+    }
+
+    // 7. A swipe from the right edge reopens the dock without ink.
+    @Test
+    fun edgeSwipeReopensDockWithoutInk() {
+        val es = surf()
+        uiSync { it.navigateMode = false; it.resetView() }
+        var fired = -1
+        uiSync { it.onEdgeSwipe = { edge -> fired = edge } }
+        val t0 = SystemClock.uptimeMillis()
+        val x0 = es.width - 5f
+        val cy = es.height * 0.5f
+        dispatchAll(
+            es,
+            simpleDown(t0, x0, cy),
+            MotionEvent.obtain(t0, t0 + 30, MotionEvent.ACTION_MOVE, x0 - 80f, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 60, MotionEvent.ACTION_MOVE, x0 - 200f, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 90, MotionEvent.ACTION_UP, x0 - 200f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(300)
+        assertEquals("right-edge swipe must fire EDGE_RIGHT", EngineSurface.EDGE_RIGHT, fired)
+        val b = pullFull(es)
+        assertTrue("edge swipe must paint no ink", countInk(b) == 0)
+        b.recycle()
+        uiSync { it.onEdgeSwipe = null; it.resetView() }
     }
 
     // 8 kHz mono 16-bit 1 s 440 Hz sine: generated in-code so no binary
