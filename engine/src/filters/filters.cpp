@@ -579,7 +579,8 @@ bool applyTone(Surface& s, const std::string& name) {
 
 bool isKnownAdjustType(const std::string& type) {
     return type == "brightness" || type == "contrast" || type == "hue" ||
-           type == "saturation" || type == "gradientMap";
+           type == "saturation" || type == "gradientMap" ||
+           type == "curves";
 }
 
 void parseAdjustDescriptor(const std::string& json, std::string& type,
@@ -697,6 +698,155 @@ bool gradientRamp(const std::string& spec, double lum, double& r, double& g,
 }
 
 }  // namespace
+
+// V+2 curves descriptor: {"type":"curves","points":[[in,out]...],
+// "channel":"rgb|r|g|b"} -> canonical "channel;i,o;i,o;...".
+void parseCurvesDescriptor(const std::string& json, std::string& type,
+                           std::string& channel, std::string& spec) {
+    type.clear();
+    channel = "rgb";
+    spec.clear();
+    std::string t;
+    if (jsonStr(json, "type", t)) type = t;
+    if (type != "curves") return;
+    std::string ch;
+    if (jsonStr(json, "channel", ch)) {
+        if (ch == "r" || ch == "g" || ch == "b" || ch == "rgb")
+            channel = ch;
+    }
+    // Flat number scan of the points array: pairs (in,out).
+    const std::size_t pk = json.find("\"points\"");
+    if (pk == std::string::npos) return;
+    const std::size_t open = json.find('[', pk + 8);
+    if (open == std::string::npos) return;
+    std::vector<double> nums;
+    std::size_t p = open;
+    int depth = 0;
+    while (p < json.size() && nums.size() < 64) {
+        const char c = json[p];
+        if (c == '[') ++depth;
+        if (c == ']') {
+            if (--depth <= 0) break;
+        }
+        if ((c >= '0' && c <= '9') || c == '-' || c == '.') {
+            char* e = nullptr;
+            const double v = std::strtod(json.c_str() + p, &e);
+            if (e != json.c_str() + p) {
+                nums.push_back(v);
+                p = static_cast<std::size_t>(e - json.c_str());
+                continue;
+            }
+        }
+        ++p;
+    }
+    std::vector<std::pair<int, int>> pts;
+    for (std::size_t i = 0; i + 1 < nums.size() && pts.size() < 16;
+         i += 2) {
+        int in = static_cast<int>(std::lround(nums[i]));
+        int out = static_cast<int>(std::lround(nums[i + 1]));
+        if (in < 0) in = 0;
+        if (in > 255) in = 255;
+        if (out < 0) out = 0;
+        if (out > 255) out = 255;
+        pts.emplace_back(in, out);
+    }
+    if (pts.empty()) return;  // honest identity, descriptor kept verbatim
+    std::sort(pts.begin(), pts.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    spec = channel;
+    for (auto& q : pts)
+        spec += ";" + std::to_string(q.first) + "," +
+                std::to_string(q.second);
+}
+
+void applyCurvesOp(const std::string& spec, double& r, double& g,
+                   double& b) {
+    // Thread-local LUT cache keyed by spec (composite is single
+    // threaded; per-pixel cost stays one table lookup).
+    thread_local std::string lastSpec;
+    thread_local std::string lastChannel = "rgb";
+    thread_local std::uint8_t lut[256] = {0};
+    thread_local bool lutReady = false;
+    if (!lutReady || spec != lastSpec) {
+        lutReady = false;
+        lastSpec = spec;
+        const std::size_t semi = spec.find(';');
+        lastChannel = (semi == std::string::npos) ? spec
+                                                  : spec.substr(0, semi);
+        if (lastChannel != "rgb" && lastChannel != "r" &&
+            lastChannel != "g" && lastChannel != "b")
+            return;  // identity: unknown channel
+        std::vector<std::pair<int, int>> pts;
+        std::size_t p = (semi == std::string::npos) ? spec.size() : semi;
+        while (p < spec.size()) {
+            if (spec[p] == ';') ++p;
+            const std::size_t comma = spec.find(',', p);
+            if (comma == std::string::npos) break;
+            const std::size_t end = spec.find(';', comma);
+            const std::string a =
+                spec.substr(p, comma - p);
+            const std::string bl =
+                spec.substr(comma + 1, (end == std::string::npos
+                                            ? spec.size()
+                                            : end) -
+                                           comma - 1);
+            char* ea = nullptr;
+            char* eb = nullptr;
+            const long in = std::strtol(a.c_str(), &ea, 10);
+            const long out = std::strtol(bl.c_str(), &eb, 10);
+            if (ea != a.c_str() && eb != bl.c_str() && in >= 0 &&
+                in <= 255 && out >= 0 && out <= 255)
+                pts.emplace_back(static_cast<int>(in),
+                                 static_cast<int>(out));
+            if (end == std::string::npos) break;
+            p = end;
+        }
+        if (pts.empty() || pts.size() > 16) return;  // identity
+        std::sort(pts.begin(), pts.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        for (int i = 0; i < 256; ++i) {
+            double v;
+            if (i <= pts.front().first)
+                v = pts.front().second;
+            else if (i >= pts.back().first)
+                v = pts.back().second;
+            else {
+                std::size_t k = 0;
+                while (k + 1 < pts.size() && pts[k + 1].first <= i) ++k;
+                const auto& lo = pts[k];
+                const auto& hi = pts[k + 1];
+                const double t = (hi.first > lo.first)
+                                     ? (i - lo.first) /
+                                           double(hi.first - lo.first)
+                                     : 0.0;
+                v = lo.second + (hi.second - lo.second) * t;
+            }
+            int q = static_cast<int>(std::lround(v));
+            if (q < 0) q = 0;
+            if (q > 255) q = 255;
+            lut[i] = static_cast<std::uint8_t>(q);
+        }
+        lutReady = true;
+    }
+    auto map = [&](double v) -> double {
+        int i = static_cast<int>(std::lround(v));
+        if (i < 0) i = 0;
+        if (i > 255) i = 255;
+        return lut[i];
+    };
+    if (lastChannel == "rgb") {
+        r = map(r);
+        g = map(g);
+        b = map(b);
+    } else if (lastChannel == "r") {
+        r = map(r);
+    } else if (lastChannel == "g") {
+        g = map(g);
+    } else {
+        b = map(b);
+    }
+}
 
 void applyAdjustOp(const std::string& type, double amount,
                    const std::string& stops, double& r, double& g,

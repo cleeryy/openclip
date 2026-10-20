@@ -62,9 +62,10 @@ bool loadDocument(Canvas& c, const std::string& path, std::string& error) {
 }
 
 bool saveDocument(const Canvas& c, const std::string& path,
-                  const std::string& format, std::string& error) {
+                  const std::string& format, std::string& error,
+                  int* approxOut) {
     if (format == "ora") return saveOra(c, path, error);
-    if (format == "psd") return savePsd(c, path, error);
+    if (format == "psd") return savePsd(c, path, error, approxOut);
     if (format == "png") {
         extern bool exportPng(const Canvas&, const std::string&,
                               std::string&);  // defined in ora.cpp

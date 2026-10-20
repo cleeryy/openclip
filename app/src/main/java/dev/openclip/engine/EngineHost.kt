@@ -75,6 +75,18 @@ object EngineHost {
     external fun nSetLayerText(handle: Long, index: Int, json: String?): Boolean
     external fun nBlitPngIntoLayer(handle: Long, index: Int, path: String): Boolean
 
+    // V+2 additions (ARCHITECTURE.md): cel rhythm + onion counts,
+    // selection mask/transform, GIF export, generic fiche, PSD count.
+    external fun nMoveCel(handle: Long, from: Int, to: Int): Boolean
+    external fun nVectorPaths(handle: Long, index: Int): String
+    external fun nSetCelHold(handle: Long, index: Int, frames: Int): Boolean
+    external fun nSetOnionCount(handle: Long, before: Int, after: Int): Boolean
+    external fun nSetSelectionMask(handle: Long, path: String?): Boolean
+    external fun nSelectionBlit(handle: Long, json: String): Boolean
+    external fun nExportGif(handle: Long, path: String, json: String): Boolean
+    external fun nSetLayerMeta(handle: Long, index: Int, key: String, value: String?): Boolean
+    external fun nPsdApproxCount(handle: Long): Int
+
     // M9 additions (ARCHITECTURE.md): glTF reference model overlay.
     external fun nLoadGlbReference(handle: Long, path: String): Int
     external fun nSetRefView(handle: Long, json: String): Boolean

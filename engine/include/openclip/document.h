@@ -24,10 +24,12 @@ DocFormat detectFormat(const std::string& path);
 // left untouched and `error` carries a human-readable message.
 bool loadDocument(Canvas& c, const std::string& path, std::string& error);
 
-// Save `c` in `format` ("ora" | "png" | "psd"). PSD export is the M4
-// baseline: flattened composite, RGB(A) raw planar, no layer records.
+// Save `c` in `format` ("ora" | "png" | "psd"). PSD export is layered
+// (V+2, see psd.h); `approxOut` (nullable) receives the PSD
+// approximation count (0 = pixel-faithful, untouched for ora/png).
 bool saveDocument(const Canvas& c, const std::string& path,
-                  const std::string& format, std::string& error);
+                  const std::string& format, std::string& error,
+                  int* approxOut = nullptr);
 
 }  // namespace openclip
 

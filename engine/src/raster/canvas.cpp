@@ -87,6 +87,10 @@ inline void applyAdjustmentTo(Surface& out, const Layer& adj, int x, int y) {
     }
     applyAdjustOp(adj.adjustType, adj.adjustAmount, adj.adjustStops, r, g,
                   b);
+    // V+2 curves: canonical spec lives in adjustCurve (identity when
+    // empty/invalid — the descriptor is still kept verbatim).
+    if (adj.adjustType == "curves" && !adj.adjustCurve.empty())
+        applyCurvesOp(adj.adjustCurve, r, g, b);
     const double a = p.a;
     auto repack = [&](double v) -> std::uint8_t {
         long q = std::lround(v * a / 255.0);
@@ -167,6 +171,7 @@ inline bool walkChildAdjustment(
     view.adjustType = child.adjustType;
     view.adjustAmount = child.adjustAmount;
     view.adjustStops = child.adjustStops;
+    view.adjustCurve = child.adjustCurve;
     view.opacity = op;
     view.clipped = false;
     return walkAdjustment(out, view, x, y);

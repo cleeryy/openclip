@@ -151,6 +151,14 @@ void writeTextAttrs(const Layer& l, std::ostringstream& xml) {
         << " x-openclip-box=\"" << xmlEscape(l.textBox) << "\"";
 }
 
+// V+2: generic opaque fiche map (nSetLayerMeta). Written verbatim,
+// reloaded by applyMetaAttrs below (unknown x-openclip-* attrs on
+// load are kept too, so third-party round trips preserve fiches).
+void writeMetaAttrs(const Layer& l, std::ostringstream& xml) {
+    for (const auto& kv : l.meta)
+        xml << " " << kv.first << "=\"" << xmlEscape(kv.second) << "\"";
+}
+
 void writeLayerOne(const Layer& l, std::ostringstream& xml,
                    std::vector<std::pair<std::string, std::vector<std::uint8_t>>>&
                        entries,
@@ -172,9 +180,14 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
         if (!l.adjustType.empty()) {
             xml << " adjust-type=\"" << xmlEscape(l.adjustType) << "\""
                 << " adjust-amount=\"" << l.adjustAmount << "\""
-                << " adjust-stops=\"" << xmlEscape(l.adjustStops) << "\"";
+                << " adjust-stops=\"" << xmlEscape(l.adjustStops)
+                << "\"";
+            if (l.adjustType == "curves" && !l.adjustCurve.empty())
+                xml << " adjust-curve=\"" << xmlEscape(l.adjustCurve)
+                    << "\"";
         }
         writeTextAttrs(l, xml);
+        writeMetaAttrs(l, xml);
         xml << ">\n";
         writeLayerList(l.children, xml, entries, idx, indent + 1,
                        depth + 1, error, ok);
@@ -188,13 +201,16 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
         << (l.visible ? "visible" : "hidden") << "\" composite-op=\""
         << blendToName(l.blend) << "\"";
     // M8: adjustment descriptor persists as attrs (round trips through
-    // tagAttr/xmlUnescape on load).
+    // tagAttr/xmlUnescape on load). V+2 curves adds adjust-curve.
     if (!l.adjustType.empty()) {
         xml << " adjust-type=\"" << xmlEscape(l.adjustType) << "\""
             << " adjust-amount=\"" << l.adjustAmount << "\""
             << " adjust-stops=\"" << xmlEscape(l.adjustStops) << "\"";
+        if (l.adjustType == "curves" && !l.adjustCurve.empty())
+            xml << " adjust-curve=\"" << xmlEscape(l.adjustCurve) << "\"";
     }
     writeTextAttrs(l, xml);
+    writeMetaAttrs(l, xml);
     xml << "/>\n";
     std::vector<std::uint8_t> png;
     if (!encodePng(l.surface, png)) {
@@ -229,6 +245,8 @@ bool attrFloat(const std::string& def, float& out) {
 
 // M8: read the adjustment descriptor attrs into l when present AND the
 // type is known; unknown or missing = layer loads as normal (contract).
+// V+2 curves reads adjust-curve alongside (identity fallback when
+// absent — applyCurvesOp treats empty as no-op).
 void applyAdjustAttrs(const std::string& xml, std::size_t tagStart,
                       Layer& l) {
     std::string t, a, s;
@@ -246,6 +264,53 @@ void applyAdjustAttrs(const std::string& xml, std::size_t tagStart,
     }
     tagAttr(xml, tagStart, "adjust-stops", s);
     l.adjustStops = s;
+    l.adjustCurve.clear();
+    if (t == "curves") tagAttr(xml, tagStart, "adjust-curve", l.adjustCurve);
+}
+
+// V+2: reload the generic fiche map. Every x-openclip-* attr on the
+// tag is kept verbatim (capped values, capped count — DoS hygiene on
+// foreign files), so round trips preserve fiches even written by
+// third parties.
+void applyMetaAttrs(const std::string& xml, std::size_t tagStart,
+                    Layer& l) {
+    const std::size_t close = xml.find('>', tagStart);
+    if (close == std::string::npos) return;
+    static const std::string kPrefix = "x-openclip-";
+    std::size_t p = tagStart;
+    int kept = 0;
+    while (kept < 64) {
+        p = xml.find(kPrefix, p);
+        if (p == std::string::npos || p >= close) break;
+        // Attribute name = [a-z0-9-] run starting at p.
+        std::size_t e = p + kPrefix.size();
+        while (e < close && (xml[e] == '-' ||
+                             (xml[e] >= 'a' && xml[e] <= 'z') ||
+                             (xml[e] >= '0' && xml[e] <= '9')))
+            ++e;
+        if (e == p + kPrefix.size()) {
+            p += kPrefix.size();
+            continue;
+        }
+        const std::string name = xml.substr(p, e - p);
+        std::size_t q = e;
+        while (q < close && std::isspace((unsigned char)xml[q])) ++q;
+        if (q >= close || xml[q] != '=' ||
+            name == "x-openclip-text" || name == "x-openclip-font" ||
+            name == "x-openclip-size" || name == "x-openclip-style" ||
+            name == "x-openclip-align" || name == "x-openclip-leading" ||
+            name == "x-openclip-tracking" || name == "x-openclip-color" ||
+            name == "x-openclip-box") {
+            p = e;
+            continue;  // text fiche has its own attrs (above)
+        }
+        std::string v;
+        if (tagAttr(xml, p, name.c_str(), v)) {
+            l.meta[name] = v.substr(0, 4096);
+            ++kept;
+        }
+        p = e;
+    }
 }
 
 // V+1: read the text fiche attrs into l when x-openclip-text is
@@ -351,6 +416,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                     blendFromName(blendVectorValue(comp).c_str());
                 applyAdjustAttrs(xml, lOpen, l);
                 applyTextAttrs(xml, lOpen, l);
+                applyMetaAttrs(xml, lOpen, l);
                 l.surface.resize(tmp.width(), tmp.height());
                 if (s.width() == tmp.width() && s.height() == tmp.height()) {
                     l.surface.bytes().swap(s.bytes());
@@ -402,6 +468,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 g.passThrough = (iso != "isolated");
                 applyAdjustAttrs(xml, lOpen, g);
                 applyTextAttrs(xml, lOpen, g);
+                applyMetaAttrs(xml, lOpen, g);
                 out.push_back(std::move(g));
                 continue;
             }
@@ -444,7 +511,8 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
             g.blend = blendFromName(blendVectorValue(comp).c_str());
             g.passThrough = (iso != "isolated");
             applyAdjustAttrs(xml, lOpen, g);
-                applyTextAttrs(xml, lOpen, g);
+            applyTextAttrs(xml, lOpen, g);
+            applyMetaAttrs(xml, lOpen, g);
             if (!loadLayerList(xml, close + 1, gEnd, entries, tmp, depth + 1,
                                g.children, error))
                 return false;

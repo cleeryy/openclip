@@ -109,6 +109,9 @@ fun TimelineStrip(
     var deleteArmed by remember { mutableStateOf(false) }
     var scrubCandidate by remember { mutableStateOf<Int?>(null) }
     val playTick = remember { mutableStateOf(0) }
+    // V+2: per-cel exposure holds (nSetCelHold 1..32, default 1 when
+    // absent). Keyed by frame index; reorder swaps the entries along.
+    val holds = remember { mutableStateMapOf<Int, Int>() }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -127,13 +130,13 @@ fun TimelineStrip(
         thumbs.keys.filter { it >= count }.forEach { thumbs.remove(it) }
     }
 
-    // Honest JNI mapping (spec §3): the engine only knows on/off per
-    // side; the counts are a strip-display indication (tinted borders)
-    // plus documentation for a future nSetOnionCount.
+    // V+2: the engine now draws the real N neighbors per side
+    // (nSetOnionCount, ARCHITECTURE.md "V+2 additions"); the tinted
+    // borders below stay a display indication of the same counts.
     fun applyOnion() {
-        surface.setOnion(
-            onionMaster && onionBefore > 0,
-            onionMaster && onionAfter > 0,
+        surface.setOnionCount(
+            if (onionMaster) onionBefore else 0,
+            if (onionMaster) onionAfter else 0,
             onionStrength
         )
     }
@@ -168,17 +171,26 @@ fun TimelineStrip(
 
     // Play: main-thread Handler steps nSetFrame at 1/fps and composites
     // through the render thread (needsComposite inside setFrame).
+    // V+2 holds: each cel plays `holds[i]` ticks (default 1) before
+    // advancing — the hold rhythm the GIF exporter reuses (GCE delay).
     // Leaving the composition (drawer folded, activity gone) removes
     // the callbacks: pause is automatic, no extra wiring.
+    var playHoldLeft by remember { mutableStateOf(1) }
     DisposableEffect(playing, fps, count) {
         if (!playing) return@DisposableEffect onDispose {}
         var next = cur
+        playHoldLeft = holds[next] ?: 1
         val step = object : Runnable {
             override fun run() {
                 if (count <= 1) return
-                next = (next + 1) % count
-                cur = next
-                surface.frameOp { setFrame(next) }
+                if (playHoldLeft > 1) {
+                    playHoldLeft--
+                } else {
+                    next = (next + 1) % count
+                    cur = next
+                    surface.frameOp { setFrame(next) }
+                    playHoldLeft = holds[next] ?: 1
+                }
                 playTick.value++
                 main.postDelayed(this, (1000f / fps.coerceIn(1f, 60f)).toLong())
             }
@@ -308,8 +320,13 @@ fun TimelineStrip(
                             )
                         }
                         Text(
-                            if (i == cur) "[$i]" else "$i",
-                            style = MaterialTheme.typography.labelSmall
+                            buildString {
+                                append(if (i == cur) "[$i]" else "$i")
+                                val h = holds[i] ?: 1
+                                if (h > 1) append("×$h")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.testTag("cel-label-$i")
                         )
                     }
                 }
@@ -522,6 +539,49 @@ fun TimelineStrip(
                     maxLines = 1
                 )
             }
+            // V+2 reorder: current cel one step left/right (same tactile
+            // pattern as the layer DnD, one engine nMoveCel call).
+            TextButton(
+                onClick = {
+                    stopPlay()
+                    if (cur > 0) {
+                        var moved = -1
+                        surface.frameOp { if (moveCel(cur, cur - 1)) moved = cur - 1 }
+                        if (moved >= 0) {
+                            val a = holds[cur]
+                            val b = holds[cur - 1]
+                            if (a == null) holds.remove(cur - 1) else holds[cur - 1] = a
+                            if (b == null) holds.remove(cur) else holds[cur] = b
+                            cur = moved
+                            gotoFrame(moved)
+                        } else refresh()
+                    }
+                },
+                enabled = cur > 0,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("cel-move-left")
+            ) { Text("‹", maxLines = 1) }
+            TextButton(
+                onClick = {
+                    stopPlay()
+                    if (cur < count - 1) {
+                        var moved = -1
+                        surface.frameOp { if (moveCel(cur, cur + 1)) moved = cur + 1 }
+                        if (moved >= 0) {
+                            val a = holds[cur]
+                            val b = holds[cur + 1]
+                            if (a == null) holds.remove(cur + 1) else holds[cur + 1] = a
+                            if (b == null) holds.remove(cur) else holds[cur] = b
+                            gotoFrame(moved)
+                        } else refresh()
+                    }
+                },
+                enabled = cur < count - 1,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("cel-move-right")
+            ) { Text("›", maxLines = 1) }
         }
         // Second rideau (folded by default: the open drawer budget is
         // 175dp): precision fps slider, onion counts + strength, ghost
@@ -645,6 +705,39 @@ fun TimelineStrip(
                             .fillMaxWidth()
                             .testTag("onion-strength-slider")
                     )
+                }
+                // V+2 hold stepper for the current cel (nSetCelHold
+                // 1..32, one tick per hold unit at playback).
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        stringResource(R.string.v2_hold, holds[cur] ?: 1),
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        modifier = Modifier.testTag("hold-value")
+                    )
+                    TextButton(
+                        onClick = {
+                            val v = ((holds[cur] ?: 1) - 1).coerceIn(1, 32)
+                            surface.frameOp { setCelHold(cur, v) }
+                            holds[cur] = v
+                        },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("hold-minus")
+                    ) { Text("−", maxLines = 1) }
+                    TextButton(
+                        onClick = {
+                            val v = ((holds[cur] ?: 1) + 1).coerceIn(1, 32)
+                            surface.frameOp { setCelHold(cur, v) }
+                            holds[cur] = v
+                        },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("hold-plus")
+                    ) { Text("+", maxLines = 1) }
                 }
                 // Ghost legend: tinted dots + before/after words
                 // (display convention, never engine pixels).

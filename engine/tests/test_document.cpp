@@ -218,3 +218,107 @@ TEST(psd_save_png_save_roundtrip_smoke) {
     CHECK_EQ(e.width(), 10);
     CHECK(compositeEquals(c, e));
 }
+
+// V+2 layered PSD: two eligible raster layers + one masked layer.
+// Records list bottom-to-top with the merged base first; the merged
+// view still round trips through loadPsd; the masked layer counts 1
+// approximation, unmapped blend (difference) counts as norm + 1.
+TEST(psd_layered_roundtrip_names_pixels) {
+    Canvas c(8, 8);
+    c.addLayer("sky");
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            c.layer(0).surface.set(x, y, Pixel{10, 20, 30, 255});
+    c.addLayer("sun");
+    c.layer(1).blend = openclip::BlendMode::Multiply;
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            c.layer(1).surface.set(x, y, Pixel{200, 100, 50, 255});
+    c.addLayer("hidden-detail");
+    c.layer(2).addMask(8, 8);  // masked -> merged into the base record
+    const std::string path = "/tmp/oc_layers.psd";
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 1);
+    std::vector<std::string> names;
+    CHECK(openclip::psdLayerNames(path, names, err));
+    CHECK_EQ(names.size(), 3u);
+    CHECK_EQ(names[0], std::string("Merged approximations"));
+    CHECK_EQ(names[1], std::string("sky"));
+    CHECK_EQ(names[2], std::string("sun"));
+    Canvas d;
+    CHECK(openclip::loadPsd(d, path, err));
+    CHECK(compositeEquals(c, d));
+    std::remove(path.c_str());
+}
+
+// V+2 PSD: unknown-for-PSD blend (difference) degrades to norm and is
+// counted; all-eligible stacks report 0 approximations.
+TEST(psd_unknown_blend_counts_norm) {
+    Canvas c(4, 4);
+    c.addLayer("a");
+    c.layer(0).blend = openclip::BlendMode::Difference;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            c.layer(0).surface.set(x, y, Pixel{9, 9, 9, 255});
+    const std::string path = "/tmp/oc_diff.psd";
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 1);
+    std::vector<std::string> names;
+    CHECK(openclip::psdLayerNames(path, names, err));
+    CHECK_EQ(names.size(), 1u);
+    CHECK_EQ(names[0], std::string("a"));
+    std::remove(path.c_str());
+}
+
+// V+2 PSD: groups flatten into the base record with a visible count.
+TEST(psd_group_flattens_with_count) {
+    Canvas c(6, 6);
+    c.addLayer("solo");
+    for (int y = 0; y < 6; ++y)
+        for (int x = 0; x < 6; ++x)
+            c.layer(0).surface.set(x, y, Pixel{1, 2, 3, 255});
+    const std::size_t g = c.addGroup("grp");
+    (void)g;
+    Canvas d;
+    const std::string path = "/tmp/oc_grp.psd";
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 1);  // the group merged into the base record
+    std::vector<std::string> names;
+    CHECK(openclip::psdLayerNames(path, names, err));
+    CHECK_EQ(names.size(), 2u);
+    CHECK_EQ(names[0], std::string("Merged approximations"));
+    CHECK_EQ(names[1], std::string("solo"));
+    CHECK(openclip::loadPsd(d, path, err));
+    CHECK(compositeEquals(c, d));
+    std::remove(path.c_str());
+}
+
+// V+2 generic fiche (nSetLayerMeta): keys round trip verbatim through
+// ORA, including third-party-style x-openclip-* attrs on load.
+TEST(meta_ora_roundtrip_verbatim) {
+    Canvas c(8, 8);
+    c.addLayer("panel");
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            c.layer(0).surface.set(x, y, Pixel{7, 7, 7, 255});
+    c.layer(0).meta["x-openclip-panel"] = "rect:1,2,5,6";
+    c.layer(0).meta["x-openclip-panel-order"] = "3";
+    c.layer(0).meta["x-openclip-bubble"] = "ellipse";
+    const std::string path = "/tmp/oc_meta.ora";
+    std::string err;
+    CHECK(openclip::saveOra(c, path, err));
+    Canvas d;
+    CHECK(openclip::loadOra(d, path, err));
+    std::remove(path.c_str());
+    CHECK_EQ(d.layerCount(), 1u);
+    CHECK_EQ(d.layer(0).meta["x-openclip-panel"], std::string("rect:1,2,5,6"));
+    CHECK_EQ(d.layer(0).meta["x-openclip-panel-order"], std::string("3"));
+    CHECK_EQ(d.layer(0).meta["x-openclip-bubble"], std::string("ellipse"));
+    CHECK(compositeEquals(c, d));  // fiches never touch pixels
+}

@@ -230,3 +230,75 @@ TEST(adjust_ora_unknown_type_ignored_on_load) {
     CHECK(d.layerCount() >= 2);
     CHECK(d.layer(1).adjustType.empty());
 }
+
+// V+2 curves: identity descriptor (diagonal) is byte-identical.
+TEST(curves_identity_is_byte_identical) {
+    Canvas c(8, 8);
+    const int adj = buildStack(c, 100);
+    c.layer(adj).adjustType = "curves";
+    c.layer(adj).adjustCurve = "rgb;0,0;255,255";
+    Surface a;
+    c.composite(a);
+    Canvas plain(8, 8);
+    buildStack(plain, 100);
+    plain.layer(1).adjustType = "";
+    Surface b;
+    plain.composite(b);
+    CHECK(sameOut(a, b));
+    // Malformed spec = honest identity too.
+    c.layer(adj).adjustCurve = "banana";
+    Surface d;
+    c.composite(d);
+    CHECK(sameOut(a, d));
+}
+
+// V+2 curves: inversion maps gray 100 -> ~155 through the LUT.
+TEST(curves_inversion_maps_gray) {
+    Canvas c(8, 8);
+    const int adj = buildStack(c, 100);
+    c.layer(adj).adjustType = "curves";
+    c.layer(adj).adjustCurve = "rgb;0,255;255,0";
+    Surface out;
+    c.composite(out);
+    CHECK_EQ(out.get(4, 4).r, 155);  // 255-100
+    CHECK_EQ(out.get(4, 4).g, 155);
+    CHECK_EQ(out.get(4, 4).b, 155);
+    CHECK_EQ(out.get(4, 4).a, 255);
+}
+
+// V+2 curves: per-channel mode isolates the channel, and the ORA
+// round trip keeps adjust-curve verbatim + working.
+TEST(curves_channel_and_ora_roundtrip) {
+    Canvas c(8, 8);
+    const int adj = buildStack(c, 100);
+    c.layer(adj).adjustType = "curves";
+    c.layer(adj).adjustCurve = "r;0,255;255,0";
+    Surface out;
+    c.composite(out);
+    CHECK_EQ(out.get(4, 4).r, 155);  // red inverted...
+    CHECK_EQ(out.get(4, 4).g, 100);  // ...green untouched...
+    CHECK_EQ(out.get(4, 4).b, 100);  // ...blue untouched.
+    const std::string path = "/tmp/openclip_test_curves.ora";
+    std::string err;
+    if (!openclip::saveOra(c, path, err)) {
+        std::printf("  save failed: %s\n", err.c_str());
+        std::fflush(stdout);
+        CHECK(false);
+        return;
+    }
+    Canvas d;
+    if (!openclip::loadOra(d, path, err)) {
+        std::printf("  load failed: %s\n", err.c_str());
+        std::fflush(stdout);
+        CHECK(false);
+        std::remove(path.c_str());
+        return;
+    }
+    std::remove(path.c_str());
+    CHECK(d.layerCount() >= 2);
+    CHECK_EQ(d.layer(1).adjustType, std::string("curves"));
+    CHECK_EQ(d.layer(1).adjustCurve, std::string("r;0,255;255,0"));
+    Surface re;
+    d.composite(re);
+    CHECK(sameOut(out, re));
+}

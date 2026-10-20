@@ -38,6 +38,10 @@ public:
 
     bool canUndo() const { return !done_.empty(); }
     bool canRedo() const { return !undone_.empty(); }
+    // V+2: committed-stroke depth (lets the shim pair a pending cel move
+    // with the exact history depth it was recorded at — exact LIFO
+    // against interleaved pixel ops, ARCHITECTURE.md "V+2 additions").
+    std::size_t undoDepth() const { return done_.size(); }
     bool undo(Canvas& c);
     bool redo(Canvas& c);
     void clear();

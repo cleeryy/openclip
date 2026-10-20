@@ -4,6 +4,7 @@
 #define OPENCLIP_CANVAS_H
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,6 +39,10 @@ struct Layer {
     std::string adjustType;
     double adjustAmount = 0.0;
     std::string adjustStops;
+    // V+2: curves descriptor canonical spec ("channel;i,o;...", see
+    // filters.h parseCurvesDescriptor). Only read when adjustType is
+    // "curves". Plain data like the M8 fields.
+    std::string adjustCurve;
 
     // V+1: text layer fiche (ARCHITECTURE.md "V+1 additions"). Opaque
     // to the engine: stored from nSetLayerText JSON, round-tripped
@@ -56,6 +61,13 @@ struct Layer {
     std::string textColor;    // x-openclip-color #RRGGBB
     std::string textBox;      // x-openclip-box "x,y,w"
     bool hasText() const { return !textContent.empty(); }
+
+    // V+2: generic opaque fiche map (ARCHITECTURE.md "V+2 additions",
+    // nSetLayerMeta). Keys are restricted shim-side to
+    // "x-openclip-[a-z0-9-]*"; values are opaque strings (<= 4 KiB).
+    // Persisted verbatim as ORA <layer> attrs, reloaded the same way.
+    // Plain data: survives resize/copy/ORA like the M8/V+1 fiches.
+    std::map<std::string, std::string> meta;
 
     // M6: vector layer state. isVector layers store resolution-
     // independent paths (vectorData) and rasterize them at composite

@@ -17,6 +17,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -91,6 +92,18 @@ import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.BrushHelpDialog
 import dev.openclip.ui.GesturesHelpDialog
 import dev.openclip.ui.LayerPanel
+import dev.openclip.ui.AutosavePanel
+import dev.openclip.ui.BdToolsPanel
+import dev.openclip.ui.BezierPanel
+import dev.openclip.ui.CopyPastePanel
+import dev.openclip.ui.CurvesPanel
+import dev.openclip.ui.GifPanel
+import dev.openclip.ui.GuidesPanel
+import dev.openclip.ui.NavigatorPanel
+import dev.openclip.ui.PagesPanel
+import dev.openclip.ui.SvgPanel
+import dev.openclip.ui.TransformPanel
+import dev.openclip.ui.WebtoonPanel
 import dev.openclip.ui.MaterialsRow
 import dev.openclip.ui.PinnedBrushBar
 import dev.openclip.ui.ChromeMenuBar
@@ -405,7 +418,14 @@ class MainActivity : ComponentActivity() {
                     if (ok) {
                         copyFromTo(ctx, dst, uri)
                         dst.delete()
-                        status.value = ctx.getString(R.string.export_ok)
+                        // V+2: layered PSD reports its approximation
+                        // count (0 = pixel-faithful, status stays clean).
+                        val approx = if (fmt == "psd") surface.psdApproxCount() else 0
+                        status.value = if (approx > 0) {
+                            ctx.getString(R.string.v2_psd_approx, approx)
+                        } else {
+                            ctx.getString(R.string.export_ok)
+                        }
                     } else {
                         status.value = ctx.getString(R.string.export_failed)
                     }
@@ -581,6 +601,47 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // V+2 long exports (GIF/webtoon/SVG): panels render to cache,
+        // one SAF hop per file (mime + suggested name hoisted here).
+        val pendingExportMime = remember { mutableStateOf("image/gif") }
+        val pendingExportFile = remember { mutableStateOf<java.io.File?>(null) }
+        val createExportFile = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream")
+        ) { uri: Uri? ->
+            val f = pendingExportFile.value
+            pendingExportFile.value = null
+            if (uri != null && f != null && f.exists()) {
+                try {
+                    ctx.contentResolver.openOutputStream(uri)?.use { o ->
+                        f.inputStream().use { i -> i.copyTo(o) }
+                        status.value = ctx.getString(R.string.export_ok)
+                    } ?: run {
+                        status.value = ctx.getString(R.string.export_failed)
+                    }
+                } catch (_: Exception) {
+                    status.value = ctx.getString(R.string.export_failed)
+                } finally {
+                    try {
+                        f.delete()
+                    } catch (_: Exception) {
+                    }
+                }
+            } else if (uri != null) {
+                status.value = ctx.getString(R.string.export_failed)
+            }
+        }
+        fun offerExportFile(f: java.io.File, mime: String) {
+            pendingExportMime.value = mime
+            pendingExportFile.value = f
+            createExportFile.launch("openclip-${System.currentTimeMillis()}")
+        }
+
+        // V+2 autosave (opt-in, local only, never mid-stroke).
+        val autosaveOn = remember { mutableStateOf(false) }
+        val autosaveMin = remember { mutableStateOf(5) }
+        val autosaveLast = remember { mutableStateOf("") }
+        val autosaveLastMs = remember { mutableStateOf(0L) }
+
         fun currentPose(): WorkspacePose = WorkspacePose(
             dockOpen = dockOpen.value,
             dockTab = dockTab.value,
@@ -592,7 +653,7 @@ class MainActivity : ComponentActivity() {
 
         fun applyPose(name: String, pose: WorkspacePose) {
             dockOpen.value = pose.dockOpen
-            dockTab.value = pose.dockTab.coerceIn(0, 1)
+            dockTab.value = pose.dockTab.coerceIn(0, 2)
             showTimeline.value = pose.timelineOpen
             navMode.value = pose.navMode
             activeSurface()?.navigateMode = pose.navMode
@@ -970,6 +1031,42 @@ class MainActivity : ComponentActivity() {
             savePickRef.value?.invoke(tab.name + ".ora")
         }
 
+        // V+2 autosave tick (15 s poll, opt-in, local only): writes the
+        // active doc (ORA) when the policy passes — enabled, interval
+        // elapsed, no open stroke. Multipage projects piggyback on the
+        // PagesPanel project.json writes (same tick, same gate).
+        androidx.compose.runtime.LaunchedEffect(autosaveOn.value, autosaveMin.value) {
+            while (true) {
+                kotlinx.coroutines.delay(15_000)
+                try {
+                    val id = activeDocId.value ?: continue
+                    if (!autosaveOn.value) continue
+                    val surf = surfaces[id] ?: continue
+                    if (surf.isDrawingNow()) continue
+                    val now = SystemClock.uptimeMillis()
+                    if (!dev.openclip.ui.AutosavePolicy.shouldSave(
+                            autosaveOn.value, autosaveMin.value,
+                            autosaveLastMs.value, now, false
+                        )
+                    ) continue
+                    saveDoc(id) { ok ->
+                        if (ok) {
+                            autosaveLastMs.value = SystemClock.uptimeMillis()
+                            val stamp = java.text.SimpleDateFormat(
+                                "HH:mm", java.util.Locale.getDefault()
+                            ).format(java.util.Date())
+                            autosaveLast.value =
+                                ctx.getString(R.string.v2_autosave_saved, stamp)
+                            dev.openclip.ui.V2TestHooks.lastAutosave = "wrote"
+                        } else {
+                            dev.openclip.ui.V2TestHooks.lastAutosave = "failed"
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+
         fun closeNow(id: String) {
             if (pendingTabId.value == id) pendingTabId.value = null
             if (preselectId.value == id) preselectId.value = null
@@ -1189,6 +1286,13 @@ class MainActivity : ComponentActivity() {
                         label = stringResource(R.string.window_tones),
                         onClick = {
                             dockTab.value = 1
+                            dockOpen.value = true
+                        }
+                    ),
+                    StudioMenuItem(
+                        label = stringResource(R.string.window_bd),
+                        onClick = {
+                            dockTab.value = 2
                             dockOpen.value = true
                         }
                     ),
@@ -1851,26 +1955,51 @@ class MainActivity : ComponentActivity() {
                         showTitleWhenCollapsed = false,
                         toggleTag = "dock-toggle",
                         headerExtra = {
-                            FilterChip(
-                                selected = dockTab.value == 0,
-                                onClick = { dockTab.value = 0 },
-                                label = {
-                                    Text(
-                                        stringResource(R.string.window_studio),
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            )
-                            FilterChip(
-                                selected = dockTab.value == 1,
-                                onClick = { dockTab.value = 1 },
-                                label = {
-                                    Text(
-                                        stringResource(R.string.window_tones),
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            )
+                            // V+2: 3 chips overflow the 290dp header —
+                            // the tab row scrolls so the collapse
+                            // toggle is never pushed off-screen (silent
+                            // no-op clicks wedged the dock open).
+                            androidx.compose.foundation.layout.Row(
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .horizontalScroll(
+                                        androidx.compose.foundation.rememberScrollState()
+                                    ),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FilterChip(
+                                    selected = dockTab.value == 0,
+                                    onClick = { dockTab.value = 0 },
+                                    label = {
+                                        Text(
+                                            stringResource(R.string.window_studio),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                )
+                                FilterChip(
+                                    selected = dockTab.value == 1,
+                                    onClick = { dockTab.value = 1 },
+                                    label = {
+                                        Text(
+                                            stringResource(R.string.window_tones),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                )
+                                FilterChip(
+                                    selected = dockTab.value == 2,
+                                    onClick = { dockTab.value = 2 },
+                                    label = {
+                                        Text(
+                                            stringResource(R.string.v2_bd_tab),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("dock-tab-bd")
+                                )
+                            }
                         }
                     ) {
                         Column(
@@ -1899,7 +2028,7 @@ class MainActivity : ComponentActivity() {
                                     surface = surface,
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                            } else {
+                            } else if (dockTab.value == 1) {
                                 ReferencePanel(
                                     surface = surface,
                                     onImportGlb = { openGlb.launch(arrayOf("*/*")) },
@@ -1909,6 +2038,96 @@ class MainActivity : ComponentActivity() {
                                 MaterialsRow(
                                     surface = surface,
                                     onWebdav = { showWebdav.value = true },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                // V+2 Comic tab: cases/bulles/vitesse,
+                                // transfo, collage, Bézier, guides,
+                                // exports longs, pages, navigateur,
+                                // autosave, courbes (spec docs/v2-bd-export).
+                                val v2key = activeDocId.value ?: "solo"
+                                BdToolsPanel(
+                                    surface = surface,
+                                    docKey = v2key,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                TransformPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                CopyPastePanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                BezierPanel(
+                                    surface = surface,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                GuidesPanel(
+                                    surface = surface,
+                                    docKey = v2key,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                CurvesPanel(
+                                    surface = surface,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                GifPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    fps = clipFps.value,
+                                    onExportFile = { f, mime ->
+                                        offerExportFile(f, mime)
+                                    },
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                WebtoonPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    reading = "ltr",
+                                    onExportFile = { f, mime ->
+                                        offerExportFile(f, mime)
+                                    },
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                SvgPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    onExportFile = { f, mime ->
+                                        offerExportFile(f, mime)
+                                    },
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                PagesPanel(
+                                    surface = surface,
+                                    docKey = v2key,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                NavigatorPanel(
+                                    surface = surface,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                AutosavePanel(
+                                    enabled = autosaveOn.value,
+                                    onEnabled = { autosaveOn.value = it },
+                                    intervalMin = autosaveMin.value,
+                                    onInterval = { autosaveMin.value = it },
+                                    lastWrite = autosaveLast.value,
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             }

@@ -13,7 +13,12 @@ enum class BlendMode : std::uint8_t {
     Screen,
     Overlay,
     Add,
-    SoftLight
+    SoftLight,
+    // V+2 additions (ARCHITECTURE.md "V+2 additions", clean-room).
+    HardLight,
+    Difference,
+    Color,
+    Luminosity
 };
 
 // Parse an OpenRaster / SVG blend name ("svg:multiply", "svg:screen", ...).

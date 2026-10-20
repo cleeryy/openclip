@@ -7,6 +7,8 @@
 
 #include "openclip/canvas.h"
 
+#include "openclip/blend.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -190,7 +192,8 @@ bool loadPsd(Canvas& c, const std::string& path, std::string& error) {
     return true;
 }
 
-bool savePsd(const Canvas& c, const std::string& path, std::string& error) {
+bool savePsd(const Canvas& c, const std::string& path, std::string& error,
+             int* approxOut) {
     Surface comp;
     c.composite(comp);
     const int w = comp.width(), h = comp.height();
@@ -198,23 +201,10 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error) {
         error = "psd: canvas empty";
         return false;
     }
-    // Use 4 channels (RGB + alpha) to round-trip transparency honestly.
-    const std::uint16_t channels = 4;
-    std::vector<std::uint8_t> out;
-    out.reserve(64);
-    out.insert(out.end(), {'8', 'B', 'P', 'S'});
-    wr16(out, 1);        // version
-    // Reserved 6 zero bytes.
-    for (int i = 0; i < 6; ++i) out.push_back(0);
-    wr16(out, channels);
-    wr32(out, static_cast<std::uint32_t>(h));
-    wr32(out, static_cast<std::uint32_t>(w));
-    wr16(out, 8);        // depth
-    wr16(out, 3);        // RGB mode
-    wr32(out, 0);        // Color Mode Data length
-    wr32(out, 0);        // Image Resources length
-    wr32(out, 0);        // Layer and Mask length
-    wr16(out, 0);        // compression: raw
+    if (w > 30000 || h > 30000) {
+        error = "psd: dimensions out of range";
+        return false;
+    }
     // Un-premultiply composite into straight planar channels.
     const auto& px = comp.bytes();
     std::vector<std::uint8_t> ch[4];
@@ -240,6 +230,209 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error) {
         ch[2][i] = stra[2];
         ch[3][i] = a;
     }
+
+    // V+2 layered records. Eligibility: pixels flow untouched through
+    // the normal path (text/meta fiches are pixel-neutral, so fiche
+    // layers stay eligible; groups, masks, clips, adjustments and
+    // vector layers merge into the base record).
+    struct Rec {
+        std::string name;
+        bool visible;
+        std::uint8_t opacity;  // 0..255
+        const char* key;       // 4-char blend key
+        const std::vector<std::uint8_t>* planes[4];  // R,G,B,A straight
+        std::vector<std::uint8_t> owned[4];  // filled for merged base
+    };
+    auto blendKey = [](BlendMode m, bool& mapped) -> const char* {
+        mapped = true;
+        switch (m) {
+            case BlendMode::Normal:
+                return "norm";
+            case BlendMode::Multiply:
+                return "mul ";
+            case BlendMode::Screen:
+                return "scrn";
+            case BlendMode::Overlay:
+                return "over";
+            case BlendMode::Add:
+                return "lddg";  // linear dodge (add)
+            case BlendMode::SoftLight:
+                return "sSoft";
+            default:
+                mapped = false;  // hard-light/difference/color/
+                                 // luminosity -> norm + counted
+                return "norm";
+        }
+    };
+    std::vector<Rec> recs;
+    int approx = 0;
+    Canvas base;
+    bool needBase = false;
+    for (std::size_t i = 0; i < c.layerCount(); ++i) {
+        const Layer& l = c.layer(i);
+        const bool eligible = !l.isGroup && !l.hasMask && !l.clipped &&
+                              l.adjustType.empty() && !l.isVector;
+        if (!eligible) {
+            needBase = true;
+            ++approx;  // merged into the base record (visible count)
+            continue;
+        }
+        bool mapped = true;
+        const char* key = blendKey(l.blend, mapped);
+        if (!mapped) ++approx;
+        Rec r;
+        r.name = l.name.substr(0, 31);
+        if (r.name.empty()) r.name = "Layer";
+        r.visible = l.visible;
+        float op = l.opacity < 0 ? 0 : (l.opacity > 1 ? 1 : l.opacity);
+        r.opacity = static_cast<std::uint8_t>(op * 255 + 0.5f);
+        r.key = key;
+        // Straight (un-premultiplied) planar pixels of the raw surface.
+        for (int k = 0; k < 4; ++k) r.owned[k].assign(
+            static_cast<std::size_t>(w) * h, 0);
+        const auto& lb = l.surface.bytes();
+        if (lb.size() == static_cast<std::size_t>(w) * h * 4) {
+            for (std::size_t p = 0; p < static_cast<std::size_t>(w) * h;
+                 ++p) {
+                const std::uint8_t a = lb[p * 4 + 3];
+                std::uint8_t s3[3] = {0, 0, 0};
+                if (a == 255) {
+                    s3[0] = lb[p * 4 + 0];
+                    s3[1] = lb[p * 4 + 1];
+                    s3[2] = lb[p * 4 + 2];
+                } else if (a != 0) {
+                    for (int k = 0; k < 3; ++k) {
+                        int v = (lb[p * 4 + k] * 255 + a / 2) / a;
+                        s3[k] = static_cast<std::uint8_t>(v > 255 ? 255
+                                                                 : v);
+                    }
+                }
+                r.owned[0][p] = s3[0];
+                r.owned[1][p] = s3[1];
+                r.owned[2][p] = s3[2];
+                r.owned[3][p] = a;
+            }
+        }
+        for (int k = 0; k < 4; ++k) r.planes[k] = &r.owned[k];
+        recs.push_back(std::move(r));
+    }
+    if (needBase) {
+        // Composite ONLY the non-eligible layers into the base record.
+        base.resize(w, h);
+        for (std::size_t i = 0; i < c.layerCount(); ++i) {
+            const Layer& l = c.layer(i);
+            const bool eligible = !l.isGroup && !l.hasMask && !l.clipped &&
+                                  l.adjustType.empty() && !l.isVector;
+            if (!eligible) base.adoptLayer(l);
+        }
+        Surface bcomp;
+        base.composite(bcomp);
+        const auto& bb = bcomp.bytes();
+        Rec r;
+        r.name = "Merged approximations";
+        r.visible = true;
+        r.opacity = 255;
+        r.key = "norm";
+        for (int k = 0; k < 4; ++k)
+            r.owned[k].assign(static_cast<std::size_t>(w) * h, 0);
+        if (bb.size() == static_cast<std::size_t>(w) * h * 4) {
+            for (std::size_t p = 0; p < static_cast<std::size_t>(w) * h;
+                 ++p) {
+                const std::uint8_t a = bb[p * 4 + 3];
+                std::uint8_t s3[3] = {0, 0, 0};
+                if (a == 255) {
+                    s3[0] = bb[p * 4 + 0];
+                    s3[1] = bb[p * 4 + 1];
+                    s3[2] = bb[p * 4 + 2];
+                } else if (a != 0) {
+                    for (int k = 0; k < 3; ++k) {
+                        int v = (bb[p * 4 + k] * 255 + a / 2) / a;
+                        s3[k] = static_cast<std::uint8_t>(v > 255 ? 255
+                                                                 : v);
+                    }
+                }
+                r.owned[0][p] = s3[0];
+                r.owned[1][p] = s3[1];
+                r.owned[2][p] = s3[2];
+                r.owned[3][p] = a;
+            }
+        }
+        for (int k = 0; k < 4; ++k) r.planes[k] = &r.owned[k];
+        recs.insert(recs.begin(), std::move(r));  // base first (bottom)
+    }
+
+    std::vector<std::uint8_t> out;
+    out.reserve(64);
+    out.insert(out.end(), {'8', 'B', 'P', 'S'});
+    wr16(out, 1);        // version
+    for (int i = 0; i < 6; ++i) out.push_back(0);  // reserved
+    const std::uint16_t channels = 4;
+    wr16(out, channels);
+    wr32(out, static_cast<std::uint32_t>(h));
+    wr32(out, static_cast<std::uint32_t>(w));
+    wr16(out, 8);        // depth
+    wr16(out, 3);        // RGB mode
+    wr32(out, 0);        // Color Mode Data length
+    wr32(out, 0);        // Image Resources length
+
+    // Layer and mask information section.
+    std::vector<std::uint8_t> layerInfo;
+    const std::int16_t count = static_cast<std::int16_t>(recs.size());
+    layerInfo.push_back(static_cast<std::uint8_t>((count >> 8) & 0xff));
+    layerInfo.push_back(static_cast<std::uint8_t>(count & 0xff));
+    const std::size_t plane = static_cast<std::size_t>(w) * h;
+    std::vector<std::vector<std::uint8_t>> channelData;
+    for (auto& r : recs) {
+        wr32(layerInfo, 0);                       // top
+        wr32(layerInfo, 0);                       // left
+        wr32(layerInfo, static_cast<std::uint32_t>(h));  // bottom
+        wr32(layerInfo, static_cast<std::uint32_t>(w));  // right
+        wr16(layerInfo, 4);                       // R,G,B,transparency
+        static const std::int16_t ids[4] = {0, 1, 2, -1};
+        for (int k = 0; k < 4; ++k) {
+            wr16(layerInfo, static_cast<std::uint16_t>(ids[k]));
+            wr32(layerInfo, static_cast<std::uint32_t>(2 + plane));
+        }
+        layerInfo.insert(layerInfo.end(), {'8', 'B', 'I', 'M'});
+        for (int k = 0; k < 4; ++k)
+            layerInfo.push_back(static_cast<std::uint8_t>(r.key[k]));
+        layerInfo.push_back(r.opacity);
+        layerInfo.push_back(0);                        // clipping: base
+        layerInfo.push_back(r.visible ? 0 : 2);        // flags: bit1 hidden
+        layerInfo.push_back(0);                        // filler
+        // Extra data: mask len(0) + ranges len(0) + Pascal name.
+        std::vector<std::uint8_t> extra;
+        wr32(extra, 0);
+        wr32(extra, 0);
+        const std::string& nm = r.name;
+        extra.push_back(static_cast<std::uint8_t>(nm.size() & 0xff));
+        extra.insert(extra.end(), nm.begin(), nm.end());
+        if (((1 + nm.size()) & 1) != 0) extra.push_back(0);  // even pad
+        wr32(layerInfo, static_cast<std::uint32_t>(extra.size()));
+        layerInfo.insert(layerInfo.end(), extra.begin(), extra.end());
+        // Channel image data (raw, planar, straight).
+        for (int k = 0; k < 4; ++k) {
+            std::vector<std::uint8_t> cd;
+            cd.reserve(2 + plane);
+            wr16(cd, 0);  // compression: raw
+            cd.insert(cd.end(), r.planes[k]->begin(),
+                      r.planes[k]->end());
+            channelData.push_back(std::move(cd));
+        }
+    }
+    // [layer info length][count+records][channel data][global mask].
+    std::vector<std::uint8_t> layerBlock;
+    layerBlock.insert(layerBlock.end(), layerInfo.begin(), layerInfo.end());
+    for (auto& cd : channelData)
+        layerBlock.insert(layerBlock.end(), cd.begin(), cd.end());
+    std::vector<std::uint8_t> lm;
+    wr32(lm, static_cast<std::uint32_t>(layerBlock.size()));
+    lm.insert(lm.end(), layerBlock.begin(), layerBlock.end());
+    wr32(lm, 0);  // global mask info length
+    wr32(out, static_cast<std::uint32_t>(lm.size()));
+    out.insert(out.end(), lm.begin(), lm.end());
+
+    wr16(out, 0);        // image data compression: raw
     for (int k = 0; k < channels; ++k)
         out.insert(out.end(), ch[k].begin(), ch[k].end());
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
@@ -252,6 +445,122 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error) {
     if (!f) {
         error = "psd: short write on " + path;
         return false;
+    }
+    if (approxOut) *approxOut = approx;
+    return true;
+}
+
+// Diagnostic reader for our own layered layout: layer record names
+// bottom-to-top. Tolerant walker (lengths drive every skip).
+bool psdLayerNames(const std::string& path, std::vector<std::string>& names,
+                   std::string& error) {
+    names.clear();
+    std::vector<std::uint8_t> d;
+    if (!readFile(path, d, error)) return false;
+    if (d.size() < 26 + 12 || std::memcmp(d.data(), "8BPS", 4) != 0) {
+        error = "psd: not a PSD file";
+        return false;
+    }
+    std::size_t off = 26;
+    const std::uint32_t cm = rd32(d.data() + off);
+    off += 4;
+    if (cm > d.size() - off) {
+        error = "psd: color mode overruns file";
+        return false;
+    }
+    off += cm;
+    if (d.size() - off < 4) {
+        error = "psd: truncated image resources";
+        return false;
+    }
+    const std::uint32_t res = rd32(d.data() + off);
+    off += 4;
+    if (res > d.size() - off) {
+        error = "psd: image resources overruns file";
+        return false;
+    }
+    off += res;
+    if (d.size() - off < 4) {
+        error = "psd: truncated layer section";
+        return false;
+    }
+    const std::uint32_t lm = rd32(d.data() + off);
+    off += 4;
+    if (lm > d.size() - off || lm < 2) {
+        error = "psd: layer section overruns file";
+        return false;
+    }
+    const std::size_t lmEnd = off + lm;
+    if (d.size() - off < 4) {
+        error = "psd: truncated layer info";
+        return false;
+    }
+    const std::uint32_t liLen = rd32(d.data() + off);
+    off += 4;
+    if (liLen > lmEnd - off || liLen < 2) {
+        error = "psd: layer info overruns file";
+        return false;
+    }
+    const std::size_t liEnd = off + liLen;
+    std::int16_t count = static_cast<std::int16_t>(rd16(d.data() + off));
+    off += 2;
+    if (count < 0) count = -count;
+    for (int i = 0; i < count; ++i) {
+        if (liEnd - off < 16 + 2 + 12 + 4) {
+            error = "psd: truncated layer record";
+            return false;
+        }
+        off += 16;  // rect (full-canvas in our layout)
+        const std::uint16_t nch = rd16(d.data() + off);
+        off += 2;
+        if (nch > 8 || liEnd - off < static_cast<std::size_t>(nch) * 6) {
+            error = "psd: bad channel count";
+            return false;
+        }
+        std::vector<std::uint32_t> chLen(nch);
+        for (int k = 0; k < nch; ++k) {
+            off += 2;  // channel id
+            chLen[k] = rd32(d.data() + off);
+            off += 4;
+            (void)chLen[k];
+        }
+        if (liEnd - off < 12) {
+            error = "psd: truncated blend record";
+            return false;
+        }
+        off += 12;  // sig + key + opacity + clipping + flags + filler
+        if (liEnd - off < 4) {
+            error = "psd: truncated extra data";
+            return false;
+        }
+        const std::uint32_t extra = rd32(d.data() + off);
+        off += 4;
+        if (extra > liEnd - off) {
+            error = "psd: extra data overruns file";
+            return false;
+        }
+        const std::size_t extraEnd = off + extra;
+        if (extraEnd - off < 8) {
+            error = "psd: extra data too short";
+            return false;
+        }
+        off += 8;  // mask len + ranges len (both 0 in our layout)
+        if (off >= extraEnd) {
+            error = "psd: missing layer name";
+            return false;
+        }
+        const std::uint8_t nl = d[off++];
+        if (extraEnd - off < nl) {
+            error = "psd: layer name overruns extra";
+            return false;
+        }
+        names.emplace_back(reinterpret_cast<const char*>(d.data() + off),
+                           nl);
+        // Channel image data lives AFTER all records (not interleaved),
+        // so consecutive record headers walk cleanly; lengths are
+        // trusted to our own raw layout here (loadPsd validates the
+        // merged view independently).
+        off = extraEnd;
     }
     return true;
 }

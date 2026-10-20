@@ -357,3 +357,134 @@ spec docs/v1-selection-texte-gomme.md):
   frame into a DUPLICATED frame with the original frame deleted
   (frame count preserved; the load resets undo + flattens layers, both
   announced in the UI — same M4 load contract as everywhere else).
+
+V+2 additions (defined 2026-10-20, BD/manga + long-export round —
+spec docs/v2-bd-export.md):
+
+- Frame rhythm: `nMoveCel(handle, from, to): Boolean` — reorder cels
+  (erase+insert; `cur` follows the moved cel; out-of-range = false).
+  Undoable as ONE entry: the shim keeps a pending move stack
+  `{frameAfter, histDepthAfter, from, to}` (post-move frame + that
+  frame's history depth); `nUndo` applies the inverse move when the
+  pending top matches the current frame AND the frame history depth
+  is back to the recorded depth (exact LIFO against interleaved pixel
+  ops — a pixel op after the move is undone first, then the move). Pixel ops never clear the pending move; switching frames
+  defers it until return. Redo of a move is not offered (honest
+  limit). `nSetCelHold(handle, index, frames): Boolean` — per-cel
+  exposure multiplier 1..32 (default 1, out-of-range = false); pure
+  meta, never in undo, read by playback timers app-side and by
+  `nExportGif` (GCE delay = round(hold * 100 / fps)). `nSetOnionCount
+  (handle, before, after): Boolean` — real neighbor counts 0..4 each
+  (out-of-range = false); `nCompositeInto` draws up to N previous/next
+  composites tinted under the current frame. `nSetOnion(p, n, s)`
+  stays valid and maps to counts 0/1 (backward compatible).
+- Selection transform: `nSetSelectionMask(handle, path|null): Boolean`
+  — uploads the app-side V+1 mask into the engine (PNG file,
+  straight alpha used; exact canvas-size match required, false +
+  previous mask kept otherwise; null/empty clears). Session-global
+  (like the mask target), cleared on frame add/delete/switch/load.
+  `nSelectionBlit(handle, json): Boolean` — transforms the masked
+  content of the ACTIVE raster layer. JSON
+  `{dx,dy,scale,angle,mode:"move|free|mesh",mesh:[[x,y]x9]}` (unknown
+  keys ignored, M3 rule; identity defaults; `mesh` = 3x3 control
+  offsets over the mask bbox, used only in mesh mode). Semantics:
+  masked pixels are read, cleared in place, resampled (move =
+  nearest translate; free = scale+rotate about the mask bbox center
+  then translate, bilinear; mesh = per-cell bilinear warp, bilinear)
+  and composited back source-over. Undoable via full-layer tile
+  snapshots (filter pattern). False + layer untouched when no mask,
+  bad layer, or malformed JSON.
+- Generic layer fiche: `nSetLayerMeta(handle, index, key, value|null):
+  Boolean` — ONE generic symbol instead of N fiche symbols (decided
+  here per spec §1.4). Key must match `x-openclip-[a-z0-9-]*` (else
+  false); value ≤ 4 KiB (else false); null/empty clears. Stored on the
+  top-level layer (`Layer.meta` map, plain data like the M8/V+1
+  fiches: survives resize/copy), persisted VERBATIM as ORA `<layer>`
+  attrs, reloaded the same way (unknown `x-openclip-*` attrs on load
+  are kept into `meta` too, so third-party round trips preserve
+  fiches). `nLayerState` gains a `"meta"` object. Panels/bulles/speed
+  fiches (`x-openclip-panel`, `-order`, `-bg`, `-tone`, `-density`,
+  `-bubble`, `-bubble-text`, `-speed`) and doc reading
+  (`x-openclip-reading` on canvas → ORA root attr) flow through this
+  channel — zero extra symbols.
+- Guides: NO new symbol. `nSetRulers` JSON grows a `"guides"` key:
+  `[{x}|{y}|{cx,cy,r}]` (vertical / horizontal / concentric
+  guides; unknown shapes ignored, M3 rule; empty/absent clears).
+  Snap is engine-side (`openclip/guides.h::snapGuides`, tolerance
+  2 px): input pipeline order is SMOOTH THEN SNAP (stabilize first,
+  guides snap after — the existing M6 ellipse/line projection keeps
+  running before smoothing; guides apply to the smoothed point so a
+  guide within tolerance wins). V+2 Bézier = densification app-side,
+  0 JNI (polylines densified along Catmull-Rom, replace =
+  `nUndoVector` + `nAppendVectorPath`, 1 undo).
+- GIF export: `nExportGif(handle, path, json): Boolean` — writes an
+  ANIMATED GIF89a from the clip's frames (internal composite loop, no
+  app-side pulling). JSON `{loop, maxWidth, dither, fps?}`: `loop`
+  0 = play once (no NETSCAPE ext), -1 = infinite (ext 0), N > 1 = N
+  plays; `maxWidth` (default 1024, box-downscale, aspect kept);
+  `dither` bool (default true: ordered Bayer-8 on the median-cut
+  palette); optional `fps` (default 12, the M7 app-side default —
+  GCE delay_cs = round(hold * 100 / fps)). Palette = median-cut 256
+  from scratch; LZW from scratch (GIF patents expired 2003–2004).
+  Frames with 0 size / bad path = false, clip untouched. APNG is
+  explicitly deferred (V+2-bis) — GIF + WebM cover short animation.
+- Curves adjustment: NO new symbol. `nSetLayerAdjustment` JSON type
+  `"curves"`: `{"type":"curves","points":[[in,out]x1..16],
+  "channel":"rgb|r|g|b"}` → 256-entry LUT (linear interpolation,
+  endpoints clamped, inputs sorted). Stored in `Layer.adjustCurve`
+  (`"channel;i,o;…"`), ORA round trip as `adjust-curve` attr,
+  surfaced in `nLayerState`. Composite-time, non-destructive, same
+  mask/clip/opacity path as M8. Unknown channel → rgb; <1 or >16
+  points → identity descriptor kept verbatim (honest no-op, still
+  round trips).
+- Extra blends: NO new symbol, NO UI change (the LayerPanel list is
+  the single source). `blend.h` grows `HardLight`, `Difference`,
+  `Color`, `Luminosity` (clean-room, from-scratch HSL round trip for
+  color/luminosity). Names: `hard-light`, `difference`, `color`,
+  `luminosity` (bare or `svg:`-prefixed, M5 rule). ORA keeps the
+  `svg:` names (readers ignoring them degrade to Normal — same as
+  M5). Invariants locked by engine tests (difference self = black,
+  color keeps dst luma, luminosity keeps src luma…).
+- Layered PSD: NO new symbol, `nSaveDocument(…, "psd")` unchanged in
+  signature. `savePsd` writes real layer records for ELIGIBLE
+  top-level layers (raster, no mask/clip/adjust/vector/fiche):
+  name (truncated 31 chars), visibility flag, opacity byte, blend key
+  mapped on the EXPLICIT table norm→`norm`, multiply→`mul `,
+  screen→`scrn`, overlay→`over`, add→`lddg`, soft-light→`sSoft`;
+  any other blend → `norm` + counted as approximated. Everything
+  else (groups, masked/clipped/vector/adjust/text layers) is merged
+  into ONE bottom `Merged approximations` record + counted. Raw
+  planar RGBA per layer, then the merged composite (baseline
+  readers keep working — our own `loadPsd` still reads the merged
+  view). The approximation count is exposed via the new
+  `nPsdApproxCount(handle): Int` (session sticky from the last save;
+  0 = pixel-faithful). Groups/masks export stays an honest
+  flatten — full fidelity is V+3 work.
+- The rest of V+2 (§1 cases/bulles/vitesse, §2 lecture/multipage,
+  §3.1 webtoon, §3.3 SVG, §4.2 copier/coller, §5.3 navigateur, §5.4
+  autosave) is 0 JNI by construction: cases/bulles = vector paths
+  (`kind` `"panel"`/`"bubble"` is an app-side convention, the engine
+  treats any non-`eraser-stroke` kind as ink) + `nApplyTone` under
+  polygonal masks (pattern V+1 §1.1/§1.5: composite before/after,
+  app-side mix, `nLoadDocument` into a duplicated frame — reset-undo
+  + flatten announced); multipage = dossier `.ocpages/` (ORA pages +
+  `project.json` v1 + `thumbs/`, one page loaded at a time);
+  webtoon = `nFrameCompositeInto`/`nCompositeInto` pulls + vertical
+  concat + slicing app-side; SVG = `nLayerState` introspection +
+  path serialization app-side; copier/coller = composite pull +
+  `nAddLayer` + `nBlitPngIntoLayer` (+ alpha-erase under mask for
+  couper), clipboard in `DocRegistry` (session-only); navigateur =
+  downscaled composite pull + overlay tap-seek; autosave = opt-in
+  local ORA + `project.json` writes, never mid-stroke.
+
+V+2 getter (decided here per spec §3.3/§4.3 "à lever avant code"): a
+single read-only introspection symbol, no pixel path —
+`nVectorPaths(handle, index): String` returns the vector layer's
+paths as `{"paths":[{"pts":[[x,y,p]...],"widths":[...],
+"kind":"stroke"}]}` (empty object on bad index/non-vector layer).
+SVG export (§3.3) and Bézier point editing (§4.3) read through it;
+writes keep using `nUndoVector` + `nAppendVectorPath` (a replace =
+clear-all + re-add: the pre-edit snapshot is consumed, so one vector
+undo empties the layer and the original only comes back via an
+app-side re-commit — documented deviation from the "1 undo"
+shorthand, surfaced honestly in the UI).

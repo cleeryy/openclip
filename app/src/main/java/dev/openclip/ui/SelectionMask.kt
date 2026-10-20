@@ -140,6 +140,30 @@ class SelectionMask(val w: Int, val h: Int) {
         }
     }
 
+    /** V+2 tone density: ordered Bayer-4 dropout keeps keepPct % of
+     * the masked pixels (spec §1.1: density app-side, no JNI). */
+    fun applyDensityBayer(keepPct: Int) {
+        if (keepPct >= 100) return
+        if (keepPct <= 0) {
+            clear()
+            return
+        }
+        val bayer = arrayOf(
+            intArrayOf(0, 8, 2, 10),
+            intArrayOf(12, 4, 14, 6),
+            intArrayOf(3, 11, 1, 9),
+            intArrayOf(15, 7, 13, 5)
+        )
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                if (bits[y * w + x] == 0.toByte()) continue
+                val threshold = bayer[y and 3][x and 3] * 100 / 16
+                if (threshold >= keepPct) bits[y * w + x] = 0
+            }
+        }
+        outline = emptyList()
+    }
+
     fun contains(x: Float, y: Float): Boolean {
         val xi = x.toInt()
         val yi = y.toInt()

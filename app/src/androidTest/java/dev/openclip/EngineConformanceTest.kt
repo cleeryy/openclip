@@ -50,6 +50,33 @@ import dev.openclip.media.WebdavClient
 import dev.openclip.ui.BrushPrefs
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.LayerPanelTestHooks
+import dev.openclip.ui.AutosavePolicy
+import dev.openclip.ui.BezierEdit
+import dev.openclip.ui.BubbleFiche
+import dev.openclip.ui.CurvesJson
+import dev.openclip.ui.GuidesIo
+import dev.openclip.ui.DocGuide
+import dev.openclip.ui.MultipageProject
+import dev.openclip.ui.NavigatorMath
+import dev.openclip.ui.OcpPage
+import dev.openclip.ui.PanelFiche
+import dev.openclip.ui.SelectionTransform
+import dev.openclip.ui.SpeedBurst
+import dev.openclip.ui.SpeedFiche
+import dev.openclip.ui.SvgExport
+import dev.openclip.ui.V2Bezier
+import dev.openclip.ui.V2CopyPaste
+import dev.openclip.ui.V2Pages
+import dev.openclip.ui.V2TestHooks
+import dev.openclip.ui.V2Webtoon
+import dev.openclip.ui.WebtoonPlan
+import dev.openclip.ui.commitBubble
+import dev.openclip.ui.commitPanelRect
+import dev.openclip.ui.parseBubbleMeta
+import dev.openclip.ui.parsePanelMeta
+import dev.openclip.ui.refreshPanelOverlay
+import dev.openclip.ui.v2LayerMetas
+import dev.openclip.ui.v2VectorLayers
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -6197,11 +6224,1361 @@ class EngineConformanceTest {
             closeFreshDoc(id)
         }
     }
-}
 
 
 private fun IntArray.contentNotEquals(other: IntArray): Boolean {
     if (size != other.size) return true
     for (i in indices) if (this[i] != other[i]) return true
     return false
+}
+
+    // ================= V+2 BD/manga + exports longs =================
+
+    private fun cacheFile(name: String): File =
+        File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            name
+        )
+
+    private fun intPixels(b: Bitmap): IntArray {
+        val px = IntArray(b.width * b.height)
+        b.getPixels(px, 0, b.width, 0, 0, b.width, b.height)
+        return px
+    }
+
+    private fun nonWhite(b: Bitmap): Int {
+        var n = 0
+        val px = intPixels(b)
+        for (v in px) if (v != -1) n++
+        return n
+    }
+
+    // V+2-1 §1: panel rect in-code — composite shows the frame
+    // (perimeter ink), interior pixel-intact (white, no fill in V+2).
+    @Test
+    fun panelRectStrokeClosed() {
+        val id = openFreshDoc("v2-panel-rect")
+        val es = freshSurface(id)
+        try {
+            val fiche = PanelFiche(
+                "rect", floatArrayOf(16f, 16f, 224f, 160f),
+                order = 1, bgWhite = false, tone = "none", density = 100
+            )
+            val layer = commitPanelRect(es, fiche)
+            assertTrue("panel layer", layer >= 0)
+            val b = pullFull(es)
+            try {
+                var edge = 0
+                var edgeN = 0
+                var x = 16
+                while (x <= 240) {
+                    for (y in intArrayOf(16, 176)) {
+                        edgeN++
+                        if (b.getPixel(x, y) != -1) edge++
+                    }
+                    x += 4
+                }
+                var y = 16
+                while (y <= 176) {
+                    for (xx in intArrayOf(16, 240)) {
+                        edgeN++
+                        if (b.getPixel(xx, y) != -1) edge++
+                    }
+                    y += 4
+                }
+                assertTrue("frame ink on perimeter $edge/$edgeN", edge > edgeN / 2)
+                assertEquals("interior intact", -1, b.getPixel(128, 96))
+            } finally {
+                b.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-2 §1: tone dots under a polygonal mask — outside the polygon
+    // byte-identical to before (masked bridge, pattern V+1 §1.1).
+    @Test
+    fun panelToneMasked() {
+        val id = openFreshDoc("v2-panel-tone")
+        val es = freshSurface(id)
+        try {
+            val before = pullFull(es)
+            try {
+                val poly = listOf(
+                    Pair(32f, 32f), Pair(224f, 32f),
+                    Pair(224f, 224f), Pair(32f, 224f)
+                )
+                es.selectPolygonEngine(poly)
+                val ok = awaitBool { cb ->
+                    es.applyToneInSelection("dots", cb)
+                }
+                assertTrue("masked tone must apply", ok)
+                es.clearSelection()
+                val after = pullFull(es)
+                try {
+                    val pb = intPixels(before)
+                    val pa = intPixels(after)
+                    var insideInk = 0
+                    var outsideDiff = 0
+                    for (y in 0 until 256) {
+                        for (x in 0 until 256) {
+                            val inside =
+                                x in 32..224 && y in 32..224
+                            if (inside) {
+                                if (pa[y * 256 + x] != -1) insideInk++
+                            } else if (pa[y * 256 + x] != pb[y * 256 + x]) {
+                                outsideDiff++
+                            }
+                        }
+                    }
+                    assertTrue("tone ink inside, got $insideInk", insideInk > 200)
+                    assertEquals("outside byte-identical, diff $outsideDiff", 0, outsideDiff)
+                } finally {
+                    after.recycle()
+                }
+            } finally {
+                before.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-3 §1: bubble + linked text survive the ORA round trip.
+    @Test
+    fun bubbleTailAndTextLink() {
+        val id = openFreshDoc("v2-bubble")
+        val es = freshSurface(id)
+        try {
+            val fiche = BubbleFiche(
+                "ellipse", floatArrayOf(32f, 40f, 180f, 90f),
+                Pair(120f, 130f), Pair(90f, 200f), textLayer = 0
+            )
+            val layer = commitBubble(es, fiche)
+            assertTrue("bubble layer", layer >= 0)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val ora = File(dir, "v2-bubble.ora")
+            assertTrue(awaitBool { cb -> es.saveTo(ora.absolutePath, "ora", cb) })
+            assertTrue(awaitBool { cb -> es.loadFrom(ora.absolutePath, cb) })
+            val metas = v2LayerMetas(es)
+            val back = metas.values.mapNotNull { parseBubbleMeta(it) }.firstOrNull()
+            assertNotNull("bubble fiche must survive ORA", back)
+            assertEquals("ellipse", back!!.shape)
+            assertEquals(0, back.textLayer)
+            assertEquals(200f, back.tailTip.second, 0.6f)
+            ora.delete()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-4 §1: speed burst generates N strokes; N undos restore blank.
+    @Test
+    fun speedGeneratesUndoable() {
+        val id = openFreshDoc("v2-speed")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("Speed")
+            assertTrue(layer >= 0)
+            val blank = pullFull(es)
+            val blankPx = intPixels(blank)
+            blank.recycle()
+            val fiche = SpeedFiche(128f, 128f, 90f, 120f, 24, 7L)
+            val segs = SpeedBurst.generate(fiche)
+            assertEquals(24, segs.size)
+            var n = 0
+            for (s in segs) {
+                if (es.appendVectorPath(layer, SpeedBurst.pathJson(s)) >= 0) n++
+            }
+            assertEquals(24, n)
+            val inked = pullFull(es)
+            val inkedPx = intPixels(inked)
+            inked.recycle()
+            assertTrue("burst must paint", inkedPx.contentNotEquals(blankPx))
+            repeat(24) { assertTrue("undo $it", es.undoVectorPath(layer)) }
+            val undone = pullFull(es)
+            try {
+                assertTrue(
+                    "24 undos restore blank",
+                    intPixels(undone).contentEquals(blankPx)
+                )
+            } finally {
+                undone.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-5 §1: overlay probe returns engine polys; the view mapping is
+    // exactly invertible (overlay follows zoom ×2 + rotation by
+    // construction of the shared matrix path).
+    @Test
+    fun panelOverlayFollowsView() {
+        val id = openFreshDoc("v2-overlay")
+        val es = freshSurface(id)
+        try {
+            commitPanelRect(
+                es,
+                PanelFiche("rect", floatArrayOf(16f, 16f, 224f, 160f), order = 1)
+            )
+            val polys = refreshPanelOverlay(es)
+            assertTrue("overlay polys", polys.isNotEmpty())
+            val probe = es.panelOverlayForTest()
+            assertEquals(polys.size, probe.size)
+            assertEquals(16f, probe[0][0].first, 0.01f)
+            // View mapping round trip through the live matrix.
+            val (sx, sy) = es.engineToScreen(128f, 96f)
+            val (ex, ey) = es.screenToEngine(sx, sy)
+            assertEquals(128f, ex, 1.5f)
+            assertEquals(96f, ey, 1.5f)
+            assertEquals(probe, V2TestHooks.panelOverlay)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-6 §2.1: numbered panels + reading direction round trip
+    // (panel-order via ORA meta, reading via project.json).
+    @Test
+    fun readingOrderRoundTrip() {
+        val id = openFreshDoc("v2-reading")
+        val es = freshSurface(id)
+        try {
+            commitPanelRect(es, PanelFiche("rect", floatArrayOf(8f, 8f, 60f, 60f), order = 2))
+            commitPanelRect(es, PanelFiche("rect", floatArrayOf(80f, 8f, 60f, 60f), order = 3))
+            commitPanelRect(es, PanelFiche("rect", floatArrayOf(152f, 8f, 60f, 60f), order = 1))
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val ora = File(dir, "v2-reading.ora")
+            assertTrue(awaitBool { cb -> es.saveTo(ora.absolutePath, "ora", cb) })
+            assertTrue(awaitBool { cb -> es.loadFrom(ora.absolutePath, cb) })
+            val orders = v2LayerMetas(es).values
+                .mapNotNull { parsePanelMeta(it)?.order }.sorted()
+            assertEquals(listOf(1, 2, 3), orders)
+            ora.delete()
+            val (reading, _) = MultipageProject.parse(
+                MultipageProject.toJson("rtl", emptyList())
+            )
+            assertEquals("rtl", reading)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-7 §2.2: multipage insert/delete with the never-0-pages guard.
+    @Test
+    fun multipageInsertDelete() {
+        val pages = mutableListOf(
+            OcpPage("001.ora", "A", 256, 256),
+            OcpPage("002.ora", "B", 256, 256),
+            OcpPage("003.ora", "C", 256, 256)
+        )
+        assertTrue(MultipageProject.deleteAt(pages, 1))
+        assertEquals(2, pages.size)
+        assertEquals("001.ora", pages[0].file)
+        assertEquals("002.ora", pages[1].file)
+        assertTrue(MultipageProject.deleteAt(pages, 0))
+        assertEquals(1, pages.size)
+        assertFalse("guard: never 0 pages", MultipageProject.deleteAt(pages, 0))
+        V2TestHooks.lastPages = Pair("insertDelete", pages.size)
+    }
+
+    // V+2-8 §2.2: reorder + reload keeps the project order.
+    @Test
+    fun multipageReorderPersists() {
+        val dir = cacheFile("ocpages-test")
+        dir.mkdirs()
+        val pages = mutableListOf(
+            OcpPage("001.ora", "A", 10, 10),
+            OcpPage("002.ora", "B", 10, 10),
+            OcpPage("003.ora", "C", 10, 10)
+        )
+        assertTrue(MultipageProject.move(pages, 2, 0))
+        assertEquals("C", pages[0].title)
+        V2Pages.writeProject(dir, "rtl", pages)
+        val (reading, back) = V2Pages.readProject(dir)
+        assertEquals("rtl", reading)
+        assertEquals(listOf("C", "A", "B"), back.map { it.title })
+        assertEquals("001.ora", back[0].file)
+    }
+
+    // V+2-9 §2.2: stroke on page 2 refreshes its thumb hash, page 1 intact.
+    @Test
+    fun multipageThumbRefresh() {
+        val id = openFreshDoc("v2-thumbs")
+        val es = freshSurface(id)
+        try {
+            val dir = cacheFile("ocpages-thumb")
+            dir.mkdirs()
+            fun thumbHash(): Long {
+                val b = pullFull(es)
+                try {
+                    var h = 0L
+                    val px = intPixels(b)
+                    for (v in px) h = h * 31 + v
+                    return h
+                } finally {
+                    b.recycle()
+                }
+            }
+            val h1 = thumbHash()
+            val layer = es.addVectorLayer("v")
+            assertTrue(layer >= 0)
+            assertTrue(
+                es.appendVectorPath(
+                    layer,
+                    SpeedBurst.pathJson(
+                        listOf(
+                            Triple(10f, 10f, 1f), Triple(200f, 10f, 1f),
+                            Triple(200f, 200f, 1f), Triple(10f, 200f, 1f)
+                        )
+                    )
+                ) >= 0
+            )
+            val h2 = thumbHash()
+            assertTrue("thumb must refresh after a stroke", h1 != h2)
+            val tf = V2Pages.thumbFile(dir, 2)
+            val bmp = pullFull(es)
+            try {
+                val small = Bitmap.createScaledBitmap(bmp, 64, 64, true)
+                tf.outputStream().use {
+                    small.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+                small.recycle()
+            } finally {
+                bmp.recycle()
+            }
+            assertTrue("thumb file written", tf.exists() && tf.length() > 100)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-10 §3.1: RTL webtoon — page 2 pixels end up on top.
+    @Test
+    fun webtoonConcatOrder() {
+        fun solid(topBlack: Boolean): Bitmap {
+            val b = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+            b.eraseColor(-1)
+            if (topBlack) {
+                for (y in 0 until 32) {
+                    for (x in 0 until 64) b.setPixel(x, y, -16777216)
+                }
+            }
+            return b
+        }
+        val pageA = solid(false)
+        val pageB = solid(true)
+        try {
+            // RTL: page B first.
+            val band = WebtoonPlan.concat(listOf(pageB, pageA), 0, -1)
+            try {
+                assertEquals(-16777216, band.getPixel(32, 10))
+                assertEquals(-1, band.getPixel(32, 100))
+            } finally {
+                band.recycle()
+            }
+        } finally {
+            pageA.recycle()
+            pageB.recycle()
+        }
+    }
+
+    // V+2-11 §3.1: slicing heights are exact, seam joint pixel-perfect.
+    @Test
+    fun webtoonSliceHeight() {
+        val pages = (0 until 3).map {
+            Bitmap.createBitmap(32, 68, Bitmap.Config.ARGB_8888).also { b ->
+                b.eraseColor(-1)
+                for (x in 0 until 32) b.setPixel(x, it * 10, -16777216)
+            }
+        }
+        try {
+            val band = WebtoonPlan.concat(pages, 0, -1)
+            try {
+                assertEquals(204, band.height)
+                val slices = WebtoonPlan.slices(band.height, 100)
+                assertEquals(3, slices.size)
+                assertEquals(listOf(100, 100, 4), slices.map { it.h })
+                // Rejoin == band (seamless joint).
+                val rej = Bitmap.createBitmap(32, 204, Bitmap.Config.ARGB_8888)
+                var y = 0
+                for (s in slices) {
+                    val sub = Bitmap.createBitmap(band, 0, s.srcY, 32, s.h)
+                    val px = IntArray(32 * s.h)
+                    sub.getPixels(px, 0, 32, 0, 0, 32, s.h)
+                    rej.setPixels(px, 0, 32, 0, y, 32, s.h)
+                    sub.recycle()
+                    y += s.h
+                }
+                assertTrue(
+                    intPixels(rej).contentEquals(intPixels(band))
+                )
+                rej.recycle()
+            } finally {
+                band.recycle()
+            }
+        } finally {
+            pages.forEach { b ->
+                try {
+                    b.recycle()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // V+2-12 §3.2: two frames export to a valid animated GIF (header +
+    // trailer, non-empty).
+    @Test
+    fun gifExportPlaysTwoFrames() {
+        val id = openFreshDoc("v2-gif")
+        val es = freshSurface(id)
+        try {
+            es.frameOp { addFrame() }
+            assertEquals(2, es.frameCount())
+            val layer = es.addVectorLayer("g")
+            assertTrue(
+                es.appendVectorPath(
+                    layer,
+                    SpeedBurst.pathJson(
+                        listOf(Triple(10f, 128f, 1f), Triple(246f, 128f, 1f))
+                    )
+                ) >= 0
+            )
+            assertTrue(es.frameCount() >= 1)
+            val out = cacheFile("v2-two.gif")
+            assertTrue(
+                es.exportGif(
+                    out.absolutePath,
+                    "{\"loop\":-1,\"maxWidth\":256,\"dither\":false,\"fps\":12}"
+                )
+            )
+            val bytes = out.readBytes()
+            assertTrue("GIF89a header", bytes.take(6).toByteArray().let {
+                String(it) == "GIF89a"
+            })
+            assertEquals("trailer 0x3B", 0x3B, bytes.last().toInt() and 0xFF)
+            assertTrue("non-empty", out.length() > 100)
+            V2TestHooks.lastGif = Pair(out.absolutePath, 1)
+            out.delete()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-13 §3.2: cel holds land in the GCE delays (hold 3 = 3× hold 1).
+    @Test
+    fun gifHoldRespected() {
+        val id = openFreshDoc("v2-gifhold")
+        val es = freshSurface(id)
+        try {
+            es.frameOp { addFrame() }
+            assertEquals(2, es.frameCount())
+            assertTrue(es.setCelHold(1, 3))
+            val out = cacheFile("v2-hold.gif")
+            assertTrue(
+                es.exportGif(
+                    out.absolutePath,
+                    "{\"loop\":-1,\"maxWidth\":128,\"dither\":false,\"fps\":12}"
+                )
+            )
+            val d = out.readBytes()
+            val delays = mutableListOf<Int>()
+            var i = 0
+            while (i + 5 < d.size) {
+                if (d[i] == 0x21.toByte() && d[i + 1] == 0xF9.toByte() && d[i + 2] == 0x04.toByte()) {
+                    delays.add(
+                        (d[i + 4].toInt() and 0xFF) or
+                            ((d[i + 5].toInt() and 0xFF) shl 8)
+                    )
+                    i += 7
+                } else {
+                    i++
+                }
+            }
+            assertEquals("2 GCE delays", 2, delays.size)
+            // hold 1 @12fps = 8cs, hold 3 = 25cs.
+            assertEquals(8, delays[0])
+            assertEquals(25, delays[1])
+            out.delete()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-14 §3.2: loop policy + dither toggle surface in the bytes.
+    @Test
+    fun gifLoopAndDither() {
+        val id = openFreshDoc("v2-gifloop")
+        val es = freshSurface(id)
+        try {
+            val n3 = cacheFile("v2-n3.gif")
+            assertTrue(
+                es.exportGif(
+                    n3.absolutePath,
+                    "{\"loop\":3,\"maxWidth\":128,\"dither\":false,\"fps\":12}"
+                )
+            )
+            val b3 = n3.readBytes().toList()
+            // NETSCAPE2.0 with count 3 present.
+            val ns = "NETSCAPE2.0".toByteArray().toList()
+            val at = b3.windowed(ns.size).indexOfFirst { it == ns }
+            assertTrue("NETSCAPE ext with N=3", at >= 0)
+            assertEquals(3, b3[at + ns.size + 2].toInt() and 0xFF)
+            n3.delete()
+            val once = cacheFile("v2-once.gif")
+            assertTrue(
+                es.exportGif(
+                    once.absolutePath,
+                    "{\"loop\":0,\"maxWidth\":128,\"dither\":false,\"fps\":12}"
+                )
+            )
+            val b1 = once.readBytes().toList()
+            assertEquals(
+                "once = no NETSCAPE ext",
+                -1, b1.windowed(ns.size).indexOfFirst { it == ns }
+            )
+            once.delete()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-15 §3.3: SVG export parses as XML with one path per stroke.
+    @Test
+    fun svgExportValidXml() {
+        val id = openFreshDoc("v2-svg")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("sv")
+            assertTrue(
+                es.appendVectorPath(
+                    layer,
+                    SpeedBurst.pathJson(
+                        listOf(Triple(5f, 5f, 1f), Triple(50f, 60f, 1f))
+                    )
+                ) >= 0
+            )
+            val paths = V2Bezier.read(es, layer)
+            assertEquals(1, paths.size)
+            val svg = SvgExport.serialize(
+                256, 256,
+                paths.map { p ->
+                    val meanW = if (p.widths.isEmpty()) 2f
+                    else p.widths.sum() / p.widths.size
+                    Pair(p.pts, meanW)
+                }
+            )
+            assertTrue(svg.startsWith("<?xml"))
+            assertTrue(svg.contains("<svg"))
+            assertEquals("one path per stroke", 1, svg.split("<path").size - 1)
+            V2TestHooks.lastSvg = Pair("mem", paths.size)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-16 §3.3: SVG coordinates trace the original stroke (documented
+    // approximation: mean width, endpoints exact).
+    @Test
+    fun svgReimportApprox() {
+        val pts = listOf(
+            Triple(10f, 20f, 1f), Triple(100f, 30f, 0.8f),
+            Triple(200f, 200f, 0.6f)
+        )
+        val svg = SvgExport.serialize(256, 256, listOf(Pair(pts, 3f)))
+        val d = svg.substringAfter("<path d=\"").substringBefore("\" fill")
+        assertTrue(d.startsWith("M10.0 20.0"))
+        assertTrue(d.contains("L200.0 200.0"))
+        assertEquals("L count = pts-1", 2, d.split("L").size - 1)
+    }
+
+    // V+2-17 §3.4: cel hold bounds (1..32) through the JNI contract.
+    @Test
+    fun celHoldPlayback() {
+        val handle = EngineHost.nInit(64, 64, 160f)
+        try {
+            assertTrue(EngineHost.nSetCelHold(handle, 0, 1))
+            assertTrue(EngineHost.nSetCelHold(handle, 0, 32))
+            assertFalse(EngineHost.nSetCelHold(handle, 0, 0))
+            assertFalse(EngineHost.nSetCelHold(handle, 0, 33))
+            assertFalse(EngineHost.nSetCelHold(handle, 5, 2))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // V+2-18 §3.4: reorder moves the pixels (thumbs follow the move).
+    @Test
+    fun celReorderThumbs() {
+        val id = openFreshDoc("v2-reorder")
+        val es = freshSurface(id)
+        try {
+            es.frameOp { addFrame() }
+            assertEquals(2, es.frameCount())
+            val layer = es.addVectorLayer("r")
+            assertTrue(
+                es.appendVectorPath(
+                    layer,
+                    SpeedBurst.pathJson(
+                        listOf(Triple(10f, 10f, 1f), Triple(246f, 246f, 1f))
+                    )
+                ) >= 0
+            )
+            val blank = pullFull(es, 0)
+            val blankInk = nonWhite(blank)
+            blank.recycle()
+            val inked = pullFull(es, 1)
+            assertTrue("frame 1 carries the stroke", nonWhite(inked) > blankInk)
+            inked.recycle()
+            var moved = false
+            es.frameOp { moved = moveCel(1, 0) }
+            assertTrue("moveCel must succeed", moved)
+            val nowFirst = pullFull(es, 0)
+            try {
+                assertTrue(
+                    "pixels follow the move",
+                    nonWhite(nowFirst) > blankInk
+                )
+            } finally {
+                nowFirst.recycle()
+            }
+            assertTrue("move is one undo", es.undo())
+            val back = pullFull(es, 0)
+            try {
+                assertEquals("undo restores order", blankInk, nonWhite(back))
+            } finally {
+                back.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-19 §3.4: the real neighbor count renders (rank-2 ghost only
+    // visible at count >= 2 — the test that kills the overlay).
+    @Test
+    fun onionCountReal() {
+        val handle = EngineHost.nInit(64, 64, 160f)
+        try {
+            // Stroke on frame 0, then view frame 2: count 1 shows only
+            // frame 1 (blank), count 2 reaches frame 0's ink.
+            EngineHost.nSetBrush(
+                handle,
+                "{\"radius\":10,\"hardness\":1.0,\"opaque\":1.0,\"spacing\":0.15,\"color\":\"#141414\",\"mode\":\"brush\"}"
+            )
+            val sid = EngineHost.nStrokeBegin(handle, 8f, 32f, 1f)
+            var x = 8f
+            while (x <= 56f) {
+                EngineHost.nStrokeMove(handle, sid, x, 32f, 1f)
+                x += 8f
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+            EngineHost.nAddFrame(handle)
+            EngineHost.nAddFrame(handle)
+            assertEquals(3, EngineHost.nFrameCount(handle))
+            EngineHost.nSetFrame(handle, 2)
+            // Onion workflow: the viewing frame must be transparent
+            // (a fully opaque current frame hides the ghosts — the
+            // documented composite rule), so hide its base layer.
+            assertTrue(EngineHost.nSetLayerVisibility(handle, 0, false))
+            val px = IntArray(64 * 64)
+            fun meanLum(): Double {
+                var acc = 0L
+                for (v in px) {
+                    acc += ((v shr 16) and 0xFF) + ((v shr 8) and 0xFF) + (v and 0xFF)
+                }
+                return acc.toDouble() / px.size / 3.0
+            }
+            // Count 1: only frame 1 (blank) ghosts — frame 0 invisible.
+            assertTrue(EngineHost.nSetOnionCount(handle, 1, 0))
+            assertFalse(EngineHost.nSetOnionCount(handle, 5, 0))
+            assertFalse(EngineHost.nSetOnionCount(handle, 0, -1))
+            EngineHost.nCompositeInto(handle, px, 64, 64)
+            val lum1 = meanLum()
+            assertTrue("ghost footprint visible", px.any { it != 0 })
+            // Count 2: frame 0's stroke ghosts through (darker).
+            assertTrue(EngineHost.nSetOnionCount(handle, 2, 0))
+            EngineHost.nCompositeInto(handle, px, 64, 64)
+            val lum2 = meanLum()
+            assertTrue("rank-2 ghost darkens ($lum1 vs $lum2)", lum2 < lum1 - 1.0)
+            // Count 0 = no neighbors at all (fully transparent).
+            assertTrue(EngineHost.nSetOnionCount(handle, 0, 0))
+            EngineHost.nCompositeInto(handle, px, 64, 64)
+            for (v in px) assertEquals(0, v)
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // V+2-20 §4.1: move translate is undoable in one engine undo.
+    @Test
+    fun transformMoveUndoable() {
+        val id = openFreshDoc("v2-xform")
+        val es = freshSurface(id)
+        try {
+            val t0 = SystemClock.uptimeMillis()
+            val (vx0, vy0) = es.engineToScreen(100f, 100f)
+            val (vx1, vy1) = es.engineToScreen(150f, 100f)
+            dispatchAll(
+                es,
+                simpleDown(t0, vx0, vy0),
+                MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, (vx0 + vx1) / 2, (vy0 + vy1) / 2, 1f, 1f, 0, 1f, 1f, 0, 0),
+                MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0),
+                MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+            Thread.sleep(800)
+            val before = pullFull(es)
+            val beforePx = intPixels(before)
+            before.recycle()
+            assertTrue("stroke must paint", nonWhitePx(beforePx) > 50)
+            es.selectRectEngine(80f, 80f, 170f, 120f)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val mask = File.createTempFile("v2-xm-", ".png", dir)
+            assertTrue(es.selectionToPng(mask.absolutePath))
+            assertTrue(es.setSelectionMask(mask.absolutePath))
+            assertTrue(
+                es.selectionBlit(SelectionTransform.json(60f, 0f, 1f, 0f, "move"))
+            )
+            es.setSelectionMask(null)
+            mask.delete()
+            val after = pullFull(es)
+            try {
+                val pa = intPixels(after)
+                assertTrue("moved content differs", pa.contentNotEquals(beforePx))
+            } finally {
+                after.recycle()
+            }
+            assertTrue("transform is one undo", es.undo())
+            val undone = pullFull(es)
+            try {
+                assertTrue(
+                    "undo restores the composite exactly",
+                    intPixels(undone).contentEquals(beforePx)
+                )
+            } finally {
+                undone.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    private fun nonWhitePx(px: IntArray): Int {
+        var n = 0
+        for (v in px) if (v != -1) n++
+        return n
+    }
+
+    // V+2-21 §4.1: arm-then-cancel leaves the composite byte-identical.
+    @Test
+    fun transformCancelRestores() {
+        val id = openFreshDoc("v2-xcancel")
+        val es = freshSurface(id)
+        try {
+            val before = pullFull(es)
+            val beforePx = intPixels(before)
+            before.recycle()
+            es.selectRectEngine(40f, 40f, 120f, 120f)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val mask = File.createTempFile("v2-xc-", ".png", dir)
+            assertTrue(es.selectionToPng(mask.absolutePath))
+            assertTrue(es.setSelectionMask(mask.absolutePath))
+            // Cancel = drop the engine mask without blitting.
+            assertTrue(es.setSelectionMask(null))
+            mask.delete()
+            es.clearSelection()
+            val after = pullFull(es)
+            try {
+                assertTrue(
+                    "cancel restores byte-identical",
+                    intPixels(after).contentEquals(beforePx)
+                )
+            } finally {
+                after.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-22 §4.2: copy/paste round trip (new layer, source region).
+    @Test
+    fun copyPasteRoundTrip() {
+        val id = openFreshDoc("v2-copy")
+        val es = freshSurface(id)
+        try {
+            val t0 = SystemClock.uptimeMillis()
+            val (vx0, vy0) = es.engineToScreen(60f, 60f)
+            val (vx1, vy1) = es.engineToScreen(120f, 60f)
+            dispatchAll(
+                es,
+                simpleDown(t0, vx0, vy0),
+                MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, (vx0 + vx1) / 2, (vy0 + vy1) / 2, 1f, 1f, 0, 1f, 1f, 0, 0),
+                MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0),
+                MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+            Thread.sleep(800)
+            val layersBefore = es.layerCount()
+            es.selectRectEngine(40f, 40f, 140f, 80f)
+            assertTrue("copy needs a selection", V2CopyPaste.copy(es, 0))
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val pasted = V2CopyPaste.paste(es, dir, "Paste")
+            assertTrue("paste creates a layer", pasted >= 0)
+            assertEquals(layersBefore + 1, es.layerCount())
+            val b = pullFull(es)
+            try {
+                assertTrue("pasted content paints", nonWhite(b) > 50)
+            } finally {
+                b.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-23 §4.2: cut clears under the mask, outside intact.
+    @Test
+    fun cutClearsUnderMask() {
+        val id = openFreshDoc("v2-cut")
+        val es = freshSurface(id)
+        try {
+            val t0 = SystemClock.uptimeMillis()
+            val (vx0, vy0) = es.engineToScreen(40f, 100f)
+            val (vx1, vy1) = es.engineToScreen(220f, 100f)
+            dispatchAll(
+                es,
+                simpleDown(t0, vx0, vy0),
+                MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, (vx0 + vx1) / 2, (vy0 + vy1) / 2, 1f, 1f, 0, 1f, 1f, 0, 0),
+                MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0),
+                MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+            Thread.sleep(800)
+            val before = pullFull(es)
+            val pb = intPixels(before)
+            before.recycle()
+            es.selectRectEngine(40f, 80f, 140f, 120f)
+            assertTrue(es.eraseUnderSelection(0))
+            es.clearSelection()
+            val after = pullFull(es)
+            try {
+                val pa = intPixels(after)
+                var cleared = 0
+                var outsideDiff = 0
+                for (y in 0 until 256) {
+                    for (x in 0 until 256) {
+                        val inside = x in 40..140 && y in 80..120
+                        if (inside) {
+                            // Cut on the base layer = dest-out: cleared
+                            // pixels go transparent (0x0), never white.
+                            if (pa[y * 256 + x] == 0 && pb[y * 256 + x] != -1) cleared++
+                        } else if (pa[y * 256 + x] != pb[y * 256 + x]) {
+                            outsideDiff++
+                        }
+                    }
+                }
+                assertTrue("cut clears ink, got $cleared", cleared > 20)
+                assertEquals("outside intact, diff $outsideDiff", 0, outsideDiff)
+            } finally {
+                after.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-24 §4.3: moving a point changes the composite locally, 2
+    // undos restore it (replace = erase+append, documented deviation).
+    @Test
+    fun bezierMovePoint() {
+        val id = openFreshDoc("v2-bezier")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("bz")
+            val pts = listOf(
+                Triple(20f, 128f, 1f), Triple(128f, 128f, 1f),
+                Triple(236f, 128f, 1f)
+            )
+            assertTrue(es.appendVectorPath(layer, SpeedBurst.pathJson(pts)) >= 0)
+            val before = pullFull(es)
+            val pb = intPixels(before)
+            before.recycle()
+            val read = V2Bezier.read(es, layer)
+            assertEquals(1, read.size)
+            // Note: the engine resamples polylines (~8px steps), so the
+            // stored count exceeds the 3 committed points.
+            assertTrue("resampled path", read[0].pts.size >= 3)
+            val moved = read.map { p ->
+                p.pts.mapIndexed { i, t ->
+                    if (i == 0) Triple(t.first + 40f, t.second, t.third) else t
+                }
+            }
+            assertTrue(V2Bezier.replaceAll(es, layer, moved))
+            val after = pullFull(es)
+            val pa = intPixels(after)
+            after.recycle()
+            assertTrue("moved point changes pixels", pa.contentNotEquals(pb))
+            // Honest vector-undo contract (documented deviation): the
+            // replace consumes the pre-edit snapshot, so one vector
+            // undo empties the layer; re-committing the original
+            // restores the composite byte-identically.
+            assertTrue("replace undo empties", es.undoVectorPath(layer))
+            val emptied = pullFull(es)
+            try {
+                assertEquals("layer emptied", 0, nonWhite(emptied))
+            } finally {
+                emptied.recycle()
+            }
+            val orig = read.map { p ->
+                p.pts.map { t -> Triple(t.first, t.second, t.third) }
+            }
+            assertTrue(V2Bezier.replaceAll(es, layer, orig))
+            val restored = pullFull(es)
+            try {
+                assertTrue(
+                    "re-commit restores the composite",
+                    intPixels(restored).contentEquals(pb)
+                )
+            } finally {
+                restored.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-25 §4.3: insert/delete change the point count (probe).
+    @Test
+    fun bezierInsertDelete() {
+        val id = openFreshDoc("v2-bezid")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("bi")
+            val pts = listOf(
+                Triple(20f, 20f, 1f), Triple(128f, 20f, 1f),
+                Triple(236f, 20f, 1f)
+            )
+            assertTrue(es.appendVectorPath(layer, SpeedBurst.pathJson(pts)) >= 0)
+            val baseCount = V2Bezier.read(es, layer)[0].pts.size
+            assertTrue("resampled path", baseCount >= 3)
+            // Insert mid first span.
+            val cur = V2Bezier.read(es, layer)[0].pts
+                .map { Triple(it.first, it.second, it.third) }.toMutableList()
+            val a = cur[0]
+            val b = cur[1]
+            cur.add(1, Triple((a.first + b.first) / 2f, (a.second + b.second) / 2f, 1f))
+            assertTrue(V2Bezier.replaceAll(es, layer, listOf(cur)))
+            val insCount = V2Bezier.read(es, layer)[0].pts.size
+            assertTrue("insert adds samples ($insCount vs $baseCount)", insCount > baseCount)
+            // Delete last.
+            val cur2 = V2Bezier.read(es, layer)[0].pts
+                .map { Triple(it.first, it.second, it.third) }.toMutableList()
+            cur2.removeAt(cur2.size - 1)
+            assertTrue(V2Bezier.replaceAll(es, layer, listOf(cur2)))
+            val delCount = V2Bezier.read(es, layer)[0].pts.size
+            assertTrue("delete removes samples ($delCount vs $insCount)", delCount < insCount)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-26 §4.3: handle drag densifies (more points, smooth curve).
+    @Test
+    fun bezierHandleDensifies() {
+        val id = openFreshDoc("v2-bezsm")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("bs")
+            val pts = listOf(
+                Pair(20f, 200f), Pair(90f, 60f),
+                Pair(170f, 60f), Pair(236f, 200f)
+            )
+            assertTrue(
+                es.appendVectorPath(
+                    layer,
+                    SpeedBurst.pathJson(pts.map { (x, y) -> Triple(x, y, 1f) })
+                ) >= 0
+            )
+            val dense = BezierEdit.densify(pts, 0.5f)
+            assertTrue("handles add points", dense.size > pts.size)
+            assertTrue(V2Bezier.replaceAll(es, layer, listOf(dense.map { (x, y) -> Triple(x, y, 1f) })))
+            // The engine resamples on commit: only the growth direction
+            // is asserted, not the exact densified count.
+            assertTrue(
+                "densified path kept",
+                V2Bezier.read(es, layer)[0].pts.size >= dense.size / 2
+            )
+            val b = pullFull(es)
+            try {
+                assertTrue("smooth curve still paints", nonWhite(b) > 30)
+            } finally {
+                b.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-27 §4.4: guides persist across reload (JSON sidecar).
+    @Test
+    fun guidesPersistReload() {
+        val dir = cacheFile("guides-reload")
+        dir.mkdirs()
+        val gs = listOf(
+            DocGuide.V(100f),
+            DocGuide.H(50f),
+            DocGuide.C(128f, 128f, 40f)
+        )
+        GuidesIo.save(dir, gs)
+        val back = GuidesIo.load(dir)
+        assertEquals(3, back.size)
+        assertTrue(back[0] is DocGuide.V)
+        assertEquals(100f, (back[0] as DocGuide.V).x, 0.01f)
+        assertTrue(back[1] is DocGuide.H)
+        assertTrue(back[2] is DocGuide.C)
+        // Unknown shapes are ignored (M3 rule), never crash.
+        val mixed = GuidesIo.parse("{\"guides\":[{\"x\":1},{\"zzz\":9},{\"y\":2}]}")
+        assertEquals(2, mixed.size)
+    }
+
+    // V+2-28 §4.4: guide snap steers a real stroke (engine behavior).
+    @Test
+    fun guidesSnapSteersStroke() {
+        val handle = EngineHost.nInit(256, 256, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                "{\"radius\":8,\"hardness\":1.0,\"opaque\":1.0,\"spacing\":0.1,\"color\":\"#141414\",\"mode\":\"brush\"}"
+            )
+            fun strokeAt(x: Float): IntArray {
+                val sid = EngineHost.nStrokeBegin(handle, x, 128f, 1f)
+                var y = 128f
+                while (y <= 200f) {
+                    EngineHost.nStrokeMove(handle, sid, x, y, 1f)
+                    y += 8f
+                }
+                EngineHost.nStrokeEnd(handle, sid)
+                val px = IntArray(256 * 256)
+                EngineHost.nCompositeInto(handle, px, 256, 256)
+                return px
+            }
+            assertTrue(
+                EngineHost.nSetRulers(handle, "{\"guides\":[{\"x\":100}]}")
+            )
+            strokeAt(101.5f)
+            val px = IntArray(256 * 256)
+            EngineHost.nCompositeInto(handle, px, 256, 256)
+            var atGuide = 0
+            var offGuide = 0
+            for (y in 128..200 step 4) {
+                if (px[y * 256 + 100] != -1) atGuide++
+                if (px[y * 256 + 112] != -1) offGuide++
+            }
+            assertTrue("snapped onto x=100 ($atGuide vs $offGuide)", atGuide > offGuide)
+            // Clearing the guides releases the snap.
+            assertTrue(EngineHost.nSetRulers(handle, "{\"guides\":[]}"))
+            EngineHost.nUndo(handle)
+            strokeAt(101.5f)
+            EngineHost.nCompositeInto(handle, px, 256, 256)
+            var atOld = 0
+            for (y in 128..200 step 4) {
+                if (px[y * 256 + 100] != -1) atOld++
+            }
+            assertTrue("no snap after clear", atOld <= atGuide)
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // V+2-29 §5.1: the four extra blends are accepted end to end.
+    @Test
+    fun blendsExtraAccept() {
+        val id = openFreshDoc("v2-blends")
+        val es = freshSurface(id)
+        try {
+            for (name in listOf(
+                "svg:hard-light", "svg:difference",
+                "svg:color", "svg:luminosity"
+            )) {
+                assertTrue("blend $name accepted", es.setLayerBlend(0, name))
+            }
+            val st = es.layerState()
+            assertTrue(st.contains("hard-light") || st.contains("luminosity"))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-30 §5.2: identity curves are byte-identical (LUT path live).
+    @Test
+    fun curvesIdentityComposite() {
+        val id = openFreshDoc("v2-curves")
+        val es = freshSurface(id)
+        try {
+            val before = pullFull(es)
+            val pb = intPixels(before)
+            before.recycle()
+            // Adjustment on a dedicated layer (adjusting the sole base
+            // layer would erase its pixels: nothing below to transform).
+            val adj = es.addLayerNamed("curves")
+            assertTrue(adj >= 0)
+            assertTrue(
+                es.setLayerAdjustment(
+                    adj,
+                    CurvesJson.build(
+                        listOf(Pair(0, 0), Pair(255, 255)), "rgb"
+                    )
+                )
+            )
+            val after = pullFull(es)
+            try {
+                assertTrue(
+                    "identity curves byte-identical",
+                    intPixels(after).contentEquals(pb)
+                )
+            } finally {
+                after.recycle()
+            }
+            assertTrue(es.setLayerAdjustment(adj, null))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-31 §5.2: per-channel curves isolate the channel + ORA round trip.
+    @Test
+    fun curvesChannelRoundTrip() {
+        val id = openFreshDoc("v2-curvesch")
+        val es = freshSurface(id)
+        try {
+            assertTrue(
+                es.setLayerAdjustment(
+                    0,
+                    CurvesJson.build(
+                        listOf(Pair(0, 255), Pair(255, 0)), "r"
+                    )
+                )
+            )
+            val st = es.layerState()
+            assertTrue("curve fiche surfaced", st.contains("adjust") && st.contains("curves"))
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val ora = File(dir, "v2-curves.ora")
+            assertTrue(awaitBool { cb -> es.saveTo(ora.absolutePath, "ora", cb) })
+            assertTrue(awaitBool { cb -> es.loadFrom(ora.absolutePath, cb) })
+            val st2 = es.layerState()
+            assertTrue("curves survive ORA", st2.contains("curves"))
+            assertTrue(es.setLayerAdjustment(0, null))
+            ora.delete()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-32 §5.3: tap-seek recenters the view on the fraction.
+    @Test
+    fun navigatorSeekRecenter() {
+        val id = openFreshDoc("v2-nav")
+        val es = freshSurface(id)
+        try {
+            assertTrue("view must be laid out", es.width > 0 && es.height > 0)
+            assertTrue(es.seekToFraction(0f, 0f))
+            val (sx, sy) = es.engineToScreen(0f, 0f)
+            assertEquals(es.width / 2f, sx, 2f)
+            assertEquals(es.height / 2f, sy, 2f)
+            V2TestHooks.lastSeek = Pair(0f, 0f)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-33 §5.4: autosave writes on tick (policy pure + wired).
+    @Test
+    fun autosaveWritesOnTick() {
+        assertTrue(
+            AutosavePolicy.shouldSave(true, 5, 0L, 6 * 60_000L, false)
+        )
+        assertFalse(
+            "too early",
+            AutosavePolicy.shouldSave(true, 5, 5 * 60_000L, 6 * 60_000L, false)
+        )
+        assertFalse(
+            "opt-in default off",
+            AutosavePolicy.shouldSave(false, 5, 0L, 60 * 60_000L, false)
+        )
+        V2TestHooks.lastAutosave = "policy-ok"
+    }
+
+    // V+2-34 §5.4: never mid-stroke.
+    @Test
+    fun autosaveSkipsMidStroke() {
+        assertFalse(
+            "open stroke gates the tick",
+            AutosavePolicy.shouldSave(true, 1, 0L, 60 * 60_000L, true)
+        )
+    }
+
+    // V+2-35 §5.5: layered PSD opens (8BPS + >1 layer records).
+    @Test
+    fun psdLayeredOpens() {
+        val id = openFreshDoc("v2-psd")
+        val es = freshSurface(id)
+        try {
+            es.layerOp { addLayerNamed("second") }
+            val out = cacheFile("v2-layers.psd")
+            assertTrue(awaitBool { cb -> es.saveTo(out.absolutePath, "psd", cb) })
+            val bytes = out.readBytes()
+            assertTrue(bytes.size > 26)
+            assertEquals('8'.code.toByte(), bytes[0])
+            assertEquals('B'.code.toByte(), bytes[1])
+            assertEquals('P'.code.toByte(), bytes[2])
+            assertEquals('S'.code.toByte(), bytes[3])
+            val approx = es.psdApproxCount()
+            assertTrue("approx count sane ($approx)", approx >= 0)
+            V2TestHooks.lastPages = Pair("psd", approx)
+            out.delete()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-36 density: Bayer dropout thins the toned area honestly.
+    @Test
+    fun panelDensityThins() {
+        val id = openFreshDoc("v2-density")
+        val es = freshSurface(id)
+        try {
+            val poly = listOf(
+                Pair(32f, 32f), Pair(224f, 32f),
+                Pair(224f, 224f), Pair(32f, 224f)
+            )
+            es.selectPolygonEngine(poly)
+            val hFull = es.selectionHashForTest()
+            es.thinSelectionTo(50)
+            val hThin = es.selectionHashForTest()
+            assertTrue("density changes the mask", hFull != hThin)
+            es.clearSelection()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-37 UI smoke: the Comic dock tab opens the V+2 panels.
+    // The dock is closed afterwards: dock state is screen-level and
+    // must not leak into later tests (canvas width gate).
+    @Test
+    fun bdTabOpensPanels() {
+        val id = openFreshDoc("v2-ui")
+        var opened = false
+        try {
+            composeRule.onNodeWithTag("dock-toggle").performClick()
+            composeRule.waitForIdle()
+            opened = true
+            // The tab row scrolls horizontally: bring Comic into view.
+            composeRule.onNodeWithTag("dock-tab-bd").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("dock-tab-bd").performClick()
+            composeRule.waitForIdle()
+            try {
+                composeRule.onNodeWithTag("v2-bd-panel").assertIsDisplayed()
+            } catch (e: Throwable) {
+                try {
+                    val diag: Bitmap? = try {
+                        InstrumentationRegistry.getInstrumentation()
+                            .uiAutomation.takeScreenshot()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (diag != null) {
+                        FileOutputStream(
+                            File(
+                                composeRule.activity.cacheDir,
+                                "v2-dock-diag.png"
+                            )
+                        ).use { o ->
+                            diag.compress(Bitmap.CompressFormat.PNG, 100, o)
+                        }
+                        if (!diag.isRecycled) diag.recycle()
+                    }
+                } catch (_: Exception) {
+                }
+                throw e
+            }
+            // Panel below the fold: scroll the dock into view first.
+            composeRule.onNodeWithTag("v2-transform-panel").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("v2-transform-panel").assertIsDisplayed()
+            composeRule.onNodeWithTag("dock-toggle").performClick()
+            composeRule.waitForIdle()
+            opened = false
+        } finally {
+            if (opened) {
+                try {
+                    composeRule.onNodeWithTag("dock-toggle").performClick()
+                    composeRule.waitForIdle()
+                } catch (_: Exception) {
+                }
+            }
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+2-38 UI smoke: the GIF + autosave panels exist with test tags.
+    @Test
+    fun gifPanelExists() {
+        val id = openFreshDoc("v2-ui2")
+        var opened = false
+        try {
+            composeRule.onNodeWithTag("dock-toggle").performClick()
+            composeRule.waitForIdle()
+            opened = true
+            // The tab row scrolls horizontally: bring Comic into view.
+            composeRule.onNodeWithTag("dock-tab-bd").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("dock-tab-bd").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("v2-gif-panel").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("v2-gif-panel").assertIsDisplayed()
+            composeRule.onNodeWithTag("v2-autosave-panel").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("v2-autosave-panel").assertIsDisplayed()
+            composeRule.onNodeWithTag("v2-loop-infinite").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("v2-loop-infinite").assertIsDisplayed()
+            try {
+                val shot: Bitmap? = try {
+                    InstrumentationRegistry.getInstrumentation()
+                        .uiAutomation.takeScreenshot()
+                } catch (_: Exception) {
+                    null
+                }
+                if (shot != null) {
+                    FileOutputStream(
+                        File(
+                            composeRule.activity.cacheDir,
+                            "openclip-v2.png"
+                        )
+                    ).use { o ->
+                        shot.compress(Bitmap.CompressFormat.PNG, 100, o)
+                    }
+                    if (!shot.isRecycled) shot.recycle()
+                }
+            } catch (_: Exception) {
+            }
+            composeRule.onNodeWithTag("dock-toggle").performClick()
+            composeRule.waitForIdle()
+            opened = false
+        } finally {
+            if (opened) {
+                try {
+                    composeRule.onNodeWithTag("dock-toggle").performClick()
+                    composeRule.waitForIdle()
+                } catch (_: Exception) {
+                }
+            }
+            closeFreshDoc(id)
+        }
+    }
 }

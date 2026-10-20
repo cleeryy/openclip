@@ -86,20 +86,24 @@ internal data class LayerInfo(
 // Blend list in a single place (spec §3: engine additions = 0 UI change).
 internal val BLEND_NAMES = listOf(
     "svg:normal", "svg:multiply", "svg:screen", "svg:overlay",
-    "svg:plus", "svg:soft-light"
+    "svg:plus", "svg:soft-light",
+    // V+2 additions (engine blend.h, ARCHITECTURE.md "V+2 additions").
+    "svg:hard-light", "svg:difference", "svg:color", "svg:luminosity"
 )
 
 internal fun blendDisplay(svg: String): String = svg.removePrefix("svg:")
 internal fun blendSvg(display: String): String = "svg:$display"
 
 // M8 — adjustment descriptor types (engine contract: "gradientMap"
-// carries stops; amount is ignored for it).
+// carries stops; amount is ignored for it; V+2 "curves" carries the
+// canonical adjust-curve spec edited in the Comic tab CurvesPanel).
 private val ADJUST_TYPES = listOf(
     "brightness" to R.string.adjustment_brightness,
     "contrast" to R.string.adjustment_contrast,
     "hue" to R.string.adjustment_hue,
     "saturation" to R.string.adjustment_saturation,
-    "gradientMap" to R.string.adjustment_gradient
+    "gradientMap" to R.string.adjustment_gradient,
+    "curves" to R.string.adjustment_curves
 )
 
 // Tag pastilles (maison, app-side only, §4).
@@ -497,7 +501,11 @@ fun LayerPanel(
                 )
             }
         }
-        if (adjustType != null && adjustType != "gradientMap") {
+        // Curves are edited in the Comic-tab CurvesPanel (canonical
+        // spec), not via the amount slider — same guard as gradientMap.
+        if (adjustType != null && adjustType != "gradientMap" &&
+            adjustType != "curves"
+        ) {
             val t = adjustType
             if (t != null) {
                 var amt by remember(active, t, adjustAmount) {

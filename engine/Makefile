@@ -3,6 +3,8 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic
 INCLUDES = -Iinclude -Ithird_party -Isrc/io
+# Header dependency tracking (obj/*.d): header edits rebuild dependents.
+DEPFLAGS = -MMD -MP
 
 SRCS = src/raster/surface.cpp \
        src/raster/canvas.cpp \
@@ -13,9 +15,11 @@ SRCS = src/raster/surface.cpp \
        src/io/minizip.cpp \
        src/io/ora.cpp \
        src/io/psd.cpp \
+       src/io/gif.cpp \
        src/io/document.cpp \
        src/filters/filters.cpp \
        src/raster/vector.cpp \
+       src/raster/transform.cpp \
        src/ref/ref.cpp
 
 TEST_SRCS = tests/main.cpp \
@@ -32,7 +36,11 @@ TEST_SRCS = tests/main.cpp \
             tests/test_adjust.cpp \
             tests/test_ref.cpp \
             tests/test_tone.cpp \
-            tests/test_erase.cpp
+            tests/test_erase.cpp \
+            tests/test_cels.cpp \
+            tests/test_transform.cpp \
+            tests/test_guides.cpp \
+            tests/test_gif.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a
@@ -45,7 +53,9 @@ all: $(LIB) $(TESTBIN)
 
 $(OBJDIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+-include $(OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
 $(LIB): $(OBJS)
 	ar rcs $@ $(OBJS)

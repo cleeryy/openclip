@@ -294,6 +294,106 @@ class EngineSurface @JvmOverloads constructor(
         }
     }
 
+    /** V+2 full-res single-layer composite (copy source, spec 4.2). */
+    fun soloRenderFull(index: Int): Bitmap? {
+        if (handle == 0L) return null
+        suspendRender = true
+        try {
+            synchronized(engineLock) {
+                if (handle == 0L) return null
+                val vis = mutableListOf<Pair<Int, Boolean>>()
+                try {
+                    val root = JSONObject(layerState())
+                    val arr = root.optJSONArray("layers") ?: return null
+                    for (i in 0 until arr.length()) {
+                        val e = arr.optJSONObject(i) ?: continue
+                        val s = e.optJSONObject("self") ?: e
+                        vis.add(Pair(i, s.optBoolean("visible", true)))
+                    }
+                } catch (_: Exception) {
+                    return null
+                }
+                if (index < 0 || index >= vis.size || !vis[index].second) return null
+                for ((i, v) in vis) {
+                    if (v && i != index) EngineHost.nSetLayerVisibility(handle, i, false)
+                }
+                val px = IntArray(engineWidth * engineHeight)
+                val n = try {
+                    EngineHost.nCompositeInto(handle, px, engineWidth, engineHeight)
+                } catch (_: Exception) {
+                    0
+                }
+                for ((i, v) in vis) {
+                    if (v && i != index) EngineHost.nSetLayerVisibility(handle, i, true)
+                }
+                needsComposite = true
+                if (n <= 0) return null
+                val full = Bitmap.createBitmap(
+                    engineWidth, engineHeight, Bitmap.Config.ARGB_8888
+                )
+                full.setPixels(px, 0, engineWidth, 0, 0, engineWidth, engineHeight)
+                return full
+            }
+        } finally {
+            suspendRender = false
+            needsComposite = true
+        }
+    }
+    /** V+2 couper: zéros sous la sélection live (blit undoable, spec 4.2). */
+    fun eraseUnderSelection(index: Int): Boolean {
+        val full = soloRenderFull(index) ?: return false
+        return try {
+            val w = full.width
+            val h = full.height
+            val px = IntArray(w * h)
+            full.getPixels(px, 0, w, 0, 0, w, h)
+            var touched = false
+            synchronized(selectionLock) {
+                val m = selectionMask ?: return false
+                for (y in 0 until h) {
+                    for (x in 0 until w) {
+                        if (m.contains(x.toFloat(), y.toFloat())) {
+                            px[y * w + x] = 0
+                            touched = true
+                        }
+                    }
+                }
+            }
+            if (!touched) {
+                full.recycle()
+                return true
+            }
+            full.setPixels(px, 0, w, 0, 0, w, h)
+            val png = try {
+                java.io.File.createTempFile("v2-cut-", ".png", context.cacheDir)
+            } catch (_: Exception) {
+                full.recycle()
+                return false
+            }
+            try {
+                png.outputStream().use {
+                    full.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+            } catch (_: Exception) {
+                full.recycle()
+                return false
+            }
+            full.recycle()
+            val ok = blitPngIntoLayer(index, png.absolutePath)
+            try {
+                png.delete()
+            } catch (_: Exception) {
+            }
+            ok
+        } catch (_: Exception) {
+            try {
+                full.recycle()
+            } catch (_: Exception) {
+            }
+            false
+        }
+    }
+
     // ---- Slice 1 view matrix (app-side only, never engine pixels) ----
     @Volatile private var viewScaleMul = 1f
     @Volatile private var viewAngleDeg = 0f
@@ -326,6 +426,22 @@ class EngineSurface @JvmOverloads constructor(
     fun viewZoomPercent(): Int = (viewScaleMul * 100f).toInt()
     fun isLoupeVisible(): Boolean =
         SystemClock.uptimeMillis() - lastNavTime < LOUPE_MS
+
+    /** V+2 navigator tap-seek: pan so canvas fraction (fx, fy) lands
+     * on the view center (exact one-step, rotation-aware: the forward
+     * map is affine in the offsets). */
+    fun seekToFraction(fx: Float, fy: Float): Boolean {
+        val vw = width
+        val vh = height
+        if (vw <= 0 || vh <= 0) return false
+        val (sx, sy) = engineToScreen(fx * engineWidth, fy * engineHeight)
+        viewOffX += vw / 2f - sx
+        viewOffY += vh / 2f - sy
+        needsComposite = true
+        val cb = onViewChanged
+        if (cb != null) post { cb() }
+        return true
+    }
 
     fun resetView() {
         viewScaleMul = 1f
@@ -696,6 +812,13 @@ class EngineSurface @JvmOverloads constructor(
         if (handle != 0L) EngineHost.nSetRulers(handle, kindsJson) else false
     }
 
+    /** V+2: guides JSON fragment shared with GuidesPanel (single
+     * rulers source: both sides re-push symmetry + guides together). */
+    @Volatile var guideJson: String = ""
+
+    /** V+2: symmetry fragment owned by ToolPalette, merged by guides. */
+    @Volatile var symmetryJson: String = ""
+
     fun frameCount(): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nFrameCount(handle) else 0
     }
@@ -740,6 +863,88 @@ class EngineSurface @JvmOverloads constructor(
                 needsComposite = true
             }
         }
+    }
+
+    // V+2 wrappers (ARCHITECTURE.md "V+2 additions").
+    fun moveCel(from: Int, to: Int): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nMoveCel(handle, from, to)
+            .also { if (it) { needsComposite = true } } else false
+    }
+
+    fun setCelHold(index: Int, frames: Int): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetCelHold(handle, index, frames) else false
+    }
+
+    fun setOnionCount(before: Int, after: Int, strength: Float) {
+        synchronized(engineLock) {
+            // Order matters: nSetOnion maps booleans to 0/1 counts, so
+            // it runs first and nSetOnionCount restores the real N.
+            if (handle != 0L && EngineHost.nSetOnion(
+                    handle, before > 0, after > 0, strength
+                )
+            ) {
+                EngineHost.nSetOnionCount(handle, before, after)
+                needsComposite = true
+            }
+        }
+    }
+
+    fun setSelectionMask(path: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetSelectionMask(handle, path) else false
+    }
+
+    fun selectionBlit(json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSelectionBlit(handle, json)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun vectorPaths(index: Int): String = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nVectorPaths(handle, index) else "{}"
+    }
+
+    /** White-on-black PNG of the current selection (V+2 mask upload). */
+    fun selectionToPng(path: String): Boolean {
+        val (mw, mh, bits) = synchronized(selectionLock) {
+            val m = selectionMask ?: return false
+            Triple(engineWidth, engineHeight, m)
+        }
+        return try {
+            val bmp = Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888)
+            for (y in 0 until mh) {
+                for (x in 0 until mw) {
+                    bmp.setPixel(
+                        x, y,
+                        if (bits.contains(x.toFloat(), y.toFloat())) -1 else -16777216
+                    )
+                }
+            }
+            java.io.File(path).outputStream().use {
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bmp.recycle()
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** V+2 overlay polylines (panels/bulles/guides, engine coords). */
+    @Volatile var v2Overlays: List<List<Pair<Float, Float>>> = emptyList()
+
+    /** Overlay probe (emutest asserts through this, never pixels alone). */
+    fun panelOverlayForTest(): List<List<Pair<Float, Float>>> = v2Overlays
+
+    fun exportGif(path: String, json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nExportGif(handle, path, json) else false
+    }
+
+    fun setLayerMeta(index: Int, key: String, value: String?): Boolean =
+        synchronized(engineLock) {
+            if (handle != 0L) EngineHost.nSetLayerMeta(handle, index, key, value) else false
+        }
+
+    fun psdApproxCount(): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nPsdApproxCount(handle) else 0
     }
 
     private data class ThumbRequest(
@@ -1824,7 +2029,7 @@ class EngineSurface @JvmOverloads constructor(
             // the loop alive while a selection or trace shows).
             val antsActive = synchronized(selectionLock) {
                 selectionMask != null || shapePreview.isNotEmpty()
-            }
+            } || v2Overlays.isNotEmpty()
             if (antsActive && !paused) {
                 val nowA = SystemClock.uptimeMillis()
                 if (nowA - lastAntsTick >= 100) {
@@ -1902,6 +2107,7 @@ class EngineSurface @JvmOverloads constructor(
                     }
                     drawCursorRing(c, dst, ang)
                     drawSelectionOverlay(c, dst, ang)
+                    drawV2Overlays(c, dst, ang)
                 } finally {
                     holder.unlockCanvasAndPost(c)
                 }
@@ -2116,6 +2322,12 @@ class EngineSurface @JvmOverloads constructor(
 
     fun invertSelection() = synchronized(selectionLock) {
         selectionMask?.invert() ?: return
+        notifySelectionChanged()
+    }
+
+    /** V+2 tone density: Bayer dropout on the live selection. */
+    fun thinSelectionTo(keepPct: Int) = synchronized(selectionLock) {
+        selectionMask?.applyDensityBayer(keepPct) ?: return
         notifySelectionChanged()
     }
 
@@ -2366,6 +2578,40 @@ class EngineSurface @JvmOverloads constructor(
         antsPaint.pathEffect = fx
         c.drawPath(path, antsShadowPaint)
         c.drawPath(path, antsPaint)
+        c.restore()
+    }
+
+    // V+2 overlay polylines (cases/bulles/guides — maison orange,
+    // overlay-only, suit la matrice de vue comme les fourmis).
+    private val v2Paint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = 0xFFFF9D2E.toInt()
+        isAntiAlias = true
+    }
+
+    private fun drawV2Overlays(
+        c: android.graphics.Canvas,
+        dst: RectF,
+        ang: Float
+    ) {
+        val polys = v2Overlays
+        if (polys.isEmpty()) return
+        val s = fitScale(width, height) * viewScaleMul
+        if (s <= 1e-6f) return
+        c.save()
+        if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+        for (poly in polys) {
+            if (poly.size < 2) continue
+            val path = android.graphics.Path()
+            for ((i, e) in poly.withIndex()) {
+                val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
+                val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+                if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
+            }
+            path.close()
+            c.drawPath(path, v2Paint)
+        }
         c.restore()
     }
 

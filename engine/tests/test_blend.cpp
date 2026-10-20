@@ -4,6 +4,8 @@
 // float pipeline (un-premult -> blend straight -> over -> lround).
 #include "test.h"
 
+#include <cmath>
+
 #include "openclip/blend.h"
 #include "openclip/surface.h"
 
@@ -112,4 +114,70 @@ TEST(blend_names) {
     CHECK(blendFromName(nullptr) == BlendMode::Normal);
     CHECK(std::string(blendToName(BlendMode::Multiply)) == "svg:multiply");
     CHECK(std::string(blendToName(BlendMode::Add)) == "svg:plus");
+}
+
+// V+2: difference of a pixel with itself is black (opaque kept);
+// HardLight extremes act as black/white (2sd / 1-2(1-s)(1-d)).
+TEST(blend_difference_self_is_black) {
+    Pixel s{200, 100, 50, 255}, d{200, 100, 50, 255}, o;
+    blendPixel(s, d, BlendMode::Difference, o);
+    CHECK_EQ(o.r, 0);
+    CHECK_EQ(o.g, 0);
+    CHECK_EQ(o.b, 0);
+    CHECK_EQ(o.a, 255);
+    Pixel black{0, 0, 0, 255}, white{255, 255, 255, 255}, x{64, 128, 192,
+                                                            255};
+    Pixel hb, hw;
+    blendPixel(black, x, BlendMode::HardLight, hb);
+    blendPixel(white, x, BlendMode::HardLight, hw);
+    CHECK_EQ(hb.r, 0);
+    CHECK_EQ(hb.g, 0);
+    CHECK_EQ(hb.b, 0);
+    CHECK_EQ(hw.r, 255);
+    CHECK_EQ(hw.g, 255);
+    CHECK_EQ(hw.b, 255);
+}
+
+// V+2: color keeps the destination HSL lightness with the source
+// hue/saturation; luminosity keeps the source lightness with the
+// destination hue/saturation (HSL round trip, epsilon 2 for float).
+TEST(blend_color_luminosity_luma) {
+    auto light = [](const Pixel& p) {
+        const float r = p.r / 255.0f, g = p.g / 255.0f, b = p.b / 255.0f;
+        const float mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        const float mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        return (mx + mn) * 0.5f;
+    };
+    Pixel s{255, 0, 0, 255}, d{0, 0, 255, 255}, c, l;
+    blendPixel(s, d, BlendMode::Color, c);
+    blendPixel(s, d, BlendMode::Luminosity, l);
+    // Color(red, blue): hue stays red, lightness becomes blue's (0.5).
+    CHECK(c.r > 200);
+    CHECK(c.g < 60);
+    CHECK(c.b < 60);
+    CHECK(std::abs(light(c) - light(d)) < 2.0f / 255.0f);
+    // Luminosity(red, blue): lightness stays red's (0.5), hue blue.
+    CHECK(l.b > 200);
+    CHECK(l.r < 60);
+    CHECK(l.g < 60);
+    CHECK(std::abs(light(l) - light(s)) < 2.0f / 255.0f);
+    CHECK_EQ(c.a, 255);
+    CHECK_EQ(l.a, 255);
+}
+
+// V+2: name table covers the new modes (bare + svg: prefix).
+TEST(blend_names_v2) {
+    CHECK(blendFromName("hard-light") == BlendMode::HardLight);
+    CHECK(blendFromName("svg:hard-light") == BlendMode::HardLight);
+    CHECK(blendFromName("difference") == BlendMode::Difference);
+    CHECK(blendFromName("svg:difference") == BlendMode::Difference);
+    CHECK(blendFromName("color") == BlendMode::Color);
+    CHECK(blendFromName("luminosity") == BlendMode::Luminosity);
+    CHECK(std::string(blendToName(BlendMode::HardLight)) ==
+          "svg:hard-light");
+    CHECK(std::string(blendToName(BlendMode::Difference)) ==
+          "svg:difference");
+    CHECK(std::string(blendToName(BlendMode::Color)) == "svg:color");
+    CHECK(std::string(blendToName(BlendMode::Luminosity)) ==
+          "svg:luminosity");
 }

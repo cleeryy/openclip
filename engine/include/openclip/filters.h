@@ -75,7 +75,7 @@ bool applyTone(Surface& s, const std::string& name);
 
 // M8 adjustment-layer ops (ARCHITECTURE.md "M8 additions", clean-room).
 // Known adjustment type names (exact match): "brightness", "contrast",
-// "hue", "saturation", "gradientMap". Anything else is identity.
+// "hue", "saturation", "gradientMap", "curves" (V+2).
 bool isKnownAdjustType(const std::string& type);
 
 // Parse an nSetLayerAdjustment descriptor object. Unknown keys are
@@ -85,6 +85,23 @@ bool isKnownAdjustType(const std::string& type);
 // treats them as identity).
 void parseAdjustDescriptor(const std::string& json, std::string& type,
                            double& amount, std::string& stops);
+
+// V+2 curves descriptor (ARCHITECTURE.md "V+2 additions"). Parses
+// {"type":"curves","points":[[in,out]x1..16],"channel":"rgb|r|g|b"}
+// into the canonical spec "channel;i,o;i,o;..." (inputs sorted,
+// clamped 0..255). Unknown channel falls back to "rgb". Fewer than 1
+// or more than 16 valid points -> spec cleared (= honest identity,
+// still round trips verbatim). Always succeeds.
+void parseCurvesDescriptor(const std::string& json, std::string& type,
+                           std::string& channel, std::string& spec);
+
+// Apply the canonical curves spec to one straight-RGB pixel (in/out
+// 0..255, modified in place). Empty/invalid spec or unknown channel =
+// identity no-op. The 256-entry LUT is cached per spec string
+// (thread-local; composite is single-threaded) so per-pixel cost is a
+// table lookup.
+void applyCurvesOp(const std::string& spec, double& r, double& g,
+                   double& b);
 
 // Transform one straight-RGB pixel (r/g/b in 0..255, modified in place)
 // by the named adjustment; unknown type = identity no-op. amount is in

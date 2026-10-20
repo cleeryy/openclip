@@ -102,9 +102,17 @@ fun ToolPalette(
     fun pushSymmetry() {
         val sx = if (symX) surface.canvasWidth() / 2f else -1f
         val sy = if (symY) surface.canvasHeight() / 2f else -1f
-        surface.setRulers(
-            String.format(Locale.US, """{"symX":%.1f,"symY":%.1f}""", sx, sy)
-        )
+        // V+2: guides survive symmetry toggles (single rulers source
+        // shared with GuidesPanel: symmetry fragment + guides merged
+        // on both sides).
+        val sym = String.format(Locale.US, "\"symX\":%.1f,\"symY\":%.1f", sx, sy)
+        surface.symmetryJson = sym
+        val rulers = if (surface.guideJson.isEmpty()) {
+            "{$sym}"
+        } else {
+            "{$sym,\"guides\":${surface.guideJson}}"
+        }
+        surface.setRulers(rulers)
     }
 
     LaunchedEffect(initialColor) {
