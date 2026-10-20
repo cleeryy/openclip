@@ -34,15 +34,20 @@ fun DocTitleBar(
     zoomPct: Int,
     compact: Boolean,
     onSave: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Slice 7: on compact widths the pinned save lives in the compact
+    // menu bar, so the title row drops its own (single doc-save tag).
+    showSave: Boolean = true
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .height(48.dp)
             .background(Color(0xFF1A1A20))
-            .padding(horizontal = 8.dp, vertical = 2.dp),
+            .padding(horizontal = 8.dp)
+            .testTag("doc-title-bar"),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         val maxChars = if (compact) 12 else 24
         val shown = if (name.length > maxChars) name.take(maxChars) + "…" else name
@@ -51,6 +56,7 @@ fun DocTitleBar(
             style = MaterialTheme.typography.titleSmall,
             color = Color(0xFFECECF1),
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .weight(1f)
@@ -63,20 +69,26 @@ fun DocTitleBar(
             style = MaterialTheme.typography.labelSmall,
             color = Color(0xFF787888),
             maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.testTag("doc-dims")
         )
-        TextButton(
-            onClick = onSave,
-            modifier = Modifier
-                .height(48.dp)
-                .testTag("doc-save")
-        ) {
-            Text(
-                stringResource(R.string.doc_save),
-                style = MaterialTheme.typography.labelMedium,
-                color = Color(0xFF90B8FF),
-                maxLines = 1
-            )
+        if (showSave) {
+            TextButton(
+                onClick = onSave,
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("doc-save")
+            ) {
+                Text(
+                    stringResource(R.string.doc_save),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color(0xFF90B8FF),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

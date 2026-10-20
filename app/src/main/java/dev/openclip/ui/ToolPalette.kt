@@ -127,14 +127,22 @@ fun ToolPalette(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                .horizontalScroll(rememberScrollState())
+                .testTag("tool-row"),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             FilterChip(
                 selected = isBrush,
                 onClick = { prefs.setTool(false); pushBrush() },
-                label = { Text(stringResource(R.string.brush)) },
+                label = {
+                    Text(
+                        stringResource(R.string.brush),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                },
                 modifier = Modifier
                     .height(48.dp)
                     .testTag("tool-brush")
@@ -142,7 +150,14 @@ fun ToolPalette(
             FilterChip(
                 selected = !isBrush,
                 onClick = { prefs.setTool(true); pushBrush() },
-                label = { Text(stringResource(R.string.eraser)) },
+                label = {
+                    Text(
+                        stringResource(R.string.eraser),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                },
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = Color(0xFF4A3520),
                     selectedLabelColor = Color(0xFFE0A050)
@@ -159,10 +174,15 @@ fun ToolPalette(
                         stringResource(
                             if (navigateMode) R.string.nav_mode_move
                             else R.string.nav_mode_draw
-                        )
+                        ),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 },
-                modifier = Modifier.testTag("tool-nav")
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-nav")
             )
 
             // Compact inline size slider (active tool memory).
@@ -216,8 +236,17 @@ fun ToolPalette(
             FilterChip(
                 selected = showAdvanced,
                 onClick = { showAdvanced = !showAdvanced },
-                label = { Text("⚙") },
-                modifier = Modifier.testTag("advanced-toggle")
+                label = {
+                    Text(
+                        "⚙",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                },
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("advanced-toggle")
             )
 
             OutlinedButton(
@@ -227,9 +256,15 @@ fun ToolPalette(
                 },
                 enabled = canUndo,
                 contentPadding = compactPad,
-                modifier = Modifier.height(34.dp)
+                modifier = Modifier.height(48.dp)
             ) {
-                Text(stringResource(R.string.undo), style = MaterialTheme.typography.labelMedium)
+                Text(
+                    stringResource(R.string.undo),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
             OutlinedButton(
                 onClick = {
@@ -238,9 +273,15 @@ fun ToolPalette(
                 },
                 enabled = canRedo,
                 contentPadding = compactPad,
-                modifier = Modifier.height(34.dp)
+                modifier = Modifier.height(48.dp)
             ) {
-                Text(stringResource(R.string.redo), style = MaterialTheme.typography.labelMedium)
+                Text(
+                    stringResource(R.string.redo),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
             Button(
                 onClick = { showFilters = true },
@@ -249,9 +290,15 @@ fun ToolPalette(
                     containerColor = Color(0xFF32323D),
                     contentColor = Color(0xFFECECF1)
                 ),
-                modifier = Modifier.height(34.dp)
+                modifier = Modifier.height(48.dp)
             ) {
-                Text(stringResource(R.string.filters), style = MaterialTheme.typography.labelMedium)
+                Text(
+                    stringResource(R.string.filters),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
             Button(
                 onClick = onImportClicked,
@@ -260,16 +307,30 @@ fun ToolPalette(
                     containerColor = Color(0xFF32323D),
                     contentColor = Color(0xFFECECF1)
                 ),
-                modifier = Modifier.height(34.dp)
+                modifier = Modifier.height(48.dp)
             ) {
-                Text(stringResource(R.string.import_doc), style = MaterialTheme.typography.labelMedium)
+                Text(
+                    stringResource(R.string.import_doc),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
             Button(
                 onClick = onFileClicked,
                 contentPadding = compactPad,
-                modifier = Modifier.height(34.dp)
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-file")
             ) {
-                Text(stringResource(R.string.file_menu), style = MaterialTheme.typography.labelMedium)
+                Text(
+                    stringResource(R.string.file_menu),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
         }
 
@@ -285,7 +346,10 @@ fun ToolPalette(
                 Text(
                     stringResource(R.string.stabilize, (prefs.stabilize * 100).toInt()),
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFB8B8C8)
+                    color = Color(0xFFB8B8C8),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                 )
                 Slider(
                     value = prefs.stabilize,
@@ -298,12 +362,28 @@ fun ToolPalette(
                 FilterChip(
                     selected = symX,
                     onClick = { symX = !symX; pushSymmetry() },
-                    label = { Text("Sym X", style = MaterialTheme.typography.labelSmall) }
+                    label = {
+                        Text(
+                            "Sym X",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
                 )
                 FilterChip(
                     selected = symY,
                     onClick = { symY = !symY; pushSymmetry() },
-                    label = { Text("Sym Y", style = MaterialTheme.typography.labelSmall) }
+                    label = {
+                        Text(
+                            "Sym Y",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
                 )
             }
             PressureCurveEditor(

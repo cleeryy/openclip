@@ -219,5 +219,10 @@
     <string name="workspace_deleted">Espace supprimé</string>
     <string name="workspace_invalid">Nom vide ou déjà pris</string>
     <string name="multidoc_help">Onglets et espaces…</string>
-    <string name="multidoc_help_body">Chaque onglet garde son canvas ; seul l’actif calcule. Changer en plein trait attend le lever de stylet. Enregistrer écrit le canvas actif en 1 geste. Les espaces gardent la posture des panneaux, jamais les pixels.</string>
+    <string name="multidoc_help_body">Chaque onglet garde son canvas ; seul l’actif calcule. Changer en plein trait attend le lever de stylet. Enregistrer écrit le canvas actif en 1 geste. Les espaces gardent la posture des panneaux, jamais les pixels. Sur écran étroit les menus tiennent dans ☰ ; la ligne de statut montre un seul message à la fois.</string>
+    <string name="menu_compact_open">Ouvrir le menu</string>
+    <string name="prefs_reset_hint">Réglages rétablis par défaut</string>
+    <string name="save_no_persist_hint">Enregistrer redemande à chaque fois</string>
+    <string name="newcanvas_empty_hint">Choisissez un format pour dessiner</string>
+    <string name="status_dismiss">Effacer</string>
 </resources>

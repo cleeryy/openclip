@@ -232,5 +232,10 @@
     <string name="workspace_deleted">Workspace deleted</string>
     <string name="workspace_invalid">Empty or duplicate name</string>
     <string name="multidoc_help">Tabs &amp; spaces…</string>
-    <string name="multidoc_help_body">Tabs hold one canvas each; only the active tab composites. Switching mid-stroke waits for the pen lift. Save writes the active canvas 1-tap. Workspaces store panel posture only, never pixels.</string>
+    <string name="multidoc_help_body">Tabs hold one canvas each; only the active tab composites. Switching mid-stroke waits for the pen lift. Save writes the active canvas 1-tap. Workspaces store panel posture only, never pixels. On narrow screens the menus collapse into ☰; the status line shows one message at a time.</string>
+    <string name="menu_compact_open">Open menu</string>
+    <string name="prefs_reset_hint">Settings reset to defaults</string>
+    <string name="save_no_persist_hint">Save asks each time (no persist)</string>
+    <string name="newcanvas_empty_hint">Pick a size to start drawing</string>
+    <string name="status_dismiss">Clear</string>
 </resources>

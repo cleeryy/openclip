@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -44,9 +44,11 @@ fun DocTabs(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .height(48.dp)
             .background(Color(0xFF1A1A20))
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 4.dp, vertical = 2.dp),
+            .padding(horizontal = 8.dp)
+            .testTag("doc-tabs"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -64,6 +66,7 @@ fun DocTabs(
                         (if (doc.dirty) "• " else "") + shown,
                         style = MaterialTheme.typography.labelMedium,
                         maxLines = 1,
+                        softWrap = false,
                         overflow = TextOverflow.Ellipsis
                     )
                 },
@@ -84,11 +87,11 @@ fun DocTabs(
                 },
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = Color(0xFF284678),
-                    containerColor = if (preselected) Color(0xFF33333E)
-                    else Color(0xFF232329)
+                    containerColor = if (preselected) Color(0xFF284678).copy(alpha = 0.5f)
+                    else Color.Transparent
                 ),
                 modifier = Modifier
-                    .heightIn(min = 48.dp)
+                    .height(48.dp)
                     .testTag("doc-tab-${doc.docId}")
             )
         }

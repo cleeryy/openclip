@@ -111,6 +111,11 @@ class BrushPrefs(appContext: Context) {
     var toolCurve: Float = 0f
         private set
 
+    // Slice 7: true when the file was missing-shaped/corrupt at read
+    // (factory fallbacks kept). The host posts prefs_reset_hint once.
+    var readFallback = false
+        private set
+
     fun bindTool(color: String, eraser: Boolean, curve: Float) {
         toolColor = color
         toolEraser = eraser
@@ -256,6 +261,7 @@ class BrushPrefs(appContext: Context) {
             toolEraser = isEraser
             toolCurve = curve
         } catch (_: Exception) {
+            readFallback = true
             radius = BRUSH_FALLBACK_RADIUS
             opaque = BRUSH_FALLBACK_OPAQUE
             stabilize = BRUSH_FALLBACK_STABILIZE

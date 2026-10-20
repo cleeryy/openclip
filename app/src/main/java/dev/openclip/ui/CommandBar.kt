@@ -53,6 +53,11 @@ const val COMMANDBAR_FILE = "commandbar.json"
 class CommandBarStore(appContext: Context) {
     private val file = File(appContext.applicationContext.filesDir, COMMANDBAR_FILE)
 
+    // Slice 7: true when a present file failed to parse (factory
+    // presets kept). The host posts prefs_reset_hint once per session.
+    var loadFallback = false
+        private set
+
     val order = mutableStateListOf(
         "save", "undo", "redo", "export", "fullscreen"
     )
@@ -77,7 +82,16 @@ class CommandBarStore(appContext: Context) {
 
     fun shownActions(): List<String> = order.filter { visible[it] == true }
 
-    fun flush() = writeFile()
+    // Slice 7: only touch disk when an edit is actually pending — an
+    // unconditional write here used to clobber the file on every pause
+    // (including a test-only corrupt write ahead of recreate()).
+    fun flush() {
+        handler.removeCallbacks(saveRun)
+        if (savePending) {
+            savePending = false
+            writeFile()
+        }
+    }
 
     private var savePending = false
     private val handler = android.os.Handler(
@@ -127,8 +141,14 @@ class CommandBarStore(appContext: Context) {
             val parsed = orderRe.find(t)?.groupValues?.get(1)
                 ?.split(",")?.mapNotNull {
                     it.trim().trim('"').takeIf { s -> s in known }
-                } ?: return
-            if (parsed.size != known.size) return
+                } ?: run {
+                    loadFallback = true
+                    return
+                }
+            if (parsed.size != known.size) {
+                loadFallback = true
+                return
+            }
             order.clear()
             order.addAll(parsed)
             val hidden = hiddenRe.find(t)?.groupValues?.get(1)
@@ -153,12 +173,16 @@ fun CommandBar(
     labels: Map<String, String>,
     onAction: (String) -> Unit,
     onEditHint: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Slice 7: collapse affordance (phone pastille, §5). Expanded by
+    // default so the 1-tap save/undo/redo contract (slice 6) holds.
+    onCollapse: () -> Unit = {}
 ) {
     val editMode = remember { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .then(if (editMode.value) Modifier else Modifier.height(48.dp))
             .background(Color(0xFF1A1A20))
             .testTag("command-bar")
     ) {
@@ -173,7 +197,7 @@ fun CommandBar(
                         onEditHint()
                     }
                 )
-                .padding(horizontal = 4.dp),
+                .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -189,6 +213,7 @@ fun CommandBar(
                         style = MaterialTheme.typography.labelMedium,
                         color = Color(0xFFECECF1),
                         maxLines = 1,
+                        softWrap = false,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -202,7 +227,21 @@ fun CommandBar(
                 Text(
                     "⋯",
                     style = MaterialTheme.typography.titleMedium,
-                    color = Color(0xFF787888)
+                    color = Color(0xFF787888),
+                    maxLines = 1
+                )
+            }
+            TextButton(
+                onClick = onCollapse,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("cmdbar-collapse")
+            ) {
+                Text(
+                    "⌄",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color(0xFF787888),
+                    maxLines = 1
                 )
             }
         }
@@ -216,7 +255,10 @@ fun CommandBar(
                 Text(
                     stringResource(R.string.cmdbar_edit),
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF787888)
+                    color = Color(0xFF787888),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
                 for (action in store.order) {
                     Row(
@@ -261,6 +303,39 @@ fun CommandBar(
     }
 }
 
+/**
+ * Slice 7 collapsed pastille: one 48dp tap restores the command bar.
+ */
+@Composable
+fun CommandBarCollapsed(
+    onExpand: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .background(Color(0xFF1A1A20))
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        TextButton(
+            onClick = onExpand,
+            modifier = Modifier
+                .size(48.dp)
+                .testTag("cmdbar-collapsed")
+        ) {
+            Text(
+                "⌃",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color(0xFF90B8FF),
+                maxLines = 1
+            )
+        }
+    }
+}
+
 // ---------- Workspace store ----------
 
 const val WORKSPACES_FILE = "workspaces.json"
@@ -277,6 +352,10 @@ data class WorkspacePose(
 class WorkspaceStore(appContext: Context) {
     private val dir = appContext.applicationContext.filesDir
     private val file = File(dir, WORKSPACES_FILE)
+
+    // Slice 7: true when the last load fell back to factory presets.
+    var loadFallback = false
+        private set
 
     val spaces = mutableStateMapOf<String, WorkspacePose>()
     val lastWorkspace = mutableStateOf<String?>(null)
@@ -407,6 +486,7 @@ class WorkspaceStore(appContext: Context) {
         } catch (_: Exception) {
             spaces.clear()
             lastWorkspace.value = null
+            loadFallback = true
             seed(drawName, animName)
         }
     }

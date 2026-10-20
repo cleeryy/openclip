@@ -50,8 +50,8 @@ fun CollapsibleDrawer(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF22222A))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                    .background(Color(0xFF202026))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {

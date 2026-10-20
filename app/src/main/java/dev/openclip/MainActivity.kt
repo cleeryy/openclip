@@ -16,6 +16,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,8 +57,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
@@ -70,6 +73,7 @@ import dev.openclip.ui.ColorPanel
 import dev.openclip.ui.ColorStore
 import dev.openclip.ui.BrushPrefs
 import dev.openclip.ui.CommandBar
+import dev.openclip.ui.CommandBarCollapsed
 import dev.openclip.ui.CommandBarStore
 import dev.openclip.ui.DocTabs
 import dev.openclip.ui.DocTitleBar
@@ -88,6 +92,7 @@ import dev.openclip.ui.GesturesHelpDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.MaterialsRow
 import dev.openclip.ui.PinnedBrushBar
+import dev.openclip.ui.ChromeMenuBar
 import dev.openclip.ui.MenuBar
 import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ReferencePanel
@@ -230,6 +235,13 @@ class MainActivity : ComponentActivity() {
         val showWorkspaces = remember { mutableStateOf(false) }
         val showMultidocHelp = remember { mutableStateOf(false) }
         val cmdbarVisible = remember { mutableStateOf(true) }
+        // Slice 7: command bar folds to a pastille (phone default
+        // posture); expanded by default so 1-tap save stays 1-tap.
+        val cmdbarCollapsed = remember { mutableStateOf(false) }
+        // Slice 7 one-shot session hints (status only, never dialogs).
+        val prefsHintShown = remember { mutableStateOf(false) }
+        val savePersistFailed = remember { mutableStateOf(false) }
+        val savePersistHintShown = remember { mutableStateOf(false) }
         val pendingSaveDoc = remember { mutableStateOf<String?>(null) }
         val savePickRef = remember { mutableStateOf<((String) -> Unit)?>(null) }
         val pendingCloseAfterSave = remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
@@ -623,11 +635,9 @@ class MainActivity : ComponentActivity() {
                 cv.resume()
                 cv.setBrush(brushPrefs.currentJson())
             }
-            val tab = docs.firstOrNull { it.docId == docId }
-            val entry = docRegistry.active()
-            if (tab != null && entry != null) {
-                status.value = entry.name + " " + tab.w + "×" + tab.h
-            }
+            // Slice 7: tab switches post no message — the active tab
+            // (select blue) + the title already carry name + dims.
+            // Status green stays reserved for action feedback.
             refreshKey.value++
         }
 
@@ -813,7 +823,15 @@ class MainActivity : ComponentActivity() {
                     }
                     if (wrote) {
                         docRegistry.markDirty(id, false)
-                        status.value = ctx.getString(R.string.save_ok)
+                        status.value = if (savePersistFailed.value &&
+                            !savePersistHintShown.value
+                        ) {
+                            // Slice 7: announced once instead of save_ok.
+                            savePersistHintShown.value = true
+                            ctx.getString(R.string.save_no_persist_hint)
+                        } else {
+                            ctx.getString(R.string.save_ok)
+                        }
                     } else {
                         status.value = ctx.getString(R.string.save_failed)
                     }
@@ -914,6 +932,9 @@ class MainActivity : ComponentActivity() {
                             android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                     )
                 } catch (_: Exception) {
+                    // Slice 7: SAF without persistable permission falls
+                    // back to asking at every save — announced once.
+                    savePersistFailed.value = true
                 }
                 saveUris[id] = uri.toString()
                 val after = pendingCloseAfterSave.value
@@ -954,6 +975,14 @@ class MainActivity : ComponentActivity() {
             val drawName = ctx.getString(R.string.workspace_draw)
             val animName = ctx.getString(R.string.workspace_anim)
             workspaceStore.load(drawName, animName)
+            // Slice 7: corrupt prefs JSON fell back to presets — say so
+            // once (status only, never a dialog).
+            if (!prefsHintShown.value && (commandStore.loadFallback ||
+                brushPrefs.readFallback || workspaceStore.loadFallback)
+            ) {
+                prefsHintShown.value = true
+                status.value = ctx.getString(R.string.prefs_reset_hint)
+            }
             val last = workspaceStore.lastWorkspace.value
             if (last != null) {
                 val pose = workspaceStore.spaces[last]
@@ -1110,7 +1139,13 @@ class MainActivity : ComponentActivity() {
             if (!fullscreen.value) {
             val menuSurface = activeSurface()
             if (menuSurface == null) {
-                MenuBar(menus = listOf(windowMenu, helpMenu))
+                ChromeMenuBar(
+                    menus = listOf(windowMenu, helpMenu),
+                    compact = compact,
+                    docTitle = null,
+                    docDirty = false,
+                    onSave = null
+                )
                 HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
             }
             menuSurface?.let { surface ->
@@ -1146,7 +1181,7 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 }
-                MenuBar(
+                ChromeMenuBar(
                     menus = listOf(
                         StudioMenu(
                             title = stringResource(R.string.file_menu),
@@ -1283,7 +1318,16 @@ class MainActivity : ComponentActivity() {
                         ),
                         windowMenu,
                         helpMenu
-                    )
+                    ),
+                    compact = compact,
+                    docTitle = docs.firstOrNull { it.docId == activeId }?.name,
+                    docDirty = docRegistry.all().firstOrNull {
+                        it.docId == activeId
+                    }?.dirty == true,
+                    onSave = {
+                        val aid = activeDocId.value
+                        if (aid != null) saveDoc(aid)
+                    }
                 )
                 HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
                 androidx.compose.runtime.key(activeDocId.value) {
@@ -1334,6 +1378,7 @@ class MainActivity : ComponentActivity() {
                         h = atab.h,
                         zoomPct = asurface.viewZoomPercent(),
                         compact = compact,
+                        showSave = !compact,
                         onSave = {
                             val aid = activeDocId.value
                             if (aid != null) saveDoc(aid)
@@ -1351,33 +1396,40 @@ class MainActivity : ComponentActivity() {
             )
             if (cmdbarVisible.value) {
                 activeSurface()?.let { asurface ->
-                    CommandBar(
-                        store = commandStore,
-                        labels = cmdLabels,
-                        onAction = { action ->
-                            val aid = activeDocId.value
-                            when (action) {
-                                "save" -> if (aid != null) saveDoc(aid)
-                                "undo" -> if (asurface.undo()) {
-                                    if (aid != null) docRegistry.markDirty(aid, true)
-                                    refreshKey.value++
+                    if (cmdbarCollapsed.value) {
+                        CommandBarCollapsed(
+                            onExpand = { cmdbarCollapsed.value = false }
+                        )
+                    } else {
+                        CommandBar(
+                            store = commandStore,
+                            labels = cmdLabels,
+                            onAction = { action ->
+                                val aid = activeDocId.value
+                                when (action) {
+                                    "save" -> if (aid != null) saveDoc(aid)
+                                    "undo" -> if (asurface.undo()) {
+                                        if (aid != null) docRegistry.markDirty(aid, true)
+                                        refreshKey.value++
+                                    }
+                                    "redo" -> if (asurface.redo()) {
+                                        if (aid != null) docRegistry.markDirty(aid, true)
+                                        refreshKey.value++
+                                    }
+                                    "export" -> showExport.value = true
+                                    "fullscreen" -> {
+                                        fullscreen.value = true
+                                        status.value = ctx.getString(
+                                            R.string.cmdbar_fullscreen)
+                                    }
                                 }
-                                "redo" -> if (asurface.redo()) {
-                                    if (aid != null) docRegistry.markDirty(aid, true)
-                                    refreshKey.value++
-                                }
-                                "export" -> showExport.value = true
-                                "fullscreen" -> {
-                                    fullscreen.value = true
-                                    status.value = ctx.getString(
-                                        R.string.cmdbar_fullscreen)
-                                }
-                            }
-                        },
-                        onEditHint = {
-                            status.value = ctx.getString(R.string.cmdbar_edit)
-                        }
-                    )
+                            },
+                            onEditHint = {
+                                status.value = ctx.getString(R.string.cmdbar_edit)
+                            },
+                            onCollapse = { cmdbarCollapsed.value = true }
+                        )
+                    }
                     HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
                 }
             }
@@ -1437,6 +1489,30 @@ class MainActivity : ComponentActivity() {
                             verticalArrangement = Arrangement.Center,
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
+                            // Slice 7 monumental empty CTA: home glyph +
+                            // title + hint + 48dp action (no dead screen).
+                            Text(
+                                "＋",
+                                style = MaterialTheme.typography.displayMedium,
+                                color = Color(0xFF787888),
+                                fontSize = 64.sp,
+                                maxLines = 1
+                            )
+                            Text(
+                                stringResource(R.string.newcanvas_empty_cta),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color(0xFFECECF1),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                stringResource(R.string.newcanvas_empty_hint),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF787888),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
                             TextButton(
                                 onClick = {
                                     newCanvasDefault.value = nextUntitled()
@@ -1446,7 +1522,12 @@ class MainActivity : ComponentActivity() {
                                     .height(48.dp)
                                     .testTag("newcanvas-empty-cta")
                             ) {
-                                Text(stringResource(R.string.newcanvas_empty_cta))
+                                Text(
+                                    stringResource(R.string.newcanvas_empty_cta),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -1790,14 +1871,28 @@ class MainActivity : ComponentActivity() {
                 }
                 HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
 
-                // Slim Studio Status Bar (drawer toggles live in the
-                // drawer headers above — one tap each).
+                // Slim Studio Status Bar (slice 7: single source — WebDAV
+                // button + the one status message, never dims/name).
+                // Tap the message to clear it (content-description
+                // status_dismiss); errors show in err red, all else ok.
+                val dismissLabel = stringResource(R.string.status_dismiss)
+                val errMsgs = setOf(
+                    stringResource(R.string.save_failed),
+                    stringResource(R.string.export_failed),
+                    stringResource(R.string.import_failed),
+                    stringResource(R.string.filter_failed),
+                    stringResource(R.string.webdav_failed),
+                    stringResource(R.string.ai_failed),
+                    stringResource(R.string.ref_failed),
+                    stringResource(R.string.audio_failed)
+                )
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(34.dp)
                         .background(Color(0xFF1E1E24))
-                        .padding(horizontal = 8.dp),
+                        .padding(horizontal = 8.dp)
+                        .testTag("status-bar"),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -1809,30 +1904,29 @@ class MainActivity : ComponentActivity() {
                         Text(
                             stringResource(R.string.webdav),
                             style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFC4C4D0)
+                            color = Color(0xFFC4C4D0),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     Text(
-                        "${surface.canvasWidth()}×${surface.canvasHeight()}",
+                        status.value,
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF787888)
+                        color = if (status.value in errMsgs) Color(0xFFE08080)
+                        else Color(0xFF80E27E),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("status-line")
+                            .clickable(
+                                onClickLabel = dismissLabel,
+                                role = Role.Button,
+                                onClick = { status.value = "" }
+                            )
                     )
-                    val doc = docRegistry.active()
-                    if (doc != null) {
-                        Text(
-                            doc.name + if (doc.dirty) " •" else "",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF787888)
-                        )
-                    }
-                    if (status.value.isNotEmpty()) {
-                        Text(
-                            status.value,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF80E27E)
-                        )
-                    }
-                    Box(Modifier.weight(1f))
                 }
             }
 
