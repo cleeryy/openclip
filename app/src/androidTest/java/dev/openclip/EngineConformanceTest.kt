@@ -1123,6 +1123,76 @@ class EngineConformanceTest {
         truncated.delete()
     }
 
+    // .clip palier (b): 1 vector layer + 1 text layer rasterized in-house
+    // (flat polylines, system-font UTF-8). Composite must show ink and the
+    // approximation counter must be > 0. Hostile geometry is refused.
+    @Test
+    fun clipImportVectorTextDegraded() {
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val clip = File(dir, "clip-b-test.clip")
+        writeVectorTextClip(clip, hostile = false)
+        val out = dev.openclip.doc.DocClip.importToOra(clip, dir)
+        assertTrue("vector/text clip must import, got $out", out is dev.openclip.doc.DocClip.Outcome.Ok)
+        val import = (out as dev.openclip.doc.DocClip.Outcome.Ok).import
+        try {
+            assertEquals(2, import.report.layerCount)
+            assertFalse("vector/text path must not be preview-only", import.report.previewOnly)
+            assertEquals("one house-rasterized vector layer", 1, import.report.vectorLayers)
+            assertEquals("one house-rasterized text layer", 1, import.report.textLayers)
+            assertTrue(
+                "approximations must be counted, got ${import.report.approximations}",
+                import.report.approximations.size > 0
+            )
+
+            val handle = EngineHost.nInit(48, 32, 160f)
+            val px = IntArray(48 * 32)
+            try {
+                assertTrue(EngineHost.nLoadDocument(handle, import.oraFile.absolutePath))
+                assertEquals(2, EngineHost.nLayerCount(handle))
+                val state = EngineHost.nLayerState(handle)
+                assertTrue("vector layer name must survive, got $state", state.contains("Vector"))
+                assertTrue("text layer name must survive, got $state", state.contains("Text"))
+                assertEquals(48 * 32, EngineHost.nCompositeInto(handle, px, 48, 32))
+                val ink = px.indices.count { px[it] != 0 }
+                assertTrue("vector+text must paint ink pixels, got $ink", ink > 20)
+                // Vector polyline runs (5,26)->(43,26): far from the text
+                // glyphs, so this pixel can only come from the vector layer.
+                assertTrue(
+                    "vector stroke must paint at (35,26)",
+                    (px[26 * 48 + 35] ushr 24) != 0
+                )
+            } finally {
+                EngineHost.nDispose(handle)
+            }
+
+            writeClipProofB(
+                dir, px, 48, 32,
+                import.report.layerCount, import.report.approximations.size
+            )
+        } finally {
+            clip.delete()
+            try {
+                import.oraFile.delete()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // .clip palier (b) hostile policy: out-of-range vector geometry decodes
+    // to nothing and the file is refused (no preview staged), never a crash.
+    @Test
+    fun clipImportHostileVectorRefused() {
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val clip = File(dir, "clip-b-hostile.clip")
+        writeVectorTextClip(clip, hostile = true)
+        assertTrue(
+            "hostile vector geometry must be refused",
+            dev.openclip.doc.DocClip.importToOra(clip, dir)
+                is dev.openclip.doc.DocClip.Outcome.Err
+        )
+        clip.delete()
+    }
+
     // ---- .clip test fixtures (clean-room, generated in-code) ----
     // Minimal writer mirroring the public envelope shape: CSFCHUNK magic,
     // then tag(8 ASCII) + BE u32 length + payload chunks; CHNKSQLi carries
@@ -1227,6 +1297,86 @@ class EngineConformanceTest {
         out.write(chunk("CHNKSQLi", dbBytes))
         out.write(chunk("CHNKFoot", ByteArray(0)))
         dst.writeBytes(out.toByteArray())
+    }
+
+    /** Builds a synthetic .clip: 1 vector + 1 text layer (or hostile). */
+    private fun writeVectorTextClip(dst: File, hostile: Boolean) {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dbPath = File(ctx.cacheDir, "clip-b-fixture.db")
+        if (dbPath.exists()) dbPath.delete()
+        val db = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(dbPath, null)
+        try {
+            db.execSQL("CREATE TABLE Canvas(width INTEGER, height INTEGER)")
+            db.execSQL("INSERT INTO Canvas(width, height) VALUES (48, 32)")
+            db.execSQL(
+                "CREATE TABLE Layer(id TEXT, name TEXT, opacity REAL, " +
+                    "visible INTEGER, blend TEXT, type TEXT)"
+            )
+            db.execSQL(
+                "INSERT INTO Layer(id, name, opacity, visible, blend, type) " +
+                    "VALUES ('vec', 'Vector', 1.0, 1, 'normal', 'vector')"
+            )
+            db.execSQL(
+                "INSERT INTO Layer(id, name, opacity, visible, blend, type) " +
+                    "VALUES ('txt', 'Text', 1.0, 1, 'normal', 'text')"
+            )
+            db.execSQL(
+                "CREATE TABLE VectorObjectList(layerId TEXT, points TEXT, " +
+                    "color TEXT, width REAL)"
+            )
+            val pts = if (!hostile) "5,26;43,26;43,5" else "99999999,99999999;88888888,88888888"
+            db.execSQL(
+                "INSERT INTO VectorObjectList(layerId, points, color, width) " +
+                    "VALUES ('vec', ?, '#000000', 3.0)",
+                arrayOf(pts)
+            )
+            if (!hostile) {
+                db.execSQL(
+                    "CREATE TABLE Text(layerId TEXT, content TEXT, " +
+                        "x REAL, y REAL, size REAL, color TEXT)"
+                )
+                db.execSQL(
+                    "INSERT INTO Text(layerId, content, x, y, size, color) " +
+                        "VALUES ('txt', 'Hi', 5.0, 20.0, 12.0, '#FF0000')"
+                )
+            }
+        } finally {
+            db.close()
+        }
+        val dbBytes = dbPath.readBytes()
+        dbPath.delete()
+        val out = java.io.ByteArrayOutputStream()
+        out.write("CSFCHUNK".toByteArray(Charsets.US_ASCII))
+        out.write(chunk("CHNKHead", byteArrayOf(1, 0, 0, 0)))
+        out.write(chunk("CHNKSQLi", dbBytes))
+        out.write(chunk("CHNKFoot", ByteArray(0)))
+        dst.writeBytes(out.toByteArray())
+    }
+
+    /** Labeled proof bitmap: real composite x6 + degraded strip (adb-pulled). */
+    private fun writeClipProofB(
+        dir: File, px: IntArray, w: Int, h: Int, layers: Int, approx: Int
+    ) {
+        val comp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        comp.setPixels(px, 0, w, 0, 0, w, h)
+        val proof = Bitmap.createBitmap(w * 6, h * 6 + 40, Bitmap.Config.ARGB_8888)
+        val cv = android.graphics.Canvas(proof)
+        // Mid-gray chrome: both the black vector stroke and the red text
+        // stay visible (the composite itself is transparent there).
+        cv.drawColor(0xFF808080.toInt())
+        val scaled = Bitmap.createScaledBitmap(comp, w * 6, h * 6, false)
+        cv.drawBitmap(scaled, 0f, 0f, null)
+        scaled.recycle()
+        comp.recycle()
+        val paint = android.graphics.Paint()
+        paint.color = 0xFFFFFFFF.toInt()
+        paint.textSize = 14f
+        paint.isAntiAlias = true
+        cv.drawText("clip-b: $layers layers degraded $approx composite OK", 8f, h * 6 + 28f, paint)
+        File(dir, "clip-b-proof.png").outputStream().use { o ->
+            proof.compress(Bitmap.CompressFormat.PNG, 100, o)
+        }
+        if (!proof.isRecycled) proof.recycle()
     }
 
     /** Labeled proof bitmap: real composite x6 + status strip (adb-pulled). */

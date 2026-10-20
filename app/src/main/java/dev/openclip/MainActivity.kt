@@ -341,6 +341,11 @@ class MainActivity : ComponentActivity() {
                                         !ok -> ctx.getString(R.string.clip_failed)
                                         report.previewOnly ->
                                             ctx.getString(R.string.clip_preview_only, name)
+                                        report.approximations.isNotEmpty() ->
+                                            ctx.getString(
+                                                R.string.clip_degraded,
+                                                name, report.approximations.size
+                                            )
                                         else -> ctx.getString(R.string.import_ok) + " " + name
                                     }
                                     refreshKey.value++
