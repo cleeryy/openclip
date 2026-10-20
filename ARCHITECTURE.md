@@ -301,3 +301,59 @@ thread only; results posted to SurfaceView.
 - engine: `make && make test` green on Linux (CI: ci-engine.yml)
 - app: CI build of debug APK (android.yml); engine JNI symbols must
   resolve (CI runs `check_jni_symbols.sh`)
+
+V+1 additions (defined 2026-10-20, selection/text/alpha-erase round —
+spec docs/v1-selection-texte-gomme.md):
+
+- Eraser mode key extended, NO new symbol. The `mode` JSON key accepted
+  by `nSetBrush` grows from `"brush"|"eraser"` to
+  `"brush"|"eraser"|"alpha-erase"` (shim-routed, M2 pattern):
+  - `"brush"` = paint session ink (unchanged).
+  - `"eraser"` = LEGACY alias, frozen: paints toward the canvas
+    background (white), exactly the M2/slice-5 behavior. Kept so old
+    presets (`.myb` with `mode:"eraser"`) and old docs keep their
+    committed look; engine tests lock paintDab-white unchanged.
+  - `"alpha-erase"` = dest-out on the ACTIVE raster layer: the stamp
+    reduces layer alpha (`a' = a*(1-m)`, rgb rescaled premultiplied and
+    clamped `[0,alpha]` — the M3 rgb<=alpha contract, alpha modified BY
+    DESIGN here). Pressure scales the erased quantity. Undo = same
+    touchTile path as strokes. On an armed mask target the eraser does
+    NOT touch pixels: it stamps BLACK into the mask (hide), mirroring
+    the M5 "ink luminance drives mask" rule (the mask stamp loop moved
+    shim -> engine paintMaskDab, byte-identical, so make test locks
+    it). On adjustment layers or
+    hidden layers the app refuses the stroke (same barred-ring guard as
+    the brush); vector layers keep the M6 `nVectorEraser` path.
+- `nSetLayerText(handle, index, json|null): Boolean` — stores the text
+  fiche on a top-level layer (opaque to the engine, M8 pattern: null or
+  empty clears). JSON keys (shim-parsed, unknown ignored, missing =
+  defaults): `text` (string), `font` (system family, default
+  `sans-serif`), `size` (px, default 0 = unset), `style`
+  (`regular|bold|italic|bold-italic`), `align` (`left|center|right`),
+  `leading` (factor, default 1.0), `tracking` (px, default 0),
+  `color` (`#RRGGBB`), `box` (`x,y,w`). The engine NEVER rasterizes
+  text (no font stack — single-file rule holds): layout is app-side
+  (platform Canvas) and pixels are committed through
+  `nBlitPngIntoLayer`. ORA round trip persists the fiche as
+  `x-openclip-text|font|size|style|align|leading|tracking|color|box`
+  attrs on the `<layer>` (readers that ignore unknown attrs degrade to
+  the visible pixels, like M8). Load of missing/malformed attrs =
+  normal layer (identity). `nLayerState` gains an optional `"text"`
+  object (same keys) so the app recovers the fiche (badge `Tx`,
+  re-edit) with no extra symbol.
+- `nBlitPngIntoLayer(handle, index, path): Boolean` — decodes a PNG
+  file (existing stb path, straight->premult conversion shared with
+  the PNG loader) and REPLACES the layer surface pixels. Requires an
+  exact canvas-size match; false + layer untouched otherwise. Undoable
+  via full-layer tile snapshots (filter pattern: touchTile all,
+  endStroke on success, cancelStroke on failure). Used by text commit /
+  re-edit; each commit is one undo step.
+- Selection: deliberately ZERO engine/JNI in V+1. The mask is an
+  app-side 1-bit full-resolution buffer (per document, session-only,
+  never persisted — closing the doc drops it, announced in the UI);
+  marching-ants overlay is composite-only; strokes split at the mask
+  boundary app-side; masked filter/tone = composite pull before/after,
+  app-side mix under the mask, `nLoadDocument` of the mixed single
+  frame into a DUPLICATED frame with the original frame deleted
+  (frame count preserved; the load resets undo + flattens layers, both
+  announced in the UI — same M4 load contract as everywhere else).

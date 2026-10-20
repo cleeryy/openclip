@@ -111,6 +111,17 @@ class BrushPrefs(appContext: Context) {
     var toolCurve: Float = 0f
         private set
 
+    // V+1: one-shot eraser migration note (the raster eraser now
+    // retrenches alpha instead of painting light). Persisted next to
+    // the tool so a reinstall re-announces; missing key = show once.
+    var eraserAlphaNoteShown by mutableStateOf(false)
+        private set
+
+    fun markEraserAlphaNoteShown() {
+        eraserAlphaNoteShown = true
+        schedule()
+    }
+
     // Slice 7: true when the file was missing-shaped/corrupt at read
     // (factory fallbacks kept). The host posts prefs_reset_hint once.
     var readFallback = false
@@ -203,7 +214,10 @@ class BrushPrefs(appContext: Context) {
         color,
         stabilize,
         curve.coerceIn(0f, 1f),
-        if (isBrush) "brush" else "eraser"
+        // V+1: the raster eraser is a real dest-out erase
+        // ("alpha-erase"); the legacy "eraser" white-paint alias stays
+        // frozen engine-side for old presets only.
+        if (isBrush) "brush" else "alpha-erase"
     )
 
     /** Debounced write (500 ms) + explicit flush on onPause. */
@@ -227,11 +241,12 @@ class BrushPrefs(appContext: Context) {
             file.writeText(
                 String.format(
                     Locale.US,
-                    """{"radius":%.2f,"opaque":%.3f,"stabilize":%.3f,"curve":%.3f,"curvePts":[%.3f,%.3f,%.3f,%.3f],"eRadius":%.2f,"eOpaque":%.3f,"tool":"%s"}""",
+                    """{"radius":%.2f,"opaque":%.3f,"stabilize":%.3f,"curve":%.3f,"curvePts":[%.3f,%.3f,%.3f,%.3f],"eRadius":%.2f,"eOpaque":%.3f,"tool":"%s","eraserNote":%s}""",
                     radius, opaque, stabilize, curve,
                     curvePts[0], curvePts[1], curvePts[2], curvePts[3],
                     eraserRadius, eraserOpaque,
-                    if (isEraser) "eraser" else "brush"
+                    if (isEraser) "eraser" else "brush",
+                    if (eraserAlphaNoteShown) "true" else "false"
                 )
             )
         } catch (_: Exception) {
@@ -241,6 +256,7 @@ class BrushPrefs(appContext: Context) {
     private val numRe = Regex("\"(radius|opaque|stabilize|curve|eRadius|eOpaque)\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)")
     private val ptsRe = Regex("\"curvePts\"\\s*:\\s*\\[([^\\]]*)\\]")
     private val toolRe = Regex("\"tool\"\\s*:\\s*\"([^\"]*)\"")
+    private val noteRe = Regex("\"eraserNote\"\\s*:\\s*(true|false)")
 
     private fun readFile() {
         try {
@@ -260,6 +276,7 @@ class BrushPrefs(appContext: Context) {
             isEraser = toolRe.find(t)?.groupValues?.get(1) == "eraser"
             toolEraser = isEraser
             toolCurve = curve
+            eraserAlphaNoteShown = noteRe.find(t)?.groupValues?.get(1) == "true"
         } catch (_: Exception) {
             readFallback = true
             radius = BRUSH_FALLBACK_RADIUS

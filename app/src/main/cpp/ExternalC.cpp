@@ -4,8 +4,12 @@
  * M2 additions (documented in ARCHITECTURE.md): nLoadMyb feeds a .myb
  * document to openclip::parseMyb keeping the session color; nSetBrush
  * also accepts "stabilize"/"curve" 0..1 (stored shim-side until the
- * engine consumes them) and "mode" "brush"|"eraser" — M2 erases toward
- * the canvas background (white), not layer alpha.
+ * engine consumes them) and "mode" "brush"|"eraser"|"alpha-erase" —
+ * M2 erases toward the canvas background (white), V+1 alpha-erases
+ * toward layer alpha (dest-out, ARCHITECTURE.md "V+1 additions").
+ * nSetLayerText stores the opaque text fiche (null clears, ORA
+ * round trip as x-openclip-*) and nBlitPngIntoLayer replaces a layer's
+ * pixels from a PNG file (exact canvas-size match, undoable).
  * M4 additions (documented in ARCHITECTURE.md): nLoadDocument replaces
  * the session canvas from a filesystem path (extension decides: .ora
  * via loadOra, .png single flattened layer, .psd rejected as
@@ -64,7 +68,8 @@ namespace {
  *
  * Brush JSON accepted (shim-defined schema, MyPaint-compatible params):
  *   {"radius":8, "hardness":0.7, "opaque":1.0, "spacing":0.15,
- *    "color":"#RRGGBB", "mode":"brush"|"eraser"}   // extra keys ignored
+ *    "color":"#RRGGBB", "mode":"brush"|"eraser"|"alpha-erase"}
+ * (extra keys ignored; "eraser" is the frozen legacy white-paint alias).
  */
 // M7 frames: each frame owns its canvas plus its own undo stacks
 // (full Canvas copies, ARCHITECTURE.md "M7 additions"). Frame is
@@ -103,9 +108,12 @@ struct Session {
     // M2 shim-side brush state (engine takes over when its M2 lane lands):
     // stabilize = input smoothing 0..1, curve = pressure exponent 0..1,
     // eraser = paint toward canvas background instead of ink color.
+    // V+1: alphaEraser = dest-out on raster pixels (ARCHITECTURE.md
+    // "V+1 additions"); on an armed mask the eraser stamps black.
     float stabilize = 0.0f;
     float curve = 0.0f;
     bool eraser = false;
+    bool alphaEraser = false;
     bool strokeOpen = false;
     float lastX = 0.0f, lastY = 0.0f, lastP = 1.0f;
     // M5: per-session mask-edit target (index + on/off). When on and the
@@ -209,39 +217,34 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
     if (s->maskTargetOn && static_cast<int>(layer) == s->maskTarget &&
         cur(s).layer(layer).hasMask) {
         // Ink luminance drives mask alpha (white keeps, black hides);
-        // alpha-erase and eraser flags do not apply to masks.
-        const std::uint8_t lum = static_cast<std::uint8_t>(
-            (0.299f * dab.r + 0.587f * dab.g + 0.114f * dab.b) *
-            std::max(0.0f, std::min(1.0f, dab.opacity)));
+        // alpha-erase and eraser flags do not apply to masks: the V+1
+        // rule stamps BLACK (hide) for alpha-erase, session ink for
+        // the legacy eraser (unchanged M5 behavior).
+        openclip::Dab stamped =
+            s->alphaEraser
+                ? openclip::dabFromPressure(s->brush, dab.x, dab.y,
+                                           dab.pressure, 0, 0, 0)
+                : openclip::dabFromPressure(s->brush, dab.x, dab.y,
+                                           dab.pressure, dab.r, dab.g,
+                                           dab.b);
         for (int ty = ty0; ty <= ty1; ++ty)
             for (int tx = tx0; tx <= tx1; ++tx)
                 hist(s).touchTile(cur(s), layer, tx, ty, true);
-        openclip::Surface& m = cur(s).layer(layer).mask;
-        const float rad = dab.radius > 0.5f ? dab.radius : 0.5f;
-        for (int y = y0; y < y1; ++y) {
-            for (int x = x0; x < x1; ++x) {
-                const float dx = (x + 0.5f) - dab.x;
-                const float dy = (y + 0.5f) - dab.y;
-                const float dist = std::sqrt(dx * dx + dy * dy);
-                if (dist > rad) continue;
-                const float fall = 1.0f - dist / rad;
-                const float sa = fall * dab.opacity;
-                if (sa <= 1e-4f) continue;
-                openclip::Pixel dst = m.get(x, y);
-                const float da = dst.a / 255.0f;
-                const float ta = lum / 255.0f;
-                const float oa = ta * sa + da * (1.0f - sa);
-                const std::uint8_t v = static_cast<std::uint8_t>(
-                    std::max(0.0f, std::min(255.0f, oa * 255.0f + 0.5f)));
-                m.set(x, y, openclip::Pixel{v, v, v, v});
-            }
-        }
+        openclip::paintMaskDab(cur(s).layer(layer).mask, stamped, s->brush);
         return true;
     }
     for (int ty = ty0; ty <= ty1; ++ty)
         for (int tx = tx0; tx <= tx1; ++tx)
             hist(s).touchTile(cur(s), layer, tx, ty);
-    openclip::paintDab(cur(s).layer(layer).surface, dab, s->brush);
+    if (s->alphaEraser) {
+        openclip::eraseDab(cur(s).layer(layer).surface,
+                           openclip::dabFromPressure(s->brush, dab.x, dab.y,
+                                                    dab.pressure, dab.r,
+                                                    dab.g, dab.b),
+                           s->brush);
+    } else {
+        openclip::paintDab(cur(s).layer(layer).surface, dab, s->brush);
+    }
     return true;
 }
 
@@ -383,12 +386,47 @@ Java_dev_openclip_engine_EngineHost_nSetBrush(JNIEnv* env, jclass,
     const float curve = static_cast<float>(jsonNum(j, "curve", s->curve));
     s->curve = curve < 0.0f ? 0.0f : (curve > 1.0f ? 1.0f : curve);
     const std::string mode = jsonStr(j, "mode");
-    if (mode == "eraser")
-        s->eraser = true;
-    else if (mode == "brush")
+    if (mode == "alpha-erase") {
+        s->alphaEraser = true;
         s->eraser = false;
+    } else if (mode == "eraser") {
+        // Legacy alias (frozen M2/slice-5 behavior): paints toward the
+        // canvas background, kept for old presets/docs.
+        s->eraser = true;
+        s->alphaEraser = false;
+    } else if (mode == "brush") {
+        s->eraser = false;
+        s->alphaEraser = false;
+    }
     const std::string color = jsonStr(j, "color");
     if (!color.empty()) parseColor(color, s->r, s->g, s->b);
+}
+
+// V+1 text fiche parser (ARCHITECTURE.md "V+1 additions", M8 pattern):
+// unknown keys ignored, missing keys keep code defaults.
+void parseTextDescriptor(const std::string& j, openclip::Layer& l) {
+    const std::string t = jsonStr(j, "text");
+    if (t.empty()) return;  // no fiche without content
+    l.textContent = t.substr(0, 8192);
+    const std::string font = jsonStr(j, "font");
+    l.textFont = font.empty() ? "sans-serif" : font.substr(0, 128);
+    const double size = jsonNum(j, "size", 0.0);
+    l.textSizePx =
+        (size >= 1.0 && size <= 4096.0) ? static_cast<int>(size) : 0;
+    const std::string style = jsonStr(j, "style");
+    l.textStyle = style.empty() ? "regular" : style.substr(0, 128);
+    const std::string align = jsonStr(j, "align");
+    l.textAlign = align.empty() ? "left" : align.substr(0, 128);
+    const double leading = jsonNum(j, "leading", 1.0);
+    l.textLeading =
+        (leading >= 0.5 && leading <= 4.0) ? leading : 1.0;
+    const double tracking = jsonNum(j, "tracking", 0.0);
+    l.textTracking =
+        (tracking >= -64.0 && tracking <= 64.0) ? tracking : 0.0;
+    const std::string color = jsonStr(j, "color");
+    l.textColor = color.empty() ? "#141414" : color.substr(0, 128);
+    const std::string box = jsonStr(j, "box");
+    l.textBox = box.substr(0, 128);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -642,6 +680,33 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
         appendJsonStr(out, l.adjustStops);
         out += "}";
     }
+    // V+1: text fiche (absent = normal raster layer; the app parses
+    // tolerantly and shows the Tx badge + re-edit).
+    if (l.hasText()) {
+        out += ",\"text\":{\"content\":";
+        appendJsonStr(out, l.textContent);
+        out += ",\"font\":";
+        appendJsonStr(out, l.textFont);
+        out += ",\"size\":";
+        out += std::to_string(l.textSizePx);
+        out += ",\"style\":";
+        appendJsonStr(out, l.textStyle);
+        out += ",\"align\":";
+        appendJsonStr(out, l.textAlign);
+        out += ",\"leading\":";
+        char lbuf[32];
+        std::snprintf(lbuf, sizeof lbuf, "%g", l.textLeading);
+        out += lbuf;
+        out += ",\"tracking\":";
+        char tbuf[32];
+        std::snprintf(tbuf, sizeof tbuf, "%g", l.textTracking);
+        out += tbuf;
+        out += ",\"color\":";
+        appendJsonStr(out, l.textColor);
+        out += ",\"box\":";
+        appendJsonStr(out, l.textBox);
+        out += "}";
+    }
     out += "}";
 }
 
@@ -693,6 +758,71 @@ Java_dev_openclip_engine_EngineHost_nSetLayerAdjustment(JNIEnv* env, jclass,
     }
     openclip::parseAdjustDescriptor(j, l.adjustType, l.adjustAmount,
                                     l.adjustStops);
+    return JNI_TRUE;
+}
+
+// V+1 text fiche (ARCHITECTURE.md "V+1 additions", M8 pattern): null or
+// empty json clears the fiche; otherwise the parsed fiche is stored
+// (opaque to the engine) and round-trips through ORA as x-openclip-*.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerText(JNIEnv* env, jclass,
+                                                  jlong handle, jint index,
+                                                  jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
+    const std::string j = json ? toStd(env, json) : std::string();
+    if (j.empty()) {  // null/empty clears the descriptor
+        l.textContent.clear();
+        l.textFont.clear();
+        l.textSizePx = 0;
+        l.textStyle.clear();
+        l.textAlign.clear();
+        l.textLeading = 1.0;
+        l.textTracking = 0.0;
+        l.textColor.clear();
+        l.textBox.clear();
+        return JNI_TRUE;
+    }
+    parseTextDescriptor(j, l);
+    return JNI_TRUE;
+}
+
+// V+1 pixel commit (ARCHITECTURE.md "V+1 additions"): decodes the PNG
+// at path and REPLACES the layer surface pixels. Requires an exact
+// canvas-size match; false + layer untouched otherwise. Undoable via
+// full-layer tile snapshots (filter pattern).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nBlitPngIntoLayer(JNIEnv* env, jclass,
+                                                      jlong handle,
+                                                      jint index,
+                                                      jstring path) {
+    Session* s = asSession(handle);
+    if (!s || !path) return JNI_FALSE;
+    if (index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    const std::string p = toStd(env, path);
+    if (p.empty()) return JNI_FALSE;
+    openclip::Surface decoded;
+    std::string error;
+    if (!openclip::decodePngFile(p, decoded, error)) return JNI_FALSE;
+    if (decoded.width() != cur(s).width() ||
+        decoded.height() != cur(s).height())
+        return JNI_FALSE;  // layer untouched
+    openclip::Layer& ly =
+        cur(s).layer(static_cast<std::size_t>(index));
+    if (ly.isGroup) return JNI_FALSE;
+    openclip::History& h = hist(s);
+    h.beginStroke();
+    for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
+        for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
+            h.touchTile(cur(s), static_cast<std::size_t>(index), tx, ty);
+    ly.surface.bytes().swap(decoded.bytes());
+    h.endStroke(cur(s));
     return JNI_TRUE;
 }
 

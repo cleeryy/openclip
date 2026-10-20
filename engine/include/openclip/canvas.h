@@ -39,6 +39,24 @@ struct Layer {
     double adjustAmount = 0.0;
     std::string adjustStops;
 
+    // V+1: text layer fiche (ARCHITECTURE.md "V+1 additions"). Opaque
+    // to the engine: stored from nSetLayerText JSON, round-tripped
+    // through ORA as x-openclip-* attrs, surfaced read-only in
+    // nLayerState. Empty textContent = normal layer (no fiche). The
+    // engine never rasterizes text: layout is app-side (platform
+    // Canvas) and pixels are committed via nBlitPngIntoLayer.
+    // Plain data: survives resize/copy/ORA like the M8 descriptor.
+    std::string textContent;  // x-openclip-text (empty = no fiche)
+    std::string textFont;     // x-openclip-font, default sans-serif
+    int textSizePx = 0;       // x-openclip-size (px, 0 = unset)
+    std::string textStyle;    // regular|bold|italic|bold-italic
+    std::string textAlign;    // left|center|right
+    double textLeading = 1.0;   // x-openclip-leading factor
+    double textTracking = 0.0;  // x-openclip-tracking px
+    std::string textColor;    // x-openclip-color #RRGGBB
+    std::string textBox;      // x-openclip-box "x,y,w"
+    bool hasText() const { return !textContent.empty(); }
+
     // M6: vector layer state. isVector layers store resolution-
     // independent paths (vectorData) and rasterize them at composite
     // time into a temp surface that flows through the same

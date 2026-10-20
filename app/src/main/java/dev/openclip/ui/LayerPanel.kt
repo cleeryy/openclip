@@ -78,6 +78,7 @@ internal data class LayerInfo(
     val hasMask: Boolean,
     val clipped: Boolean,
     val hasAdjust: Boolean,
+    val hasText: Boolean = false,
     val tagColor: Int? = null,
     val children: List<LayerInfo> = emptyList()
 )
@@ -149,7 +150,8 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
                     isGroup = false,
                     hasMask = c.optBoolean("mask", false),
                     clipped = c.optBoolean("clipped", false),
-                    hasAdjust = c.optJSONObject("adjust") != null
+                    hasAdjust = c.optJSONObject("adjust") != null,
+                hasText = c.optJSONObject("text") != null
                 )
             )
         }
@@ -166,6 +168,8 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
         hasMask = s.optBoolean("mask", false),
         clipped = s.optBoolean("clipped", false),
         hasAdjust = adj != null,
+        hasText = s.optJSONObject("text") != null ||
+            o.optJSONObject("text") != null,
         children = kids
     )
 }
@@ -662,6 +666,17 @@ private fun LayerRow(
                         .testTag("layer-badge-mask-${info.index}")
                         .semantics { contentDescription = maskDesc }
                         .clickable { onMaskTarget() }
+                )
+            }
+            if (info.hasText) {
+                val txDesc = stringResource(R.string.text_layer_badge)
+                Text(
+                    "Tx",
+                    color = Color(0xFF7FD4A8),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-tx-${info.index}")
+                        .semantics { contentDescription = txDesc }
                 )
             }
             if (info.hasAdjust) {

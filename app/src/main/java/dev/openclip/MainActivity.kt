@@ -99,6 +99,8 @@ import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ReferencePanel
 import dev.openclip.ui.StudioMenu
 import dev.openclip.ui.StudioMenuItem
+import dev.openclip.ui.TextPanel
+import dev.openclip.ui.TextSpec
 import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 import dev.openclip.ui.WebdavDialog
@@ -269,6 +271,16 @@ class MainActivity : ComponentActivity() {
         // banner help sheet.
         val hudTick = remember { mutableStateOf(0) }
         val showBrushHelp = remember { mutableStateOf(false) }
+        // V+1: selection menu liveness + text panel state (per anchor
+        // tap or double-tap re-edit; layer >= 0 = re-edit).
+        val selectionTick = remember { mutableStateOf(0) }
+        val showTextPanel = remember { mutableStateOf(false) }
+        val textAnchor = remember { mutableStateOf<Pair<Float, Float>?>(null) }
+        val textEditLayer = remember { mutableStateOf(-1) }
+        val textInitial = remember { mutableStateOf(TextSpec(text = "")) }
+        // V+1: one-shot eraser migration dialog (persisted in prefs).
+        val eraserNoteShown = remember { mutableStateOf(false) }
+        val showEraserNote = remember { mutableStateOf(false) }
 
         fun toggleNav() {
             navMode.value = !navMode.value
@@ -596,6 +608,36 @@ class MainActivity : ComponentActivity() {
         fun wireSurface(cv: EngineSurface, docId: String) {
             cv.navigateMode = navMode.value
             cv.edgeBottomEnabled = compact
+            cv.onSelectionChanged = {
+                selectionTick.value++
+                refreshKey.value++
+                val s = surfaces[docId]
+                status.value = if (s?.hasSelection() == true) {
+                    ctx.getString(R.string.selection_active_hint)
+                } else {
+                    ""
+                }
+            }
+            cv.onTextAnchor = { ex, ey ->
+                textAnchor.value = Pair(ex, ey)
+                textEditLayer.value = -1
+                textInitial.value = TextSpec(
+                    text = "",
+                    boxX = ex.coerceIn(0f, cv.canvasWidth().toFloat()),
+                    boxY = ey.coerceIn(0f, cv.canvasHeight().toFloat()),
+                    boxW = (cv.canvasWidth() - ex).coerceAtLeast(64f)
+                )
+                showTextPanel.value = true
+            }
+            cv.onTextDoubleTap = { layer ->
+                val fiche = cv.layerTextForTest(layer)
+                if (fiche != null) {
+                    textAnchor.value = null
+                    textEditLayer.value = layer
+                    textInitial.value = fiche
+                    showTextPanel.value = true
+                }
+            }
             cv.onGestureUndo = {
                 docRegistry.markDirty(docId, true)
                 refreshKey.value++
@@ -1219,10 +1261,20 @@ class MainActivity : ComponentActivity() {
                     StudioMenuItem(
                         label = label,
                         onClick = {
-                            surface.applyFilter(name, "{}") { ok ->
-                                status.value = if (ok)
-                                    ctx.getString(R.string.filter_applied)
-                                else ctx.getString(R.string.filter_failed)
+                            // V+1: under an active selection the filter
+                            // applies masked (flatten + history reset,
+                            // announced); on an adjustment layer it is
+                            // refused with the guard hint.
+                            val masked = surface.hasSelection()
+                            surface.applyFilterInSelection(name, "{}") { ok ->
+                                status.value = when {
+                                    !ok && surface.activeLayerIsAdjustment() ->
+                                        ctx.getString(R.string.selection_adjust_guard)
+                                    ok && masked ->
+                                        ctx.getString(R.string.selection_flattened)
+                                    ok -> ctx.getString(R.string.filter_applied)
+                                    else -> ctx.getString(R.string.filter_failed)
+                                }
                                 if (ok) {
                                     val aid = activeDocId.value
                                     if (aid != null) docRegistry.markDirty(aid, true)
@@ -1325,11 +1377,37 @@ class MainActivity : ComponentActivity() {
                             items = listOf(
                                 StudioMenuItem(
                                     label = stringResource(R.string.select_all),
-                                    enabled = false
+                                    onClick = {
+                                        surface.selectAll()
+                                        refreshKey.value++
+                                    }
                                 ),
                                 StudioMenuItem(
-                                    label = stringResource(R.string.deselect),
-                                    enabled = false
+                                    // selectionTick resubscribes the menu
+                                    // when the mask changes (surface-side).
+                                    label = stringResource(R.string.deselect) +
+                                        if (selectionTick.value < 0) "" else "",
+                                    enabled = surface.hasSelection(),
+                                    onClick = {
+                                        surface.clearSelection()
+                                        refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.select_invert),
+                                    enabled = surface.hasSelection(),
+                                    onClick = {
+                                        surface.invertSelection()
+                                        refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.select_feather),
+                                    enabled = surface.hasSelection(),
+                                    onClick = {
+                                        surface.featherSelection()
+                                        refreshKey.value++
+                                    }
                                 )
                             )
                         ),
@@ -1388,6 +1466,7 @@ class MainActivity : ComponentActivity() {
                         initialColor = inkHex,
                         navigateMode = navMode.value,
                         onNavigateToggle = { toggleNav() },
+                        onStatus = { status.value = it },
                         onFileClicked = { showExport.value = true },
                         onImportClicked = { openDoc.launch(arrayOf("*/*")) }
                     )
@@ -1733,49 +1812,16 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
-                    // Slice 5 honest-eraser banner: the raster eraser paints
-                    // light (engine limitation, no alpha-erase yet) — never
-                    // silent white. Shown when the eraser is armed on a
-                    // multi-layer stack; a single opaque layer hides it.
+                    // V+1: the raster eraser is a real dest-out erase
+                    // (alpha-erase) — the honest banner is gone. A
+                    // one-shot migration note announces the new
+                    // behavior (persisted in BrushPrefs).
                     activeSurface()?.let { surface ->
-                        if (brushPrefs.isEraser && surface.layerCount() > 1) {
-                            Row(
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .padding(
-                                        start = 8.dp, end = 8.dp, bottom = 64.dp
-                                    )
-                                    .background(Color(0xEB3A2A18))
-                                    .padding(horizontal = 10.dp, vertical = 4.dp)
-                                    .testTag("eraser-banner"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    stringResource(R.string.eraser_covers_hint),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFFE0A050),
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    onClick = { showBrushHelp.value = true },
-                                    contentPadding = PaddingValues(
-                                        horizontal = 8.dp, vertical = 0.dp
-                                    ),
-                                    modifier = Modifier
-                                        .height(48.dp)
-                                        .testTag("eraser-learn-more")
-                                ) {
-                                    Text(
-                                        stringResource(R.string.eraser_learn_more),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFF90B8FF),
-                                        maxLines = 1
-                                    )
-                                }
-                            }
+                        if (brushPrefs.isEraser && !brushPrefs.eraserAlphaNoteShown &&
+                            !eraserNoteShown.value
+                        ) {
+                            eraserNoteShown.value = true
+                            showEraserNote.value = true
                         }
                         PinnedBrushBar(
                             surface = surface,
@@ -2048,6 +2094,82 @@ class MainActivity : ComponentActivity() {
                 }
                 if (showBrushHelp.value) {
                     BrushHelpDialog(onDismiss = { showBrushHelp.value = false })
+                }
+                // V+1: one-shot eraser migration note (dialog, persisted
+                // in BrushPrefs so it shows once per install).
+                if (showEraserNote.value) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            showEraserNote.value = false
+                            brushPrefs.markEraserAlphaNoteShown()
+                        },
+                        title = {
+                            Text(
+                                stringResource(R.string.eraser_alpha_title),
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 2
+                            )
+                        },
+                        text = {
+                            Text(
+                                stringResource(R.string.eraser_alpha_note),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.testTag("eraser-alpha-note")
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showEraserNote.value = false
+                                    brushPrefs.markEraserAlphaNoteShown()
+                                },
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("eraser-alpha-ok")
+                            ) {
+                                Text(stringResource(R.string.ok))
+                            }
+                        }
+                    )
+                }
+                // V+1: text layer panel (anchor tap = new layer, double-tap
+                // = re-edit from the fiche; pixels replaced on commit).
+                if (showTextPanel.value) {
+                    val surf = activeSurface()
+                    if (surf != null) {
+                        TextPanel(
+                            initial = textInitial.value,
+                            inkHex = inkHex,
+                            onCommit = { spec ->
+                                showTextPanel.value = false
+                                val layer = textEditLayer.value
+                                val done: (Boolean) -> Unit = { ok ->
+                                    status.value = if (ok) {
+                                        ctx.getString(R.string.text_committed)
+                                    } else {
+                                        ctx.getString(R.string.filter_failed)
+                                    }
+                                    if (ok) {
+                                        val aid = activeDocId.value
+                                        if (aid != null) {
+                                            docRegistry.markDirty(aid, true)
+                                        }
+                                    }
+                                    if (surf.lastFontFallback) {
+                                        status.value = ctx.getString(
+                                            R.string.text_font_fallback
+                                        )
+                                    }
+                                    refreshKey.value++
+                                }
+                                if (layer >= 0) surf.reeditText(layer, spec, done)
+                                else surf.commitText(spec, done)
+                            },
+                            onDismiss = { showTextPanel.value = false }
+                        )
+                    } else {
+                        showTextPanel.value = false
+                    }
                 }
                 if (showExport.value) {
                     ExportDialog(

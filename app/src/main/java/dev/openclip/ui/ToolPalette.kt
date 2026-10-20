@@ -57,7 +57,8 @@ private fun BrushState.toJson(): String = String.format(
     color,
     stabilize,
     curve,
-    if (isBrush) "brush" else "eraser"
+    // V+1: real dest-out erase; legacy "eraser" stays engine-side only.
+    if (isBrush) "brush" else "alpha-erase"
 )
 
 private const val DEFAULT_INK = "#141414"
@@ -71,6 +72,7 @@ fun ToolPalette(
     onImportClicked: () -> Unit = {},
     navigateMode: Boolean = false,
     onNavigateToggle: () -> Unit = {},
+    onStatus: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Slice 5: the tool lives in the hoisted BrushPrefs (persisted);
@@ -83,6 +85,14 @@ fun ToolPalette(
     var showAdvanced by remember { mutableStateOf(false) }
     var symX by remember { mutableStateOf(false) }
     var symY by remember { mutableStateOf(false) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    // V+1: armed overlay tools (selection/text) live on the surface
+    // (per-doc); toolTick resubscribes the chips after each toggle.
+    var toolTick by remember { mutableStateOf(0) }
+    @Suppress("UNUSED_EXPRESSION")
+    toolTick
+    val selArmed = surface.selectionTool != null
+    val textArmed = surface.textArmed
 
     fun pushBrush() {
         prefs.bindTool(inkColor, !isBrush, prefs.curve)
@@ -183,6 +193,55 @@ fun ToolPalette(
                 modifier = Modifier
                     .height(48.dp)
                     .testTag("tool-nav")
+            )
+            // V+1: selection tool (rect/ellipse/lasso, app-side mask).
+            FilterChip(
+                selected = selArmed,
+                onClick = {
+                    if (surface.selectionTool == null) {
+                        surface.textArmed = false
+                        surface.selectionTool = SelectionTool.RECT
+                    } else {
+                        surface.selectionTool = null
+                    }
+                    toolTick++
+                },
+                label = {
+                    Text(
+                        stringResource(R.string.menu_selection),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                },
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-select")
+            )
+            // V+1: text tool (one-shot anchor, platform layout).
+            FilterChip(
+                selected = textArmed,
+                onClick = {
+                    if (!surface.textArmed) {
+                        surface.selectionTool = null
+                        surface.textArmed = true
+                        onStatus(ctx.getString(R.string.text_hint))
+                    } else {
+                        surface.textArmed = false
+                    }
+                    toolTick++
+                },
+                label = {
+                    Text(
+                        stringResource(R.string.text_tool),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                },
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-text")
             )
 
             // Compact inline size slider (active tool memory).
@@ -330,6 +389,52 @@ fun ToolPalette(
                     maxLines = 1,
                     softWrap = false,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        // V+1: selection mode selector (shown while armed) + the
+        // session-only note (no persistence — closing the doc drops it).
+        if (selArmed) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(top = 2.dp)
+                    .testTag("selection-modes"),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf(
+                    SelectionTool.RECT to R.string.selection_rect,
+                    SelectionTool.ELLIPSE to R.string.selection_ellipse,
+                    SelectionTool.LASSO to R.string.selection_lasso
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = surface.selectionTool == mode,
+                        onClick = {
+                            surface.selectionTool = mode
+                            toolTick++
+                        },
+                        label = {
+                            Text(
+                                stringResource(label),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                        },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("sel-mode-${mode.name.lowercase()}")
+                    )
+                }
+                Text(
+                    stringResource(R.string.selection_session_note),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFB8B8C8),
+                    maxLines = 2,
+                    modifier = Modifier.padding(start = 4.dp)
                 )
             }
         }

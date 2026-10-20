@@ -135,6 +135,22 @@ void writeLayerList(const std::vector<Layer>& layers, std::ostringstream& xml,
                     int& idx, int indent, std::size_t depth,
                     std::string& error, bool& ok);
 
+// V+1: text fiche attrs (x-openclip-*, ARCHITECTURE.md "V+1
+// additions"). Readers that ignore unknown attrs degrade to the visible
+// pixels, like the M8 adjust attrs above.
+void writeTextAttrs(const Layer& l, std::ostringstream& xml) {
+    if (!l.hasText()) return;
+    xml << " x-openclip-text=\"" << xmlEscape(l.textContent) << "\""
+        << " x-openclip-font=\"" << xmlEscape(l.textFont) << "\""
+        << " x-openclip-size=\"" << l.textSizePx << "\""
+        << " x-openclip-style=\"" << xmlEscape(l.textStyle) << "\""
+        << " x-openclip-align=\"" << xmlEscape(l.textAlign) << "\""
+        << " x-openclip-leading=\"" << l.textLeading << "\""
+        << " x-openclip-tracking=\"" << l.textTracking << "\""
+        << " x-openclip-color=\"" << xmlEscape(l.textColor) << "\""
+        << " x-openclip-box=\"" << xmlEscape(l.textBox) << "\"";
+}
+
 void writeLayerOne(const Layer& l, std::ostringstream& xml,
                    std::vector<std::pair<std::string, std::vector<std::uint8_t>>>&
                        entries,
@@ -158,6 +174,7 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
                 << " adjust-amount=\"" << l.adjustAmount << "\""
                 << " adjust-stops=\"" << xmlEscape(l.adjustStops) << "\"";
         }
+        writeTextAttrs(l, xml);
         xml << ">\n";
         writeLayerList(l.children, xml, entries, idx, indent + 1,
                        depth + 1, error, ok);
@@ -177,6 +194,7 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
             << " adjust-amount=\"" << l.adjustAmount << "\""
             << " adjust-stops=\"" << xmlEscape(l.adjustStops) << "\"";
     }
+    writeTextAttrs(l, xml);
     xml << "/>\n";
     std::vector<std::uint8_t> png;
     if (!encodePng(l.surface, png)) {
@@ -228,6 +246,54 @@ void applyAdjustAttrs(const std::string& xml, std::size_t tagStart,
     }
     tagAttr(xml, tagStart, "adjust-stops", s);
     l.adjustStops = s;
+}
+
+// V+1: read the text fiche attrs into l when x-openclip-text is
+// present AND non-empty; missing/empty = normal layer (identity, the
+// M8 contract). Values are capped (DoS hygiene on foreign files) and
+// numerics fall back to defaults.
+void applyTextAttrs(const std::string& xml, std::size_t tagStart,
+                    Layer& l) {
+    std::string t;
+    if (!tagAttr(xml, tagStart, "x-openclip-text", t) || t.empty()) return;
+    l.textContent = t.substr(0, 8192);
+    auto capped = [](const std::string& s) { return s.substr(0, 128); };
+    std::string v;
+    l.textFont = tagAttr(xml, tagStart, "x-openclip-font", v) ? capped(v)
+                                                             : "sans-serif";
+    if (tagAttr(xml, tagStart, "x-openclip-size", v)) {
+        try {
+            l.textSizePx = std::stoi(v);
+        } catch (...) {
+            l.textSizePx = 0;
+        }
+        if (l.textSizePx < 1 || l.textSizePx > 4096) l.textSizePx = 0;
+    }
+    l.textStyle = tagAttr(xml, tagStart, "x-openclip-style", v) ? capped(v)
+                                                                : "regular";
+    l.textAlign = tagAttr(xml, tagStart, "x-openclip-align", v) ? capped(v)
+                                                                : "left";
+    if (tagAttr(xml, tagStart, "x-openclip-leading", v)) {
+        try {
+            l.textLeading = std::stod(v);
+        } catch (...) {
+            l.textLeading = 1.0;
+        }
+        if (!(l.textLeading >= 0.5 && l.textLeading <= 4.0))
+            l.textLeading = 1.0;
+    }
+    if (tagAttr(xml, tagStart, "x-openclip-tracking", v)) {
+        try {
+            l.textTracking = std::stod(v);
+        } catch (...) {
+            l.textTracking = 0.0;
+        }
+        if (!(l.textTracking >= -64.0 && l.textTracking <= 64.0))
+            l.textTracking = 0.0;
+    }
+    l.textColor = tagAttr(xml, tagStart, "x-openclip-color", v) ? capped(v)
+                                                                : "#141414";
+    l.textBox = tagAttr(xml, tagStart, "x-openclip-box", v) ? capped(v) : "";
 }
 
 bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
@@ -284,6 +350,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 l.blend =
                     blendFromName(blendVectorValue(comp).c_str());
                 applyAdjustAttrs(xml, lOpen, l);
+                applyTextAttrs(xml, lOpen, l);
                 l.surface.resize(tmp.width(), tmp.height());
                 if (s.width() == tmp.width() && s.height() == tmp.height()) {
                     l.surface.bytes().swap(s.bytes());
@@ -334,6 +401,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                     blendFromName(blendVectorValue(comp).c_str());
                 g.passThrough = (iso != "isolated");
                 applyAdjustAttrs(xml, lOpen, g);
+                applyTextAttrs(xml, lOpen, g);
                 out.push_back(std::move(g));
                 continue;
             }
@@ -376,6 +444,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
             g.blend = blendFromName(blendVectorValue(comp).c_str());
             g.passThrough = (iso != "isolated");
             applyAdjustAttrs(xml, lOpen, g);
+                applyTextAttrs(xml, lOpen, g);
             if (!loadLayerList(xml, close + 1, gEnd, entries, tmp, depth + 1,
                                g.children, error))
                 return false;
@@ -509,7 +578,8 @@ bool exportPng(const Canvas& c, const std::string& path, std::string& error) {
     return true;
 }
 
-bool loadPngInto(Canvas& c, const std::string& path, std::string& error) {
+bool decodePngFile(const std::string& path, Surface& out,
+                   std::string& error) {
     int w = 0, h = 0, comp = 0;
     unsigned char* data = stbi_load(path.c_str(), &w, &h, &comp, 4);
     if (!data || w <= 0 || h <= 0) {
@@ -517,11 +587,8 @@ bool loadPngInto(Canvas& c, const std::string& path, std::string& error) {
         error = "png: decode failed for " + path;
         return false;
     }
-    Canvas tmp(w, h);
-    Layer l;
-    l.name = "Imported PNG";
-    l.surface.resize(w, h);
-    auto& px = l.surface.bytes();
+    out.resize(w, h);
+    auto& px = out.bytes();
     for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
         const std::uint8_t a = data[i * 4 + 3];
         px[i * 4 + 3] = a;
@@ -539,6 +606,17 @@ bool loadPngInto(Canvas& c, const std::string& path, std::string& error) {
         }
     }
     stbi_image_free(data);
+    return true;
+}
+
+bool loadPngInto(Canvas& c, const std::string& path, std::string& error) {
+    Surface s;
+    if (!decodePngFile(path, s, error)) return false;
+    Canvas tmp(s.width(), s.height());
+    Layer l;
+    l.name = "Imported PNG";
+    l.surface.resize(s.width(), s.height());
+    l.surface.bytes().swap(s.bytes());
     tmp.adoptLayer(std::move(l));
     c = std::move(tmp);
     c.setActiveLayer(0);

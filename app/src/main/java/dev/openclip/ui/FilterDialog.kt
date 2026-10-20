@@ -239,12 +239,22 @@ fun FilterDialog(
                         onClick = {
                             applying = true
                             val json = buildParamsJson(values, spec)
-                            surface.applyFilter(spec.name, json) { ok ->
+                            // V+1: under an active selection the filter
+                            // applies masked (flatten + history reset);
+                            // on an adjustment layer it is refused.
+                            val masked = surface.hasSelection()
+                            surface.applyFilterInSelection(spec.name, json) { ok ->
                                 applying = false
                                 Toast.makeText(
                                     ctx,
-                                    if (ok) ctx.getString(R.string.filter_applied)
-                                    else ctx.getString(R.string.filter_failed),
+                                    when {
+                                        !ok && surface.activeLayerIsAdjustment() ->
+                                            ctx.getString(R.string.selection_adjust_guard)
+                                        ok && masked ->
+                                            ctx.getString(R.string.selection_flattened)
+                                        ok -> ctx.getString(R.string.filter_applied)
+                                        else -> ctx.getString(R.string.filter_failed)
+                                    },
                                     Toast.LENGTH_SHORT
                                 ).show()
                                 if (ok) onDismiss()

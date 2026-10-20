@@ -3874,7 +3874,10 @@ class EngineConformanceTest {
             assertEquals(24f, brushR)
             assertEquals(48f, eraserR)
             assertTrue("brush JSON must carry mode brush: $brushJson", brushJson.contains("\"brush\""))
-            assertTrue("eraser JSON must carry mode eraser: $eraserJson", eraserJson.contains("\"eraser\""))
+            assertTrue(
+                "eraser JSON must carry mode alpha-erase: $eraserJson",
+                eraserJson.contains("\"alpha-erase\"")
+            )
             // Amber dashed cursor in eraser mode.
             pushTestBrush(radius = 48f, eraser = true)
             val cx = es.width * 0.5f
@@ -3885,9 +3888,10 @@ class EngineConformanceTest {
             assertNotNull("eraser hover must show the ring", ring)
             assertTrue("eraser ring must carry the eraser style", ring!!.eraser)
             composeRule.activityRule.scenario.onActivity { es.clearHoverForTest() }
-            // Honest banner on a 2-layer stack, gone in brush mode.
+            // V+1: the honest banner is gone (alpha-erase needs none)
+            // on any stack depth, in both tools.
             composeRule.waitForIdle()
-            composeRule.onNodeWithTag("eraser-banner").assertIsDisplayed()
+            composeRule.onNodeWithTag("eraser-banner").assertDoesNotExist()
             pushTestBrush(radius = 24f, eraser = false)
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("eraser-banner").assertDoesNotExist()
@@ -5593,6 +5597,604 @@ class EngineConformanceTest {
             assertEquals(1, awaitCount(1).size)
         } finally {
             slice6Reset()
+        }
+    }
+
+    // ---- V+1 selection / text / alpha-erase (spec
+    // docs/v1-selection-texte-gomme.md). Surface tests run on isolated
+    // fresh docs (openDoc/closeDoc) so the shared boot doc stays
+    // pristine for the order-sensitive gesture tests above.
+
+    private fun openFreshDoc(name: String, size: Int = 256): String {
+        var id = ""
+        composeRule.activityRule.scenario.onActivity { act ->
+            id = act.activityTestHooks.openDoc?.invoke(name, size, size, 160f, -1) ?: ""
+        }
+        assertTrue("openDoc must return an id", id.isNotEmpty())
+        composeRule.waitForIdle()
+        Thread.sleep(300)
+        val es = freshSurface(id)
+        // Fresh tabs need longer than the 5 s boot-surface poll
+        // (cold-start jank on swiftshader): mirror awaitDocReady.
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < 25000 &&
+            (es.width <= 200 || es.height <= 200 || !es.isReady())
+        ) {
+            Thread.sleep(200)
+        }
+        assertTrue(
+            "fresh surface must become ready (w=${es.width} h=${es.height} ready=${es.isReady()})",
+            es.width > 200 && es.height > 200 && es.isReady()
+        )
+        // Identity gate (state-based, no view traversal): the registry's
+        // active doc must be ours and our object attached. Guards the
+        // tab-switch composition transient (paused boot surface still
+        // in the tree briefly).
+        val t1 = SystemClock.uptimeMillis()
+        var stable = false
+        while (!stable && SystemClock.uptimeMillis() - t1 < 25000) {
+            composeRule.waitForIdle()
+            var match = false
+            var attached = false
+            composeRule.activityRule.scenario.onActivity { act ->
+                val h = act.activityTestHooks
+                match = h.activeDocId?.invoke() == id &&
+                    h.surfaceFor?.invoke(id) === es
+                attached = es.parent != null
+            }
+            stable = match && attached
+            if (!stable) Thread.sleep(200)
+        }
+        assertTrue("fresh surface must become the attached active one", stable)
+        es.navigateMode = false
+        es.resetView()
+        Thread.sleep(400)
+        return id
+    }
+
+    private fun freshSurface(id: String): EngineSurface {
+        var es: EngineSurface? = null
+        composeRule.activityRule.scenario.onActivity { act ->
+            es = act.activityTestHooks.surfaceFor?.invoke(id)
+        }
+        assertNotNull("fresh surface must exist", es)
+        return es!!
+    }
+
+    private fun closeFreshDoc(id: String) {
+        composeRule.activityRule.scenario.onActivity { act ->
+            act.activityTestHooks.closeDoc?.invoke(id)
+        }
+        composeRule.waitForIdle()
+    }
+
+    private fun awaitBool(
+        timeoutMs: Long = 20000,
+        op: ((Boolean) -> Unit) -> Unit
+    ): Boolean {
+        var out: Boolean? = null
+        val lock = Object()
+        op { ok ->
+            synchronized(lock) {
+                out = ok
+                lock.notifyAll()
+            }
+        }
+        synchronized(lock) {
+            val end = SystemClock.uptimeMillis() + timeoutMs
+            while (out == null && SystemClock.uptimeMillis() < end) {
+                lock.wait(1000)
+            }
+        }
+        return out == true
+    }
+
+    /** View-coord DOWN/MOVE/UP mapped from engine coordinates. */
+    private fun viewStrokeEng(
+        es: EngineSurface,
+        ex0: Float, ey0: Float, ex1: Float, ey1: Float
+    ) {
+        val (vx0, vy0) = es.engineToScreen(ex0, ey0)
+        val (vx1, vy1) = es.engineToScreen(ex1, ey1)
+        val t0 = SystemClock.uptimeMillis()
+        dispatchAll(
+            es,
+            simpleDown(t0, vx0, vy0),
+            MotionEvent.obtain(
+                t0, t0 + 16, MotionEvent.ACTION_MOVE,
+                (vx0 + vx1) / 2, (vy0 + vy1) / 2, 1f, 1f, 0, 1f, 1f, 0, 0
+            ),
+            MotionEvent.obtain(
+                t0, t0 + 32, MotionEvent.ACTION_MOVE,
+                vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0
+            ),
+            MotionEvent.obtain(
+                t0, t0 + 48, MotionEvent.ACTION_UP,
+                vx1, vy1, 1f, 1f, 0, 1f, 1f, 0, 0
+            )
+        )
+    }
+
+    private val inkBrush =
+        """{"radius":12,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+    private val eraseBrush =
+        """{"radius":24,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414","stabilize":0.0,"curve":0.0,"mode":"alpha-erase"}"""
+
+    // V+1-1: rect gesture arms/commits/disarrms; a full-width stroke
+    // then paints only inside the left-half mask.
+    @Test
+    fun selectionRectGestureConstrainsStroke() {
+        val id = openFreshDoc("sel-rect")
+        val es = freshSurface(id)
+        try {
+            es.setBrush(inkBrush)
+                es.selectionTool = dev.openclip.ui.SelectionTool.RECT
+            viewStrokeEng(es, 40f, 10f, 118f, 246f)
+            Thread.sleep(500)
+            assertTrue("rect drag must commit a mask", es.hasSelection())
+            assertTrue(
+                "tool must disarm after commit",
+                es.selectionTool == null
+            )
+            viewStrokeEng(es, 40f, 128f, 110f, 128f)
+            Thread.sleep(600)
+            val b = pullFull(es)
+            try {
+                var leftInk = 0
+                var rightInk = 0
+                for (x in 40..110 step 2) {
+                    if (b.getPixel(x, 128) != -1) leftInk++
+                }
+                // Ink stamps bleed ~12px past the mask edge.
+                for (x in 150..246 step 2) {
+                    if (b.getPixel(x, 128) != -1) rightInk++
+                }
+                assertTrue("left half must carry the stroke, got $leftInk", leftInk > 20)
+                assertEquals("right half must stay white, got $rightInk", 0, rightInk)
+            } finally {
+                b.recycle()
+            }
+            assertTrue("stroke must undo", es.undo())
+        } finally {
+            es.clearSelection()
+                es.resetView()
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-2: in-code lasso triangle, invert, alpha-erase: the inside
+    // stays inked, the outside is erased to transparency.
+    @Test
+    fun selectionLassoCloseAndInvert() {
+        val id = openFreshDoc("sel-lasso")
+        val es = freshSurface(id)
+        try {
+            es.setBrush(inkBrush)
+            viewStrokeEng(es, 40f, 120f, 216f, 120f)
+            Thread.sleep(600)
+            es.selectPolygonEngine(
+                    listOf(
+                        Pair(30f, 30f), Pair(200f, 30f), Pair(115f, 220f)
+                    )
+                )
+            assertTrue(es.hasSelection())
+            es.invertSelection()
+            es.setBrush(eraseBrush)
+            viewStrokeEng(es, 40f, 120f, 60f, 120f)
+            Thread.sleep(400)
+            viewStrokeEng(es, 170f, 120f, 216f, 120f)
+            Thread.sleep(600)
+            val b = pullFull(es)
+            try {
+                // Row y=120: triangle spans x in [70,160]; erase stamps
+                // bleed ~24px inside, so sample the safe core [100,130].
+                var insideInk = 0
+                for (x in 100..130 step 2) {
+                    val px = b.getPixel(x, 120)
+                    if ((px ushr 24) > 200 && px != -1) insideInk++
+                }
+                var outsideAlpha = 0
+                for (x in listOf(45, 55, 170, 180, 195, 210)) {
+                    outsideAlpha += (b.getPixel(x, 120) ushr 24)
+                }
+                assertTrue("inside must stay inked, got $insideInk", insideInk > 10)
+                assertTrue(
+                    "outside must be erased, alpha sum $outsideAlpha",
+                    outsideAlpha < 6 * 60
+                )
+            } finally {
+                b.recycle()
+            }
+            assertTrue("erase must undo", es.undo())
+            assertTrue("ink must undo", es.undo())
+        } finally {
+            es.clearSelection()
+                es.resetView()
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-3: the overlay probe follows zoom x2 + 15° rotation.
+    @Test
+    fun selectionOverlayFollowsView() {
+        val id = openFreshDoc("sel-view")
+        val es = freshSurface(id)
+        try {
+            es.selectRectEngine(40f, 40f, 140f, 140f)
+            assertTrue(es.hasSelection())
+            fun probe(ex: Float, ey: Float): Boolean? {
+                val (vx, vy) = es.engineToScreen(ex, ey)
+                return es.selectionOverlayForTest(vx, vy)
+            }
+            assertEquals(true, probe(90f, 90f))
+            assertEquals(false, probe(10f, 10f))
+            es.setViewForTest(2f, 15f)
+            Thread.sleep(300)
+            assertEquals(true, probe(90f, 90f))
+            assertEquals(false, probe(10f, 10f))
+        } finally {
+            es.clearSelection()
+                es.resetView()
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-4: pause/resume (tab switch) keeps the mask hash.
+    @Test
+    fun selectionSurvivesTabSwitch() {
+        val id = openFreshDoc("sel-tab")
+        val es = freshSurface(id)
+        try {
+            es.selectRectEngine(10f, 10f, 100f, 100f)
+            val h1 = es.selectionHashForTest()
+            assertTrue(h1 != 0L)
+            es.pause()
+                es.resume()
+            assertEquals(h1, es.selectionHashForTest())
+        } finally {
+            es.clearSelection()
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-5: mosaic under a left-half selection: right half
+    // byte-identical, left half changed, frame count preserved.
+    @Test
+    fun selectionFilterMasked() {
+        val id = openFreshDoc("sel-filter")
+        val es = freshSurface(id)
+        try {
+            es.setBrush(inkBrush)
+            viewStrokeEng(es, 40f, 64f, 216f, 64f)
+            viewStrokeEng(es, 40f, 128f, 176f, 192f)
+            Thread.sleep(600)
+            val before = pullFull(es)
+            val framesBefore = es.frameCount()
+            es.selectRectEngine(0f, 0f, 128f, 256f)
+            val ok = awaitBool { cb ->
+                es.applyFilterInSelection("mosaic", """{"blockSize":16}""", cb)
+            }
+            assertTrue("masked mosaic must apply", ok)
+            val after = pullFull(es)
+            try {
+                val bp = bitmapPixels(before)
+                val ap = bitmapPixels(after)
+                assertEquals(bp.size, ap.size)
+                var leftDiff = 0
+                var rightDiff = 0
+                for (y in 0 until 256) {
+                    for (x in 0 until 256) {
+                        if (bp[y * 256 + x] != ap[y * 256 + x]) {
+                            if (x < 128) leftDiff++ else rightDiff++
+                        }
+                    }
+                }
+                assertTrue("left must change, got $leftDiff", leftDiff > 100)
+                assertEquals("right must be byte-identical, got $rightDiff", 0, rightDiff)
+            } finally {
+                before.recycle()
+                after.recycle()
+            }
+            assertEquals(framesBefore, es.frameCount())
+        } finally {
+            es.clearSelection()
+                es.resetView()
+            closeFreshDoc(id)
+        }
+    }
+
+    private fun commitTextSync(es: EngineSurface, spec: dev.openclip.ui.TextSpec): Int {
+        val before = es.layerCount()
+        val ok = awaitBool { cb -> es.commitText(spec, cb) }
+        assertTrue("text commit must succeed", ok)
+        val after = es.layerCount()
+        assertEquals(before + 1, after)
+        return after - 1
+    }
+
+    // V+1-6: text commit paints pixels inside the box; the fiche is
+    // stored (badge source).
+    @Test
+    fun textCommitPaintsPixels() {
+        val id = openFreshDoc("text-commit")
+        val es = freshSurface(id)
+        try {
+            val spec = dev.openclip.ui.TextSpec(
+                text = "Aa Ég", font = "sans-serif", sizePx = 72,
+                boxX = 10f, boxY = 10f, boxW = 236f
+            )
+            val idx = commitTextSync(es, spec)
+            val fiche = es.layerTextForTest(idx)
+            assertNotNull(fiche)
+            assertEquals("Aa Ég", fiche!!.text)
+            val b = pullFull(es)
+            try {
+                var ink = 0
+                for (y in 10..150 step 2) {
+                    for (x in 10..245 step 2) {
+                        if (b.getPixel(x, y) != -1) ink++
+                    }
+                }
+                assertTrue("text box must carry ink, got $ink", ink > 30)
+            } finally {
+                b.recycle()
+            }
+            assertTrue("commit must undo", es.undo())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-7: re-edit replaces pixels; undo restores A.
+    @Test
+    fun textReeditReplaces() {
+        val id = openFreshDoc("text-reedit")
+        val es = freshSurface(id)
+        try {
+            val box = dev.openclip.ui.TextSpec(
+                text = "AAAA", font = "sans-serif", sizePx = 96,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            val idx = commitTextSync(es, box)
+            val pa = pullFull(es)
+            val okB = awaitBool { cb ->
+                es.reeditText(idx, box.copy(text = "BBBB"), cb)
+            }
+            assertTrue("re-edit must succeed", okB)
+            val pb = pullFull(es)
+            try {
+                val a = bitmapPixels(pa)
+                val c = bitmapPixels(pb)
+                var diff = 0
+                for (y in 8..150) {
+                    for (x in 8..247) {
+                        if (a[y * 256 + x] != c[y * 256 + x]) diff++
+                    }
+                }
+                assertTrue("B must replace A pixels, diff $diff", diff > 100)
+                assertTrue("undo must restore A", es.undo())
+                val pu = pullFull(es)
+                try {
+                    assertTrue(
+                        "undo must restore the A composite exactly",
+                        a.contentEquals(bitmapPixels(pu))
+                    )
+                } finally {
+                    pu.recycle()
+                }
+                assertTrue("A commit must undo", es.undo())
+            } finally {
+                pa.recycle()
+                pb.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-8: ORA save/load keeps the fiche and the pixels.
+    @Test
+    fun textOraRoundTrip() {
+        val id = openFreshDoc("text-ora")
+        val es = freshSurface(id)
+        try {
+            val idx = commitTextSync(
+                es,
+                dev.openclip.ui.TextSpec(
+                    text = "OraQZ 123", font = "serif", sizePx = 64,
+                    bold = true, align = "center",
+                    boxX = 8f, boxY = 40f, boxW = 240f
+                )
+            )
+            val f1 = es.layerTextForTest(idx)
+            assertNotNull(f1)
+            val p1 = pullFull(es)
+            val dir = InstrumentationRegistry.getInstrumentation()
+                .targetContext.cacheDir
+            val ora = File(dir, "text-roundtrip.ora")
+            assertTrue(awaitBool { cb -> es.saveTo(ora.absolutePath, "ora", cb) })
+            assertTrue(awaitBool { cb -> es.loadFrom(ora.absolutePath, cb) })
+            val f2 = es.layerTextForTest(idx)
+            assertNotNull("fiche must survive ORA", f2)
+            assertEquals(f1!!.text, f2!!.text)
+            assertEquals(f1.font, f2.font)
+            assertEquals(f1.sizePx, f2.sizePx)
+            val p2 = pullFull(es)
+            try {
+                assertTrue(
+                    "ORA round trip must preserve pixels",
+                    bitmapPixels(p1).contentEquals(bitmapPixels(p2))
+                )
+            } finally {
+                p1.recycle()
+                p2.recycle()
+                ora.delete()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-9: unknown font falls back to sans-serif with a flag, no crash.
+    @Test
+    fun textFontFallback() {
+        val id = openFreshDoc("text-fallback")
+        val es = freshSurface(id)
+        try {
+            val idx = commitTextSync(
+                es,
+                dev.openclip.ui.TextSpec(
+                    text = "Fallback", font = "Nope-404-missing", sizePx = 64,
+                    boxX = 8f, boxY = 40f, boxW = 240f
+                )
+            )
+            assertTrue("fallback flag must be set", es.lastFontFallback)
+            val b = pullFull(es)
+            try {
+                var ink = 0
+                for (y in 40..140 step 2) {
+                    for (x in 8..247 step 2) {
+                        if (b.getPixel(x, y) != -1) ink++
+                    }
+                }
+                assertTrue("fallback text must still paint, got $ink", ink > 20)
+            } finally {
+                b.recycle()
+            }
+            assertTrue("fallback commit must undo", es.undo())
+            // Undo restores pixels (touchTile history); the fiche is layer
+            // metadata and survives (same rule as the M8 adjust descriptor).
+            assertTrue(es.layerTextForTest(idx)?.text == "Fallback")
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // V+1-10: dest-out erase on a blue layer reveals the red layer below
+    // (the shot that kills the white-paint hack).
+    @Test
+    fun eraserDestOutComposite() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":60,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#FF0000"}"""
+            )
+            var sid = EngineHost.nStrokeBegin(handle, 128f, 128f, 1f)
+            EngineHost.nStrokeMove(handle, sid, 129f, 128f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            val blue = EngineHost.nAddLayer(handle, "blue")
+            assertTrue(blue >= 0)
+            assertEquals(blue, EngineHost.nSetActiveLayer(handle, blue))
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":60,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#0000FF"}"""
+            )
+            sid = EngineHost.nStrokeBegin(handle, 128f, 128f, 1f)
+            EngineHost.nStrokeMove(handle, sid, 129f, 128f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            // Sanity: the top is blue before the erase.
+            var px = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, px, w, h))
+            val topBefore = px[128 * w + 128]
+            assertTrue(
+                "top must be blue-dominant before erase",
+                ((topBefore shr 16) and 0xFF) < 80 &&
+                    ((topBefore) and 0xFF) > 150
+            )
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":40,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#141414","mode":"alpha-erase"}"""
+            )
+            sid = EngineHost.nStrokeBegin(handle, 128f, 128f, 1f)
+            EngineHost.nStrokeMove(handle, sid, 129f, 128f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            px = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, px, w, h))
+            val center = px[128 * w + 128]
+            val cr = (center shr 16) and 0xFF
+            val cb = center and 0xFF
+            assertTrue(
+                "erased center must show red, got #%06X".format(center and 0xFFFFFF),
+                cr > 150 && cr > cb + 60
+            )
+            assertTrue("erase must undo", EngineHost.nUndo(handle))
+            px = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, px, w, h))
+            assertEquals("undo must restore blue", topBefore, px[128 * w + 128])
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // V+1-11: the honest banner is gone (alpha-erase needs none).
+    @Test
+    fun eraserBannerGone() {
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-eraser").performScrollTo()
+        composeRule.onNodeWithTag("tool-eraser").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("eraser-banner").assertDoesNotExist()
+        // Dismiss the one-shot migration note if this run shows it.
+        runCatching {
+            composeRule.onNodeWithTag("eraser-alpha-ok").performClick()
+            composeRule.waitForIdle()
+        }
+        composeRule.onNodeWithTag("tool-brush").performScrollTo()
+        composeRule.onNodeWithTag("tool-brush").performClick()
+        composeRule.waitForIdle()
+    }
+
+    // V+1 proof capture (not in the spec count): draws selection + text
+    // + an erased patch on an isolated doc and screenshots to
+    // /sdcard/openclip-v1.png for the human review gate.
+    @Test
+    fun v1ProofScreenshot() {
+        val id = openFreshDoc("proof", 512)
+        val es = freshSurface(id)
+        try {
+            val ok = awaitBool { cb ->
+                es.commitText(
+                    dev.openclip.ui.TextSpec(
+                        text = "Aa", font = "sans-serif", sizePx = 84,
+                        boxX = 280f, boxY = 60f, boxW = 200f
+                    ),
+                    cb
+                )
+            }
+            assertTrue(ok)
+            es.setBrush(inkBrush)
+            viewStrokeEng(es, 80f, 420f, 470f, 420f)
+            Thread.sleep(500)
+            es.setBrush(eraseBrush)
+            viewStrokeEng(es, 230f, 400f, 350f, 440f)
+            Thread.sleep(500)
+            // Selection LAST so the marching ants stay visible while
+            // the strokes below remain painted (unmasked strokes first).
+            es.selectRectEngine(40f, 40f, 240f, 200f)
+            Thread.sleep(1500)
+            // Proof capture for the human review gate (best effort,
+            // like the slice reports): whole-screen shot with the
+            // selection ants + text layer + erased patch visible.
+            var shot: Bitmap? = null
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    shot = InstrumentationRegistry.getInstrumentation()
+                        .uiAutomation.takeScreenshot()
+                }
+            } catch (_: Exception) {
+            }
+            assertNotNull("screenshot must be captured", shot)
+            val dst = File(composeRule.activity.cacheDir, "openclip-v1.png")
+            FileOutputStream(dst).use { o ->
+                shot!!.compress(Bitmap.CompressFormat.PNG, 100, o)
+            }
+            if (!shot!!.isRecycled) shot!!.recycle()
+            assertTrue("screenshot must land", dst.length() > 10000)
+        } finally {
+            es.clearSelection()
+                es.resetView()
+            closeFreshDoc(id)
         }
     }
 }

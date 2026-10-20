@@ -5,6 +5,7 @@
 
 #include "openclip/surface.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cctype>
 
@@ -133,6 +134,82 @@ void paintDab(Surface& s, const Dab& d, const BrushParams& p) {
             if (o.g > o.a) o.g = o.a;
             if (o.b > o.a) o.b = o.a;
             s.set(x, y, o);
+        }
+    }
+}
+
+void eraseDab(Surface& s, const Dab& d, const BrushParams& p) {
+    if (d.opacity <= 0.0f || d.radius <= 0.0f) return;
+    const int x0 = static_cast<int>(std::floor(d.x - d.radius));
+    const int x1 = static_cast<int>(std::ceil(d.x + d.radius));
+    const int y0 = static_cast<int>(std::floor(d.y - d.radius));
+    const int y1 = static_cast<int>(std::ceil(d.y + d.radius));
+    const float sa = d.opacity;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            const float dx = (x + 0.5f) - d.x;
+            const float dy = (y + 0.5f) - d.y;
+            const float t = std::sqrt(dx * dx + dy * dy) / d.radius;
+            const float m = falloff(t, p.hardness) * sa;
+            if (m <= 1e-4f) continue;
+            Pixel dst = s.get(x, y);
+            if (dst.a == 0) continue;
+            const float da = dst.a / 255.0f;
+            const float oa = da * (1.0f - m);
+            if (oa <= 0.5f / 255.0f) {
+                s.set(x, y, Pixel{0, 0, 0, 0});
+                continue;
+            }
+            // Rescale rgb by oa/da: premultiplied invariant (rgb <= a)
+            // holds because dst was premultiplied.
+            const float k = oa / da;
+            Pixel o;
+            o.a = static_cast<std::uint8_t>(std::lround(oa * 255.0f));
+            o.r = static_cast<std::uint8_t>(std::lround(dst.r * k));
+            o.g = static_cast<std::uint8_t>(std::lround(dst.g * k));
+            o.b = static_cast<std::uint8_t>(std::lround(dst.b * k));
+            if (o.r > o.a) o.r = o.a;
+            if (o.g > o.a) o.g = o.a;
+            if (o.b > o.a) o.b = o.a;
+            s.set(x, y, o);
+        }
+    }
+}
+void paintMaskDab(Surface& m, const Dab& d, const BrushParams& p) {
+    (void)p;  // M5 parity: the mask stamp is a linear disc (hardness
+               // does not apply); the brush radius/opacity still do.
+    if (d.opacity <= 0.0f || d.radius <= 0.0f) return;
+    // Bounds mirror the former shim loop byte-for-byte (pad + linear
+    // falloff 1-dist/rad, exclusive ends); get/set clamp anyway.
+    const int rad = d.radius > 0.5f ? static_cast<int>(d.radius) : 1;
+    const int pad = static_cast<int>(d.radius) + 1;
+    const int x0 = std::max(0, static_cast<int>(d.x) - pad);
+    const int y0 = std::max(0, static_cast<int>(d.y) - pad);
+    const int x1 = std::min(m.width(), static_cast<int>(d.x) + pad);
+    const int y1 = std::min(m.height(), static_cast<int>(d.y) + pad);
+    // M5 rule, byte-identical to the former shim loop: ink luminance
+    // (scaled once by opacity here) blends toward the mask alpha with
+    // the stamp's own opacity applied a second time via sa (kept for
+    // behavior parity — mask strokes hide progressively).
+    const float lum = (0.299f * d.r + 0.587f * d.g + 0.114f * d.b) *
+                      clamp01(d.opacity);
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            const float dx = (x + 0.5f) - d.x;
+            const float dy = (y + 0.5f) - d.y;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist > rad) continue;
+            const float sa = (1.0f - dist / rad) * clamp01(d.opacity);
+            if (sa <= 1e-4f) continue;
+            Pixel dst = m.get(x, y);
+            const float da = dst.a / 255.0f;
+            const float ta = lum / 255.0f;
+            const float oa = ta * sa + da * (1.0f - sa);
+            long v = std::lround(oa * 255.0f);
+            if (v < 0) v = 0;
+            if (v > 255) v = 255;
+            const std::uint8_t b = static_cast<std::uint8_t>(v);
+            m.set(x, y, Pixel{b, b, b, b});
         }
     }
 }

@@ -31,7 +31,8 @@ TEST_SRCS = tests/main.cpp \
             tests/test_vector.cpp \
             tests/test_adjust.cpp \
             tests/test_ref.cpp \
-            tests/test_tone.cpp
+            tests/test_tone.cpp \
+            tests/test_erase.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a

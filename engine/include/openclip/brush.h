@@ -40,6 +40,18 @@ std::vector<Dab> interpolateStamps(const BrushParams& p,
 // Paint one soft round stamp (source-over) onto a premultiplied surface.
 void paintDab(Surface& s, const Dab& d, const BrushParams& p);
 
+// V+1 alpha-erase (ARCHITECTURE.md "V+1 additions"): dest-out stamp —
+// reduces surface alpha in place (a' = a*(1-m)), rgb rescaled to stay
+// premultiplied (rgb <= a preserved). Same falloff sampling as
+// paintDab; color channels of d are ignored.
+void eraseDab(Surface& s, const Dab& d, const BrushParams& p);
+
+// Mask stamp (M5 rule, moved here V+1 so make-test covers it): ink
+// luminance drives mask alpha (white keeps, black hides), rgb follows
+// alpha (straight mask convention Pixel{v,v,v,v}). Pixels are never
+// touched — the caller routes to the mask surface.
+void paintMaskDab(Surface& m, const Dab& d, const BrushParams& p);
+
 // Parse a MyPaint .myb XML descriptor. Reads the <setting name="radius"|
 // "hardness"|"opaque"> base_value attributes we support; unknown settings
 // are ignored. Returns false on malformed XML. Brand-new clean-room parser.

@@ -19,6 +19,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import dev.openclip.R
 import dev.openclip.engine.EngineHost
+import java.io.File
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -159,7 +160,7 @@ class EngineSurface @JvmOverloads constructor(
             if (o != null) brushOpaqueEngine = o.coerceIn(0f, 1f)
             val mode = Regex("\"mode\"\\s*:\\s*\"([^\"]*)\"")
                 .find(json)?.groupValues?.get(1)
-            if (mode == "eraser") brushIsEraser = true
+            if (mode == "eraser" || mode == "alpha-erase") brushIsEraser = true
             else if (mode == "brush") brushIsEraser = false
         } catch (_: Exception) {
         }
@@ -196,6 +197,7 @@ class EngineSurface @JvmOverloads constructor(
     fun cursorRingForTest(): CursorRing? {
         if (!hoverActive) return null
         if (navigating || suspendRender || navigateMode || pipetteArmed) return null
+        if (selectionTool != null || textArmed) return null
         val vw = width
         val vh = height
         if (vw <= 0 || vh <= 0) return null
@@ -1134,6 +1136,18 @@ class EngineSurface @JvmOverloads constructor(
                         requestParentDisallowInterceptTouchEvent()
                         return true
                     }
+                    // V+1: armed selection/text tools consume the stylus
+                    // like the pipette (no parasite ink).
+                    if (selectionTool != null) {
+                        routeSelectionDown(event.getX(stylusIdx), event.getY(stylusIdx))
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
+                    if (textArmed) {
+                        routeTextAnchor(event.getX(stylusIdx), event.getY(stylusIdx))
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     // Stylus-first: drop the interrupted finger tail and
                     // roll the open finger stroke back on the render
                     // thread; the stylus points below start a clean stroke.
@@ -1161,7 +1175,13 @@ class EngineSurface @JvmOverloads constructor(
                         requestParentDisallowInterceptTouchEvent()
                         return true
                     }
-                    if (stylusId == sid) enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_MOVE)
+                    // V+1: selection trace follows the stylus drag
+                    // (no ink while a shape tool is armed).
+                    if (selectionTool != null) {
+                        routeSelectionMove(event.getX(stylusIdx), event.getY(stylusIdx))
+                    } else if (stylusId == sid) {
+                        enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_MOVE)
+                    }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP,
                 MotionEvent.ACTION_CANCEL -> {
@@ -1171,7 +1191,12 @@ class EngineSurface @JvmOverloads constructor(
                         return true
                     }
                     if (stylusId == sid || action == MotionEvent.ACTION_CANCEL) {
-                        enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_UP)
+                        // V+1: lift closes the armed shape trace.
+                        if (selectionTool != null) {
+                            routeSelectionUp(event.getX(stylusIdx), event.getY(stylusIdx))
+                        } else {
+                            enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_UP)
+                        }
                         stylusId = -1
                         strokePointerId = -1
                         strokeOpenUi = false
@@ -1298,6 +1323,24 @@ class EngineSurface @JvmOverloads constructor(
                     requestParentDisallowInterceptTouchEvent()
                     return true
                 }
+                // V+1: armed selection/text tools consume the tap
+                // (no parasite ink), like the armed pipette.
+                if (selectionTool != null && !navigateMode && !mousePan) {
+                    routeSelectionDown(x, y)
+                    strokePointerId = event.getPointerId(0)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
+                if (textArmed && !navigateMode && !mousePan) {
+                    routeTextAnchor(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
+                // V+1: double-tap on a text layer reopens it (no ink).
+                if (!navigateMode && !mousePan && checkTextDoubleTap(x, y)) {
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 val edge = edgeAt(x, y, edgeBandPx)
                 if (edge >= 0) {
                     // Armed: no stroke starts from the band until the
@@ -1327,6 +1370,15 @@ class EngineSurface @JvmOverloads constructor(
                 // tap-armed pipette swallows moves (no stroke starts).
                 if (pipetteArmed) {
                     if (pipetteLoupe) onPipetteMove?.invoke(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
+                // V+1: shape trace wins over the edge detector (the DOWN
+                // already bypassed edge arming, so no ink is queued).
+                if (selectionTool != null && !navigateMode && !mousePan &&
+                    event.getPointerId(0) == strokePointerId
+                ) {
+                    routeSelectionMove(x, y)
                     requestParentDisallowInterceptTouchEvent()
                     return true
                 }
@@ -1360,6 +1412,18 @@ class EngineSurface @JvmOverloads constructor(
                     requestParentDisallowInterceptTouchEvent()
                     return true
                 }
+                // V+1: lift closes the armed shape trace (no ink).
+                if (selectionTool != null) {
+                    if (event.pointerCount > 0) {
+                        routeSelectionUp(event.getX(0), event.getY(0))
+                    }
+                    strokePointerId = -1
+                    edgeArmed = -1
+                    pendingStroke = false
+                    edgeFired = false
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 if (edgeArmed >= 0) {
                     disarmEdge()
                     if (pendingStroke) {
@@ -1381,7 +1445,10 @@ class EngineSurface @JvmOverloads constructor(
                     }
                     strokePointerId = -1
                     strokeOpenUi = false
-// Slice 5: finger lifted = ring hidden (no capacitive hover).
+                    // V+1: tap clock for the text double-tap probe.
+                    lastTapUpTime = SystemClock.uptimeMillis()
+                    lastTapUpXY = Pair(event.getX(0), event.getY(0))
+                    // Slice 5: finger lifted = ring hidden (no capacitive hover).
                     hoverActive = false
                     needsComposite = true
                 }
@@ -1584,6 +1651,26 @@ class EngineSurface @JvmOverloads constructor(
                     rollbackOpen = false
                     if (!navigating) {
                     for (pt in drained) {
+                        // V+1: selection gate — outside points never stamp:
+                        // an open stroke ends at the boundary, a closed one
+                        // stays closed until a gated-inside point arrives.
+                        val gatedOut = synchronized(selectionLock) {
+                            val m = selectionMask
+                            m != null && !m.contains(pt.x, pt.y)
+                        }
+                        if (gatedOut) {
+                            if (vecEraseActive) {
+                                vecEraseActive = false
+                                vecEraseIndex = -1
+                                vecErasePts.clear()
+                                needsComposite = true
+                            } else if (strokeId != 0L) {
+                                EngineHost.nStrokeEnd(handle, strokeId)
+                                strokeId = 0L
+                                needsComposite = true
+                            }
+                            continue
+                        }
                         when (pt.action) {
                             MotionEvent.ACTION_DOWN -> {
                                 // Slice 5: eraser on a vector layer routes
@@ -1733,6 +1820,20 @@ class EngineSurface @JvmOverloads constructor(
             drainEngineQueue()
             drainThumbQueue()
 
+            // V+1: marching-ants phase (10 Hz like the slice-5 HUD keeps
+            // the loop alive while a selection or trace shows).
+            val antsActive = synchronized(selectionLock) {
+                selectionMask != null || shapePreview.isNotEmpty()
+            }
+            if (antsActive && !paused) {
+                val nowA = SystemClock.uptimeMillis()
+                if (nowA - lastAntsTick >= 100) {
+                    lastAntsTick = nowA
+                    selectionPhase += 14f
+                    needsComposite = true
+                }
+            }
+
             if (!needsComposite) {
                 if (isLoupeVisible()) {
                     needsComposite = true
@@ -1800,6 +1901,7 @@ class EngineSurface @JvmOverloads constructor(
                         loupeDrawn = true
                     }
                     drawCursorRing(c, dst, ang)
+                    drawSelectionOverlay(c, dst, ang)
                 } finally {
                     holder.unlockCanvasAndPost(c)
                 }
@@ -1845,6 +1947,10 @@ class EngineSurface @JvmOverloads constructor(
 
     private fun drawCursorRing(c: android.graphics.Canvas, dst: RectF, ang: Float) {
         if (!hoverActive || navigating || suspendRender || navigateMode || pipetteArmed) {
+            postRingDesc(null)
+            return
+        }
+        if (selectionTool != null || textArmed) {
             postRingDesc(null)
             return
         }
@@ -1943,6 +2049,634 @@ class EngineSurface @JvmOverloads constructor(
         try {
             EngineHost.nVectorEraser(handle, vecEraseIndex, true, sb.toString())
         } catch (_: Exception) {
+        }
+    }
+
+    // ---- V+1 selection + text (app-side only, no new engine pixels
+    // except through the documented V+1 symbols) ----
+    // The mask is session-only: pause()/resume() conserve it (surface
+    // kept alive), dispose() releases it. Strokes split at the boundary
+    // (end outside, begin inside); the marching-ants overlay is
+    // composite-only and follows the view matrix like the cursor ring.
+
+    /** Armed shape tool (null = ink). Mirrors pipetteArmed one-shot use. */
+    @Volatile var selectionTool: SelectionTool? = null
+    /** Armed text tool: the next canvas tap is an anchor, never ink. */
+    @Volatile var textArmed: Boolean = false
+    var onSelectionChanged: (() -> Unit)? = null
+    var onTextAnchor: ((Float, Float) -> Unit)? = null
+    var onTextDoubleTap: ((Int) -> Unit)? = null
+
+    private val selectionLock = Any()
+    private var selectionMask: SelectionMask? = null
+    private var selectionPhase = 0f
+    private var lastAntsTick = 0L
+    private var shapePreview: List<Pair<Float, Float>> = emptyList()
+    private var shapeStartEngine: Pair<Float, Float>? = null
+    private var lassoTrace: MutableList<Pair<Float, Float>> = mutableListOf()
+    private var lassoStartView: Pair<Float, Float>? = null
+    private var lastTapUpTime = 0L
+    private var lastTapUpXY = Pair(0f, 0f)
+
+    /** True when the last text commit substituted the font. */
+    @Volatile var lastFontFallback = false
+
+    fun hasSelection(): Boolean = synchronized(selectionLock) {
+        selectionMask != null
+    }
+
+    fun maskContains(ex: Float, ey: Float): Boolean = synchronized(selectionLock) {
+        selectionMask?.contains(ex, ey) ?: true
+    }
+
+    private fun notifySelectionChanged() {
+        needsComposite = true
+        val cb = onSelectionChanged
+        if (cb != null) post { cb() }
+    }
+
+    fun clearSelection() = synchronized(selectionLock) {
+        selectionMask = null
+        shapePreview = emptyList()
+        lassoTrace.clear()
+        lassoStartView = null
+        shapeStartEngine = null
+        notifySelectionChanged()
+    }
+
+    fun selectAll() = synchronized(selectionLock) {
+        val m = SelectionMask(engineWidth, engineHeight)
+        m.selectAll()
+        selectionMask = m
+        shapePreview = emptyList()
+        lassoTrace.clear()
+        shapeStartEngine = null
+        notifySelectionChanged()
+    }
+
+    fun invertSelection() = synchronized(selectionLock) {
+        selectionMask?.invert() ?: return
+        notifySelectionChanged()
+    }
+
+    fun featherSelection() = synchronized(selectionLock) {
+        selectionMask?.featherPlus1() ?: return
+        notifySelectionChanged()
+    }
+
+    /** Engine-coord rect (tests + gesture commit path). */
+    fun selectRectEngine(x0: Float, y0: Float, x1: Float, y1: Float) =
+        synchronized(selectionLock) {
+            val m = SelectionMask(engineWidth, engineHeight)
+            m.setRect(x0, y0, x1, y1)
+            if (m.isEmpty()) return@synchronized
+            selectionMask = m
+            notifySelectionChanged()
+        }
+
+    /** Engine-coord polygon (lasso commit path). */
+    fun selectPolygonEngine(pts: List<Pair<Float, Float>>) =
+        synchronized(selectionLock) {
+            val m = SelectionMask(engineWidth, engineHeight)
+            m.setPolygon(pts)
+            if (m.isEmpty()) return@synchronized
+            selectionMask = m
+            notifySelectionChanged()
+        }
+
+    fun selectionHashForTest(): Long = synchronized(selectionLock) {
+        selectionMask?.hash() ?: 0L
+    }
+
+    /** Forward mapping engine -> view (exact inverse of screenToEngine). */
+    fun engineToScreen(ex: Float, ey: Float): Pair<Float, Float> {
+        val viewW = width
+        val viewH = height
+        if (viewW <= 0 || viewH <= 0) return Pair(0f, 0f)
+        val s = fitScale(viewW, viewH) * viewScaleMul
+        if (s <= 1e-6f) return Pair(0f, 0f)
+        val r = Math.toRadians(viewAngleDeg.toDouble())
+        val cosA = cos(r).toFloat()
+        val sinA = sin(r).toFloat()
+        val lx = (ex - engineWidth * 0.5f) * s
+        val ly = (ey - engineHeight * 0.5f) * s
+        val rx = lx * cosA - ly * sinA
+        val ry = lx * sinA + ly * cosA
+        val cx = viewW * 0.5f + viewOffX
+        val cy = viewH * 0.5f + viewOffY
+        return Pair(rx + cx, ry + cy)
+    }
+
+    /** Test-only view setter (zoom/rotate without gestures). */
+    fun setViewForTest(scale: Float, angleDeg: Float) {
+        viewScaleMul = scale.coerceIn(SCALE_MIN, SCALE_MAX)
+        var a = angleDeg % 360f
+        if (a <= -180f) a += 360f
+        if (a > 180f) a -= 360f
+        viewAngleDeg = a
+        clampView(width, height)
+        needsComposite = true
+    }
+
+    /**
+     * Overlay probe: null when no selection is shown, else whether the
+     * view point lands inside the mask (follows zoom/rotation via the
+     * same inverse matrix as the drawn ants).
+     */
+    fun selectionOverlayForTest(vx: Float, vy: Float): Boolean? {
+        val m = synchronized(selectionLock) { selectionMask } ?: return null
+        val (ex, ey) = screenToEngine(vx, vy)
+        return m.contains(ex, ey)
+    }
+
+    // ---- Selection gesture routing (called from onTouchEvent when a
+    // shape tool is armed; multitouch/navigation/pipette still win) ----
+
+    private fun routeSelectionDown(vx: Float, vy: Float): Boolean {
+        val tool = selectionTool ?: return false
+        val (ex, ey) = screenToEngine(vx, vy)
+        val now = SystemClock.uptimeMillis()
+        val density = resources.displayMetrics.density
+        val doubleTap = now - lastTapUpTime < TAP_MAX_MS &&
+            kotlin.math.abs(vx - lastTapUpXY.first) < TAP_MAX_DP * density &&
+            kotlin.math.abs(vy - lastTapUpXY.second) < TAP_MAX_DP * density
+        when (tool) {
+            SelectionTool.RECT, SelectionTool.ELLIPSE -> {
+                shapeStartEngine = Pair(ex, ey)
+                shapePreview = emptyList()
+            }
+            SelectionTool.LASSO -> {
+                if (doubleTap && lassoTrace.size >= 3) {
+                    commitLasso()
+                } else if (doubleTap) {
+                    lassoTrace.clear()
+                    lassoStartView = null
+                    shapePreview = emptyList()
+                    needsComposite = true
+                } else {
+                    if (lassoTrace.isEmpty()) lassoStartView = Pair(vx, vy)
+                    lassoTrace.add(Pair(ex, ey))
+                    shapePreview = lassoTrace.toList()
+                    needsComposite = true
+                }
+            }
+        }
+        return true
+    }
+
+    private fun routeSelectionMove(vx: Float, vy: Float): Boolean {
+        val tool = selectionTool ?: return false
+        val (ex, ey) = screenToEngine(vx, vy)
+        when (tool) {
+            SelectionTool.RECT -> {
+                val s = shapeStartEngine ?: return true
+                shapePreview = listOf(
+                    Pair(s.first, s.second), Pair(ex, s.second),
+                    Pair(ex, ey), Pair(s.first, ey)
+                )
+                needsComposite = true
+            }
+            SelectionTool.ELLIPSE -> {
+                val s = shapeStartEngine ?: return true
+                val cx = (s.first + ex) / 2f
+                val cy = (s.second + ey) / 2f
+                val rx = kotlin.math.abs(ex - s.first) / 2f
+                val ry = kotlin.math.abs(ey - s.second) / 2f
+                shapePreview = (0 until 32).map { i ->
+                    val a = i * 2f * kotlin.math.PI.toFloat() / 32f
+                    Pair(cx + rx * kotlin.math.cos(a), cy + ry * kotlin.math.sin(a))
+                }
+                needsComposite = true
+            }
+            SelectionTool.LASSO -> {
+                val last = lassoTrace.lastOrNull() ?: return true
+                val dx = ex - last.first
+                val dy = ey - last.second
+                if (dx * dx + dy * dy > 16f) {
+                    lassoTrace.add(Pair(ex, ey))
+                    shapePreview = lassoTrace.toList()
+                    needsComposite = true
+                }
+            }
+        }
+        return true
+    }
+
+    private fun routeSelectionUp(vx: Float, vy: Float): Boolean {
+        val tool = selectionTool ?: return false
+        val (ex, ey) = screenToEngine(vx, vy)
+        val density = resources.displayMetrics.density
+        when (tool) {
+            SelectionTool.RECT -> {
+                val s = shapeStartEngine
+                shapeStartEngine = null
+                shapePreview = emptyList()
+                if (s != null &&
+                    kotlin.math.abs(ex - s.first) > 2f &&
+                    kotlin.math.abs(ey - s.second) > 2f
+                ) {
+                    selectRectEngine(s.first, s.second, ex, ey)
+                    selectionTool = null
+                }
+                needsComposite = true
+            }
+            SelectionTool.ELLIPSE -> {
+                val s = shapeStartEngine
+                shapeStartEngine = null
+                shapePreview = emptyList()
+                if (s != null &&
+                    kotlin.math.abs(ex - s.first) > 4f &&
+                    kotlin.math.abs(ey - s.second) > 4f
+                ) {
+                    val m = SelectionMask(engineWidth, engineHeight)
+                    m.setEllipse(s.first, s.second, ex, ey)
+                    if (!m.isEmpty()) {
+                        synchronized(selectionLock) { selectionMask = m }
+                        notifySelectionChanged()
+                    }
+                    selectionTool = null
+                }
+                needsComposite = true
+            }
+            SelectionTool.LASSO -> {
+                // Close when the lift lands near the trace start
+                // (24dp, the TAP_MAX_DP constant family).
+                val start = lassoStartView
+                if (start != null && lassoTrace.size >= 3 &&
+                    kotlin.math.abs(vx - start.first) < TAP_MAX_DP * density &&
+                    kotlin.math.abs(vy - start.second) < TAP_MAX_DP * density
+                ) {
+                    commitLasso()
+                } else {
+                    lassoTrace.add(Pair(ex, ey))
+                    shapePreview = lassoTrace.toList()
+                    needsComposite = true
+                }
+            }
+        }
+        lastTapUpTime = SystemClock.uptimeMillis()
+        lastTapUpXY = Pair(vx, vy)
+        return true
+    }
+
+    private fun commitLasso() {
+        val pts = lassoTrace.toList()
+        lassoTrace.clear()
+        lassoStartView = null
+        shapePreview = emptyList()
+        shapeStartEngine = null
+        if (pts.size >= 3) selectPolygonEngine(pts)
+        selectionTool = null
+        needsComposite = true
+    }
+
+    // ---- V+1 marching ants (overlay-only, never engine pixels) ----
+    private val antsPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = 0xE6FFFFFF.toInt()
+        isAntiAlias = true
+    }
+    private val antsShadowPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 5f
+        color = 0x80000000.toInt()
+        isAntiAlias = true
+    }
+
+    private fun drawSelectionOverlay(c: android.graphics.Canvas, dst: RectF, ang: Float) {
+        val outline = synchronized(selectionLock) {
+            val m = selectionMask
+            if (m != null) m.outline else shapePreview
+        }
+        if (outline.size < 2) return
+        val s = fitScale(width, height) * viewScaleMul
+        if (s <= 1e-6f) return
+        val path = android.graphics.Path()
+        for ((i, e) in outline.withIndex()) {
+            val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
+            val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+            if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
+        }
+        path.close()
+        val fx = DashPathEffect(floatArrayOf(14f, 10f), selectionPhase)
+        c.save()
+        if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+        antsShadowPaint.pathEffect = fx
+        antsPaint.pathEffect = fx
+        c.drawPath(path, antsShadowPaint)
+        c.drawPath(path, antsPaint)
+        c.restore()
+    }
+
+    /** One-shot text anchor: the tap becomes a TextPanel, never ink. */
+    private fun routeTextAnchor(vx: Float, vy: Float) {
+        val (ex, ey) = screenToEngine(vx, vy)
+        textArmed = false
+        val cb = onTextAnchor
+        if (cb != null) post { cb(ex, ey) }
+        needsComposite = true
+    }
+
+    /**
+     * Double-tap on a text layer reopens it (no ink). Returns true when
+     * the tap was consumed.
+     */
+    private fun checkTextDoubleTap(vx: Float, vy: Float): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val density = resources.displayMetrics.density
+        val doubleTap = now - lastTapUpTime < TAP_MAX_MS &&
+            kotlin.math.abs(vx - lastTapUpXY.first) < TAP_MAX_DP * density &&
+            kotlin.math.abs(vy - lastTapUpXY.second) < TAP_MAX_DP * density
+        if (!doubleTap) return false
+        val layer = activeTextLayer()
+        if (layer < 0) return false
+        lastTapUpTime = 0L
+        val cb = onTextDoubleTap
+        if (cb != null) post { cb(layer) }
+        return true
+    }
+
+    // ---- Text commit (platform layout -> PNG -> documented V+1 blit) ----
+
+    fun setLayerText(index: Int, json: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetLayerText(handle, index, json)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun blitPngIntoLayer(index: Int, path: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nBlitPngIntoLayer(handle, index, path)
+            .also {
+                if (it) {
+                    needsComposite = true
+                    notifyStrokeChanged()
+                }
+            } else false
+    }
+
+    /** Active raster layer carrying a text fiche, or -1. */
+    fun activeTextLayer(): Int {
+        return try {
+            val st = JSONObject(layerState())
+            val a = st.optInt("active", -1)
+            val arr = st.optJSONArray("layers") ?: return -1
+            val e = arr.optJSONObject(a) ?: return -1
+            val s = e.optJSONObject("self") ?: e
+            if (s.optJSONObject("text") != null) a else -1
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    /** True when the active layer is an adjustment layer (no pixels). */
+    fun activeLayerIsAdjustment(): Boolean {
+        return try {
+            val st = JSONObject(layerState())
+            val a = st.optInt("active", -1)
+            val arr = st.optJSONArray("layers") ?: return false
+            val e = arr.optJSONObject(a) ?: return false
+            val s = e.optJSONObject("self") ?: e
+            s.optJSONObject("adjust") != null
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun layerTextForTest(index: Int): TextSpec? {
+        return try {
+            val st = JSONObject(layerState())
+            val arr = st.optJSONArray("layers") ?: return null
+            val e = arr.optJSONObject(index) ?: return null
+            val s = e.optJSONObject("self") ?: e
+            val t = s.optJSONObject("text") ?: return null
+            TextSpec.fromState(t)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun commitText(spec: TextSpec, onResult: (Boolean) -> Unit) {
+        commitTextOnLayer(-1, spec, onResult)
+    }
+
+    fun reeditText(layer: Int, spec: TextSpec, onResult: (Boolean) -> Unit) {
+        if (layer < 0) {
+            post { onResult(false) }
+            return
+        }
+        commitTextOnLayer(layer, spec, onResult)
+    }
+
+    private fun commitTextOnLayer(layer: Int, spec: TextSpec, onResult: (Boolean) -> Unit) {
+        if (handle == 0L || !running.get()) {
+            post { onResult(false) }
+            return
+        }
+        Thread {
+            lastFontFallback = false
+            val rendered: TextRenderer.Rendered
+            try {
+                rendered = TextRenderer.render(spec, engineWidth, engineHeight)
+            } catch (_: Exception) {
+                post { onResult(false) }
+                return@Thread
+            }
+            lastFontFallback = rendered.fontSubstituted
+            val png = try {
+                File.createTempFile("text-", ".png", context.cacheDir)
+            } catch (_: Exception) {
+                post { onResult(false) }
+                return@Thread
+            }
+            try {
+                png.outputStream().use {
+                    rendered.bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+            } catch (_: Exception) {
+                try {
+                    png.delete()
+                } catch (_: Exception) {
+                }
+                post { onResult(false) }
+                return@Thread
+            }
+            rendered.bitmap.recycle()
+            val idx = if (layer < 0) {
+                addLayerNamed("Tx " + spec.text.take(12))
+            } else {
+                layer
+            }
+            var ok = idx >= 0 && blitPngIntoLayer(idx, png.absolutePath)
+            try {
+                png.delete()
+            } catch (_: Exception) {
+            }
+            if (ok) {
+                ok = setLayerText(idx, spec.toJson())
+                if (ok) notifyStrokeChanged()
+            }
+            val done = ok
+            post { onResult(done) }
+        }.start()
+    }
+
+    // ---- Masked filter/tone (composite pull before/after + app-side mix
+    // under the mask + nLoadDocument into the frame; the duplicate frame
+    // is the pre-op backup and is deleted after (frame count preserved).
+    // The load resets undo + flattens layers (M4 contract) — announced
+    // by the caller with selection_flattened. ----
+
+    private fun mixUnderMask(before: Bitmap, after: Bitmap, mask: SelectionMask): Bitmap {
+        val w = before.width
+        val h = before.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val bpx = IntArray(w * h)
+        val apx = IntArray(w * h)
+        before.getPixels(bpx, 0, w, 0, 0, w, h)
+        after.getPixels(apx, 0, w, 0, 0, w, h)
+        val opx = IntArray(w * h)
+        val mw = mask.w
+        val mh = mask.h
+        for (y in 0 until h) {
+            val my = (y * mh / h).coerceIn(0, mh - 1)
+            val base = y * w
+            for (x in 0 until w) {
+                val mx = (x * mw / w).coerceIn(0, mw - 1)
+                opx[base + x] = if (mask.contains(mx.toFloat(), my.toFloat())) apx[base + x] else bpx[base + x]
+            }
+        }
+        out.setPixels(opx, 0, w, 0, 0, w, h)
+        return out
+    }
+
+    private fun maskedCommit(
+        before: Bitmap,
+        after: Bitmap,
+        mask: SelectionMask,
+        onResult: (Boolean) -> Unit
+    ) {
+        val mixed = mixUnderMask(before, after, mask)
+        before.recycle()
+        after.recycle()
+        val png = try {
+            File.createTempFile("selmix-", ".png", context.cacheDir)
+        } catch (_: Exception) {
+            mixed.recycle()
+            post { onResult(false) }
+            return
+        }
+        try {
+            png.outputStream().use {
+                mixed.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+        } catch (_: Exception) {
+            mixed.recycle()
+            try {
+                png.delete()
+            } catch (_: Exception) {
+            }
+            post { onResult(false) }
+            return
+        }
+        mixed.recycle()
+        val cur = currentFrameIdx
+        // The backup duplicate sits right after cur (duplicateFrame
+        // inserts after current and becomes current).
+        val dup = cur + 1
+        loadFrom(png.absolutePath) { loaded ->
+            try {
+                png.delete()
+            } catch (_: Exception) {
+            }
+            if (loaded) {
+                setFrame(cur)
+                deleteFrame(dup)
+                notifyStrokeChanged()
+            }
+            onResult(loaded)
+        }
+    }
+
+    fun applyFilterInSelection(name: String, params: String, onResult: (Boolean) -> Unit) {
+        val mask = synchronized(selectionLock) { selectionMask }
+            ?: return applyFilter(name, params, onResult)
+        if (activeLayerIsAdjustment()) {
+            post { onResult(false) }
+            return
+        }
+        val cur = currentFrameIdx
+        pullFrameFull(cur) { before ->
+            if (before == null) {
+                post { onResult(false) }
+                return@pullFrameFull
+            }
+            val dup = duplicateFrame()
+            if (dup < 0) {
+                before.recycle()
+                post { onResult(false) }
+                return@pullFrameFull
+            }
+            setFrame(cur)
+            applyFilter(name, params) { ok ->
+                if (!ok) {
+                    before.recycle()
+                    deleteFrame(dup)
+                    post { onResult(false) }
+                    return@applyFilter
+                }
+                pullFrameFull(cur) { after ->
+                    if (after == null) {
+                        before.recycle()
+                        setFrame(cur)
+                        deleteFrame(dup)
+                        post { onResult(false) }
+                        return@pullFrameFull
+                    }
+                    maskedCommit(before, after, mask, onResult)
+                }
+            }
+        }
+    }
+
+    fun applyToneInSelection(name: String, onResult: (Boolean) -> Unit) {
+        val mask = synchronized(selectionLock) { selectionMask }
+            ?: run {
+                post { onResult(applyTone(name)) }
+                return
+            }
+        if (activeLayerIsAdjustment()) {
+            post { onResult(false) }
+            return
+        }
+        val cur = currentFrameIdx
+        pullFrameFull(cur) { before ->
+            if (before == null) {
+                post { onResult(false) }
+                return@pullFrameFull
+            }
+            val dup = duplicateFrame()
+            if (dup < 0) {
+                before.recycle()
+                post { onResult(false) }
+                return@pullFrameFull
+            }
+            setFrame(cur)
+            if (!applyTone(name)) {
+                before.recycle()
+                deleteFrame(dup)
+                post { onResult(false) }
+                return@pullFrameFull
+            }
+            pullFrameFull(cur) { after ->
+                if (after == null) {
+                    before.recycle()
+                    setFrame(cur)
+                    deleteFrame(dup)
+                    post { onResult(false) }
+                    return@pullFrameFull
+                }
+                maskedCommit(before, after, mask, onResult)
+            }
         }
     }
 }

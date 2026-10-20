@@ -8,6 +8,7 @@
 namespace openclip {
 
 class Canvas;
+class Surface;
 
 // Save canvas as OpenRaster (.ora): mimetype, stack.xml, per-layer PNGs,
 // mergedimage.png thumbnail. Returns false + error on failure.
@@ -20,6 +21,12 @@ bool exportPng(const Canvas& c, const std::string& path, std::string& error);
 
 // Import a PNG file as a single flattened layer (document helpers).
 bool loadPngInto(Canvas& c, const std::string& path, std::string& error);
+
+// V+1: decode a PNG file into a surface (straight->premultiplied, same
+// conversion as loadPngInto). Used by nBlitPngIntoLayer; false + error
+// when the file is not a decodable PNG.
+bool decodePngFile(const std::string& path, Surface& out,
+                   std::string& error);
 
 }  // namespace openclip
 

@@ -70,6 +70,11 @@ object EngineHost {
     // json clears the descriptor.
     external fun nSetLayerAdjustment(handle: Long, index: Int, json: String?): Boolean
 
+    // V+1 additions (ARCHITECTURE.md): text fiche (null/empty clears)
+    // + PNG pixel commit into a layer (exact size match, undoable).
+    external fun nSetLayerText(handle: Long, index: Int, json: String?): Boolean
+    external fun nBlitPngIntoLayer(handle: Long, index: Int, path: String): Boolean
+
     // M9 additions (ARCHITECTURE.md): glTF reference model overlay.
     external fun nLoadGlbReference(handle: Long, path: String): Int
     external fun nSetRefView(handle: Long, json: String): Boolean
