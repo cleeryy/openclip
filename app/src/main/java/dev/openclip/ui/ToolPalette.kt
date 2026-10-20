@@ -161,7 +161,8 @@ fun ToolPalette(
                             else R.string.nav_mode_draw
                         )
                     )
-                }
+                },
+                modifier = Modifier.testTag("tool-nav")
             )
 
             // Compact inline size slider (active tool memory).

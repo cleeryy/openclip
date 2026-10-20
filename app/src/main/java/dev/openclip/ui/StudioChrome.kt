@@ -98,7 +98,8 @@ fun CollapsibleDrawer(
                 TextButton(
                     onClick = onToggle,
                     contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                    modifier = Modifier.height(28.dp)
+                    modifier = if (toggleTag != null) Modifier.height(28.dp).testTag(toggleTag)
+                    else Modifier.height(28.dp)
                 ) {
                     Text(expandGlyph, color = Color(0xFF90B8FF))
                 }

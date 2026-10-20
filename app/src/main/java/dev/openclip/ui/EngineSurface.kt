@@ -31,7 +31,11 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-class EngineSurface(context: Context) : SurfaceView(context) {
+class EngineSurface @JvmOverloads constructor(
+    context: Context,
+    canvasW: Int = 2048,
+    canvasH: Int = 1536
+) : SurfaceView(context) {
 
     private data class QueuedPoint(
         val x: Float,
@@ -48,6 +52,15 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     )
 
     companion object {
+        // Slice 6 anti-leak spy (test-only): live native handles. Every
+        // successful nInit increments, every dispose with a live handle
+        // decrements. Must equal the number of undisposed surfaces.
+        @Volatile var liveHandles = 0
+            private set
+
+        fun resetLiveHandlesForTest() {
+            liveHandles = 0
+        }
         private const val DEFAULT_BRUSH =
             """{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
 
@@ -68,13 +81,18 @@ class EngineSurface(context: Context) : SurfaceView(context) {
         const val EDGE_BOTTOM = 2
     }
 
-    private val engineWidth: Int = 2048
-    private val engineHeight: Int = 1536
+    private val engineWidth: Int = canvasW.coerceIn(1, 8192)
+    private val engineHeight: Int = canvasH.coerceIn(1, 8192)
     private val engineLock = Any()
     @Volatile private var handle: Long = 0
+    // Slice 6 multi-docs: pause parks the render loop (no composite, no
+    // blit) while KEEPING the handle alive so per-handle M7 undo stacks
+    // survive a tab switch. Only close disposes. `running` stays true
+    // while parked so queued doc/save/thumb requests still drain.
+    @Volatile private var paused = false
     @Volatile private var navigating = false
     @Volatile private var rollbackOpen = false
-    private var strokeId = 0L
+    @Volatile private var strokeId = 0L
     private val queue = ArrayDeque<QueuedPoint>()
     private val filterQueue = ArrayDeque<FilterRequest>()
     private val running = AtomicBoolean(false)
@@ -487,21 +505,40 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     private var lastSurfW = 0
     private var lastSurfH = 0
 
-    fun start(dpi: Float) {
+    /** Slice 6: park the loop (no composite/blit), keep the handle. */
+    fun pause() {
+        paused = true
+        hoverActive = false
+        synchronized(queue) { queue.clear() }
+        needsComposite = false
+    }
+
+    /** Slice 6: resume compositing after a tab switch. */
+    fun resume() {
+        paused = false
+        needsComposite = true
+    }
+
+    fun isPaused(): Boolean = paused
+
+    private fun ensureHandle(dpi: Float): Boolean {
         synchronized(engineLock) {
             if (handle == 0L) {
                 handle = EngineHost.nInit(engineWidth, engineHeight, dpi)
-                EngineHost.nSetBrush(handle, DEFAULT_BRUSH)
+                if (handle != 0L) {
+                    EngineHost.nSetBrush(handle, DEFAULT_BRUSH)
+                    liveHandles++
+                }
             }
+            return handle != 0L
         }
+    }
+
+    fun start(dpi: Float) {
+        ensureHandle(dpi)
         holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                synchronized(engineLock) {
-                    if (handle == 0L) {
-                        handle = EngineHost.nInit(engineWidth, engineHeight, dpi)
-                        EngineHost.nSetBrush(handle, DEFAULT_BRUSH)
-                    }
-                }
+                ensureHandle(dpi)
                 needsComposite = true
                 if (!running.getAndSet(true)) {
                     Thread(::renderLoop, "openclip-render").apply {
@@ -529,8 +566,12 @@ class EngineSurface(context: Context) : SurfaceView(context) {
 
     fun dispose() {
         running.set(false)
+        paused = false
         synchronized(engineLock) {
-            if (handle != 0L) EngineHost.nDispose(handle)
+            if (handle != 0L) {
+                EngineHost.nDispose(handle)
+                liveHandles--
+            }
             handle = 0
         }
     }
@@ -914,8 +955,8 @@ class EngineSurface(context: Context) : SurfaceView(context) {
     private var vecEraseActive = false
     private var vecEraseIndex = -1
     private val vecErasePts = mutableListOf<Pair<Float, Float>>()
-    private var strokePointerId = -1
-    private var strokeOpenUi = false
+    @Volatile private var strokePointerId = -1
+    @Volatile private var strokeOpenUi = false
     private var downTimeMs = 0L
     private var mtActive = false
     private var mtCount = 0
@@ -1340,7 +1381,7 @@ class EngineSurface(context: Context) : SurfaceView(context) {
                     }
                     strokePointerId = -1
                     strokeOpenUi = false
-                    // Slice 5: finger lifted = ring hidden (no capacitive hover).
+// Slice 5: finger lifted = ring hidden (no capacitive hover).
                     hoverActive = false
                     needsComposite = true
                 }
@@ -1500,6 +1541,17 @@ class EngineSurface(context: Context) : SurfaceView(context) {
             val surface: Surface? = holder.surface
             if (surface == null || !surface.isValid) {
                 Thread.sleep(8)
+                continue
+            }
+            // Slice 6: parked tab — hold the thread, keep the handle.
+            // Queued doc/thumb/engine requests still drain so a parked
+            // tab stays observable (pullFrameFull/saveTo) and saveable;
+            // only strokes and on-screen compositing are parked.
+            if (paused) {
+                drainDocQueue()
+                drainEngineQueue()
+                drainThumbQueue()
+                Thread.sleep(16)
                 continue
             }
 

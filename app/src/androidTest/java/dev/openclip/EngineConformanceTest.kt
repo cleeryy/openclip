@@ -15,6 +15,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -83,6 +84,10 @@ class EngineConformanceTest {
         ensureDockOpen()
         composeRule.onNodeWithText("Brush").assertIsDisplayed()
         composeRule.onNodeWithText("Eraser").assertIsDisplayed()
+        // Slice 6 chrome shortened the central row: scroll the Layers
+        // header back into view before asserting.
+        composeRule.onNodeWithText("Layers").performScrollTo()
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("Layers").assertIsDisplayed()
         assertNotNull(composeRule.activity)
     }
@@ -1030,6 +1035,27 @@ class EngineConformanceTest {
         return null
     }
 
+    // Slice 6: with N tabs only the resumed surface is interactive; prefer
+    // it (a parked tab keeps its size but ignores input until resume).
+    private fun findActiveEngineSurface(root: View): EngineSurface? {
+        if (root is EngineSurface) {
+            if (!root.isPaused()) return root
+            return null
+        }
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val found = findActiveEngineSurface(root.getChildAt(i))
+                if (found != null) return found
+            }
+            // Fallback: every tab parked (transient) — return the first.
+            for (i in 0 until root.childCount) {
+                val found = findEngineSurface(root.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
     // Regression gate for tablet UI + touch pipeline: the live EngineSurface
     // on MainActivity must have substantial visible dimensions (never crushed
     // to 0px by panels), and a real MotionEvent DOWN -> MOVE -> UP stroke
@@ -1039,7 +1065,7 @@ class EngineConformanceTest {
         composeRule.waitForIdle()
         var surface: EngineSurface? = null
         composeRule.activityRule.scenario.onActivity { act ->
-            surface = findEngineSurface(act.window.decorView)
+            surface = findActiveEngineSurface(act.window.decorView)
         }
         val es = surface
         assertNotNull("EngineSurface must be attached to MainActivity", es)
@@ -1120,7 +1146,7 @@ class EngineConformanceTest {
         composeRule.waitForIdle()
         var surface: EngineSurface? = null
         composeRule.activityRule.scenario.onActivity { act ->
-            surface = findEngineSurface(act.window.decorView)
+            surface = findActiveEngineSurface(act.window.decorView)
         }
         assertNotNull("EngineSurface must be attached to MainActivity", surface)
         return surface!!
@@ -1141,7 +1167,7 @@ class EngineConformanceTest {
 
     private fun uiSync(op: (EngineSurface) -> Unit) {
         composeRule.activityRule.scenario.onActivity { act ->
-            op(findEngineSurface(act.window.decorView)!!)
+            op(findActiveEngineSurface(act.window.decorView)!!)
         }
     }
 
@@ -1588,7 +1614,21 @@ class EngineConformanceTest {
             false
         }
         if (!shown) {
-            composeRule.onNodeWithText("⟨").performClick()
+            // Either folded (⟨ visible) or open-but-scrolled (⟩ visible,
+            // e.g. a restored workspace opened it). Open if needed, then
+            // scroll the panel into view (slice 6 chrome shrank the
+            // central row, so it can sit below the fold on phones).
+            val folded = try {
+                composeRule.onNodeWithText("⟨").assertIsDisplayed()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+            if (folded) {
+                composeRule.onNodeWithText("⟨").performClick()
+                composeRule.waitForIdle()
+            }
+            composeRule.onNodeWithTag("color-panel").performScrollTo()
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("color-panel")
                 .assertIsDisplayed()
@@ -2010,7 +2050,7 @@ class EngineConformanceTest {
     private fun <T> onUi(op: (EngineSurface) -> T): T {
         var out: T? = null
         composeRule.activityRule.scenario.onActivity { act ->
-            out = op(findEngineSurface(act.window.decorView)!!)
+            out = op(findActiveEngineSurface(act.window.decorView)!!)
         }
         @Suppress("UNCHECKED_CAST")
         return out as T
@@ -2236,8 +2276,10 @@ class EngineConformanceTest {
             onUi { it.moveCallCount = 0 }
             composeRule.onNodeWithTag("layer-name-$to").performScrollTo()
             composeRule.waitForIdle()
+            // Long-press via semantics (deterministic): opens the same menu
+            // as a touch long-press (touch injection is flaky here).
             composeRule.onNodeWithTag("layer-name-$to")
-                .performTouchInput { longClick() }
+                .performSemanticsAction(SemanticsActions.OnLongClick)
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-down-$to").performClick()
             composeRule.waitForIdle()
@@ -3132,7 +3174,7 @@ class EngineConformanceTest {
             p.setTool(eraser)
             p.updateCurveScalar(curve)
             p.bindTool("#141414", eraser, p.curve)
-            findEngineSurface(act.window.decorView)!!.setBrush(p.currentJson())
+            findActiveEngineSurface(act.window.decorView)!!.setBrush(p.currentJson())
         }
     }
 
@@ -3292,7 +3334,7 @@ class EngineConformanceTest {
                 val j = p.currentJson()
                 jsonCurve = Regex("\"curve\"\\s*:\\s*(-?[0-9.]+)")
                     .find(j)?.groupValues?.get(1)?.toFloatOrNull() ?: -1f
-                findEngineSurface(act.window.decorView)!!.setBrush(j)
+                findActiveEngineSurface(act.window.decorView)!!.setBrush(j)
                 p.flush()
             }
             assertTrue("firm graph must fit curve ~= 0.7, got $fitted", kotlin.math.abs(fitted - 0.7f) <= 0.15f)
@@ -3636,7 +3678,7 @@ class EngineConformanceTest {
             // Slice report screenshot: amber eraser chip + curve graph +
             // banner + cursor ring in one frame.
             composeRule.activityRule.scenario.onActivity { act ->
-                findEngineSurface(act.window.decorView)!!
+                findActiveEngineSurface(act.window.decorView)!!
                     .hoverForTest(es.width * 0.5f, es.height * 0.5f)
             }
             Thread.sleep(400)
@@ -3655,7 +3697,7 @@ class EngineConformanceTest {
             } catch (_: Exception) {
             }
             composeRule.activityRule.scenario.onActivity { act ->
-                findEngineSurface(act.window.decorView)!!.clearHoverForTest()
+                findActiveEngineSurface(act.window.decorView)!!.clearHoverForTest()
             }
             // Collapse the bar (poll: a tap landing mid-recomposition can
             // be swallowed) then prove the 48dp pastille.
@@ -3690,6 +3732,909 @@ class EngineConformanceTest {
             ensureDockOpen()
         } finally {
             resetBrushFeel()
+        }
+    }
+
+    // ---- Slice 6 multi-docs + save 1-tap + workspaces (spec
+    // docs/slice6-multidoc.md). All state flows through the activity's
+    // test hooks (UI thread via scenario.onActivity); user-visible paths
+    // (tabs, dialogs, command bar) go through real Compose taps.
+
+    private fun hookIds(): List<String> {
+        var r: List<String> = emptyList()
+        composeRule.activityRule.scenario.onActivity { act ->
+            r = act.activityTestHooks.docIds?.invoke() ?: emptyList()
+        }
+        return r
+    }
+
+    private fun hookActive(): String? {
+        var r: String? = null
+        composeRule.activityRule.scenario.onActivity { act ->
+            r = act.activityTestHooks.activeDocId?.invoke()
+        }
+        return r
+    }
+
+    private fun hookSurface(id: String): EngineSurface? {
+        var r: EngineSurface? = null
+        composeRule.activityRule.scenario.onActivity { act ->
+            r = act.activityTestHooks.surfaceFor?.invoke(id)
+        }
+        return r
+    }
+
+    private fun hookDirty(id: String): Boolean {
+        var r = false
+        composeRule.activityRule.scenario.onActivity { act ->
+            r = act.activityTestHooks.dirtyOf?.invoke(id) == true
+        }
+        return r
+    }
+
+    private fun hookSync() {
+        composeRule.waitForIdle()
+        Thread.sleep(300)
+    }
+
+    private fun hookOpen(name: String, w: Int, h: Int, bg: Int?): String {
+        var r = ""
+        composeRule.activityRule.scenario.onActivity { act ->
+            r = act.activityTestHooks.openDoc?.invoke(name, w, h, 160f, bg) ?: ""
+        }
+        assertTrue("openDoc must succeed (ceiling?)", r.isNotEmpty())
+        hookSync()
+        return r
+    }
+
+    private fun hookActivate(id: String) {
+        composeRule.activityRule.scenario.onActivity { act ->
+            act.activityTestHooks.activateDoc?.invoke(id)
+        }
+        hookSync()
+    }
+
+    private fun hookPose(): dev.openclip.ui.WorkspacePose? {
+        var r: dev.openclip.ui.WorkspacePose? = null
+        composeRule.activityRule.scenario.onActivity { act ->
+            r = act.activityTestHooks.currentPose?.invoke()
+        }
+        return r
+    }
+
+    private fun hookApplyWorkspace(name: String): Boolean {
+        var r = false
+        composeRule.activityRule.scenario.onActivity { act ->
+            r = act.activityTestHooks.applyWorkspace?.invoke(name) == true
+        }
+        return r
+    }
+
+    private fun awaitHooks(timeoutMs: Long = 15000) {
+        val t0 = SystemClock.uptimeMillis()
+        var ok = false
+        while (!ok && SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            composeRule.activityRule.scenario.onActivity { act ->
+                ok = act.activityTestHooks.docIds != null
+            }
+            if (!ok) Thread.sleep(200)
+        }
+        assertTrue("slice6 test hooks must be wired", ok)
+    }
+
+    private fun awaitDocReady(id: String, timeoutMs: Long = 25000): EngineSurface {
+        var es: EngineSurface? = null
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            es = hookSurface(id)
+            if (es != null && es.width > 200 && es.height > 200 && es.isReady()) break
+            Thread.sleep(200)
+        }
+        assertNotNull("surface $id must become ready", es)
+        val s = es!!
+        assertTrue(
+            "surface $id ready (w=${s.width} h=${s.height} ready=${s.isReady()})",
+            s.width > 200 && s.height > 200 && s.isReady()
+        )
+        return s
+    }
+
+    private fun awaitActive(id: String, timeoutMs: Long = 8000): Boolean {
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            if (hookActive() == id) return true
+            Thread.sleep(150)
+        }
+        return hookActive() == id
+    }
+
+    private fun awaitCount(want: Int, timeoutMs: Long = 8000): List<String> {
+        val t0 = SystemClock.uptimeMillis()
+        var ids = hookIds()
+        while (ids.size != want && SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            Thread.sleep(200)
+            ids = hookIds()
+        }
+        return ids
+    }
+
+    private fun awaitDirty(id: String, want: Boolean, timeoutMs: Long = 8000) {
+        val t0 = SystemClock.uptimeMillis()
+        while (hookDirty(id) != want && SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            Thread.sleep(200)
+        }
+        assertEquals("dirty($id) must be $want", want, hookDirty(id))
+    }
+
+    private fun awaitPaper(id: String, timeoutMs: Long = 30000) {
+        val t0 = SystemClock.uptimeMillis()
+        var ready = false
+        while (!ready && SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            composeRule.activityRule.scenario.onActivity { act ->
+                ready = act.activityTestHooks.paperReady?.invoke(id) == true
+            }
+            if (!ready) Thread.sleep(300)
+        }
+        assertTrue("paper must load for $id", ready)
+    }
+
+    private fun awaitHandles(want: Int, timeoutMs: Long = 8000) {
+        val t0 = SystemClock.uptimeMillis()
+        while (EngineSurface.liveHandles != want &&
+            SystemClock.uptimeMillis() - t0 < timeoutMs
+        ) {
+            Thread.sleep(200)
+        }
+        assertEquals("live handles must be $want", want, EngineSurface.liveHandles)
+    }
+
+    /** Canonical reset: exactly 1 clean default doc. Returns its id. */
+    private fun slice6Reset(): String {
+        awaitHooks()
+        var id = ""
+        composeRule.activityRule.scenario.onActivity { act ->
+            id = act.activityTestHooks.resetDocs?.invoke() ?: ""
+            act.activityTestHooks.poke?.invoke()
+        }
+        // Cross-test isolation: workspaces/commandbar files persist in
+        // filesDir and the last workspace auto-applies on launch (which
+        // can reopen the dock and shrink the canvas). Reset to factory
+        // presets + Drawing pose, then close the dock for a deterministic
+        // wide canvas on every form factor.
+        composeRule.activityRule.scenario.onActivity { act ->
+            try {
+                File(act.filesDir, "workspaces.json").delete()
+            } catch (_: Exception) {
+            }
+            try {
+                File(act.filesDir, "commandbar.json").delete()
+            } catch (_: Exception) {
+            }
+            act.activityTestHooks.reloadWorkspaces?.invoke()
+            val draw = act.getString(dev.openclip.R.string.workspace_draw)
+            act.activityTestHooks.applyWorkspace?.invoke(draw)
+        }
+        var dockOpen = true
+        composeRule.activityRule.scenario.onActivity { act ->
+            dockOpen = act.activityTestHooks.currentPose?.invoke()?.dockOpen == true
+        }
+        if (dockOpen) {
+            composeRule.onNodeWithTag("dock-toggle").performClick()
+            composeRule.waitForIdle()
+        }
+        // Never leak a "last workspace" into the next test's launch.
+        composeRule.activityRule.scenario.onActivity { act ->
+            act.activityTestHooks.clearLastWorkspace?.invoke()
+        }
+        composeRule.waitForIdle()
+        assertTrue("resetDocs must open a doc", id.isNotEmpty())
+        awaitDocReady(id)
+        awaitPaper(id)
+        awaitHandles(1)
+        awaitDirty(id, false)
+        return id
+    }
+
+    private fun pinchOut(es: EngineSurface, cx: Float, cy: Float, t0: Long) {
+        val props2 = fingerProps(0, 1)
+        val down = 1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT
+        dispatchAll(
+            es,
+            simpleDown(t0, cx - 80f, cy),
+            multiObtain(
+                t0, t0 + 32, MotionEvent.ACTION_POINTER_DOWN or down, props2,
+                fingerCoords(Pair(cx - 80f, cy), Pair(cx - 40f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 48, MotionEvent.ACTION_MOVE, props2,
+                fingerCoords(Pair(cx - 120f, cy), Pair(cx + 40f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 64, MotionEvent.ACTION_MOVE, props2,
+                fingerCoords(Pair(cx - 160f, cy), Pair(cx + 120f, cy))
+            ),
+            multiObtain(
+                t0, t0 + 80, MotionEvent.ACTION_POINTER_UP or down, props2,
+                fingerCoords(Pair(cx - 160f, cy), Pair(cx + 120f, cy))
+            ),
+            MotionEvent.obtain(
+                t0, t0 + 96, MotionEvent.ACTION_UP,
+                cx - 160f, cy, 1f, 1f, 0, 1f, 1f, 0, 0
+            )
+        )
+    }
+
+    // Slice 6.1: two tabs keep byte-identical pixels across switches, the
+    // per-handle M7 undo stack survives pause/resume, and each surface
+    // keeps its own view matrix.
+    @Test
+    fun slice6_twoDocsSwitchKeepsPixelsAndUndo() {
+        val a = slice6Reset()
+        val esA = awaitDocReady(a)
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 24f, curve = 0f)
+            val cx = esA.width * 0.5f
+            val cy = esA.height * 0.5f
+            strokeAcross(esA, cy, SystemClock.uptimeMillis(), cx)
+            Thread.sleep(600)
+            var b = pullFull(esA)
+            val inkA1 = countInk(b)
+            b.recycle()
+            assertTrue("stroke on A must paint ink, got $inkA1", inkA1 > 100)
+            pinchOut(esA, cx, cy, SystemClock.uptimeMillis() + 2000)
+            Thread.sleep(400)
+            var scaleA = 0f
+            composeRule.activityRule.scenario.onActivity { scaleA = esA.viewScale() }
+            assertTrue("pinch must zoom A (got $scaleA)", scaleA > 1.2f)
+            val bmpBefore = pullFull(esA)
+            val pxBefore = bitmapPixels(bmpBefore)
+            bmpBefore.recycle()
+            // Open B through the real + flow (defaults 2048x1536 white).
+            composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-add").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("newcanvas-confirm").performClick()
+            hookSync()
+            val ids2 = awaitCount(2)
+            assertEquals(2, ids2.size)
+            val bId = ids2.first { it != a }
+            val esB = awaitDocReady(bId)
+            awaitPaper(bId)
+            assertEquals("B must be active after +", bId, hookActive())
+            var scaleB = 0f
+            composeRule.activityRule.scenario.onActivity { scaleB = esB.viewScale() }
+            assertEquals("B must start at 100%", 1f, scaleB, 0.001f)
+            strokeAcross(esB, cy, SystemClock.uptimeMillis() + 4000, cx)
+            Thread.sleep(600)
+            var bb = pullFull(esB)
+            assertTrue("stroke on B must paint ink", countInk(bb) > 100)
+            bb.recycle()
+            // Back to A through the real tab: composite byte-identical.
+            composeRule.onNodeWithTag("doc-tab-$a").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-$a").performClick()
+            assertTrue("A must be active again", awaitActive(a))
+            val bmpAfter = pullFull(esA)
+            val pxAfter = bitmapPixels(bmpAfter)
+            bmpAfter.recycle()
+            assertTrue(
+                "A composite must be byte-identical across the switch",
+                pxBefore.contentEquals(pxAfter)
+            )
+            // Undo survives pause/resume (handle kept alive while parked).
+            var undone = false
+            composeRule.activityRule.scenario.onActivity { undone = esA.undo() }
+            assertTrue("undo on A must succeed after switch", undone)
+            Thread.sleep(500)
+            var ub = pullFull(esA)
+            val inkAUndo = countInk(ub)
+            ub.recycle()
+            assertTrue(
+                "undo must remove ink ($inkAUndo vs $inkA1)",
+                inkAUndo < inkA1
+            )
+            var redone = false
+            composeRule.activityRule.scenario.onActivity { redone = esA.redo() }
+            assertTrue("redo must succeed", redone)
+            Thread.sleep(500)
+            var rb = pullFull(esA)
+            assertEquals("redo must restore ink", inkA1, countInk(rb))
+            rb.recycle()
+            var scaleA2 = 0f
+            composeRule.activityRule.scenario.onActivity { scaleA2 = esA.viewScale() }
+            assertEquals(
+                "A zoom must survive the round trip",
+                scaleA, scaleA2, 0.01f
+            )
+            var scaleB2 = 0f
+            composeRule.activityRule.scenario.onActivity { scaleB2 = esB.viewScale() }
+            assertEquals("B zoom must stay 100%", 1f, scaleB2, 0.001f)
+            // Slice report screenshot: two tabs + doc title + 1-tap save.
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    val shot = InstrumentationRegistry.getInstrumentation()
+                        .uiAutomation.takeScreenshot()
+                    if (shot != null) {
+                        val dst = File(
+                            composeRule.activity.cacheDir, "slice6-multidoc.png"
+                        )
+                        FileOutputStream(dst).use { o ->
+                            shot.compress(Bitmap.CompressFormat.PNG, 100, o)
+                        }
+                        if (!shot.isRecycled) shot.recycle()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        } finally {
+            slice6Reset()
+        }
+    }
+
+    // Slice 6.2: tapping a tab mid-stroke pre-selects but defers the real
+    // switch to ACTION_UP (5 s timeout); no point leaks into the other doc.
+    @Test
+    fun slice6_switchDuringStrokeDefers() {
+        val a = slice6Reset()
+        val esA = awaitDocReady(a)
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 24f, curve = 0f)
+            val cx = esA.width * 0.5f
+            val cy = esA.height * 0.5f
+            val bId = hookOpen("B", 2048, 1536, -1)
+            val esB = awaitDocReady(bId)
+            awaitPaper(bId)
+            hookActivate(a)
+            assertTrue(awaitActive(a))
+            // Open stroke on A (DOWN + MOVEs, no UP).
+            val t0 = SystemClock.uptimeMillis()
+            var downRet = false
+            var openNow = false
+            var pausedNow = true
+            var vw = 0
+            var vh = 0
+            composeRule.activityRule.scenario.onActivity {
+                vw = esA.width
+                vh = esA.height
+                downRet = esA.dispatchTouchEvent(simpleDown(t0, cx - 80f, cy))
+                openNow = esA.isDrawingNow()
+                pausedNow = esA.isPaused()
+                esA.dispatchTouchEvent(
+                    MotionEvent.obtain(
+                        t0, t0 + 16, MotionEvent.ACTION_MOVE,
+                        cx, cy, 1f, 1f, 0, 1f, 1f, 0, 0
+                    )
+                )
+                esA.dispatchTouchEvent(
+                    MotionEvent.obtain(
+                        t0, t0 + 32, MotionEvent.ACTION_MOVE,
+                        cx + 80f, cy, 1f, 1f, 0, 1f, 1f, 0, 0
+                    )
+                )
+            }
+            assertTrue("DOWN must be accepted (ret=$downRet)", downRet)
+            assertTrue(
+                "stroke must open immediately (paused=$pausedNow view=${vw}x$vh pt=${cx - 80f},$cy)",
+                openNow
+            )
+            var drawing = false
+            val t1 = SystemClock.uptimeMillis()
+            while (!drawing && SystemClock.uptimeMillis() - t1 < 5000) {
+                composeRule.activityRule.scenario.onActivity {
+                    drawing = esA.isDrawingNow()
+                }
+                if (!drawing) Thread.sleep(150)
+            }
+
+            assertTrue("stroke must be open on A", drawing)
+            // Tap B via direct hook (deterministic delivery): deferred.
+            // No waitForIdle here — idling while a stroke is open stalls
+            // past the 5 s defer timeout.
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.requestActivate?.invoke(bId)
+            }
+            Thread.sleep(600)
+            var pendAfterTap = "<unset>"
+            var activeAfterTap = "<unset>"
+            composeRule.activityRule.scenario.onActivity { act ->
+                pendAfterTap = act.activityTestHooks.pendingTab?.invoke() ?: "<null>"
+                activeAfterTap = act.activityTestHooks.activeDocId?.invoke() ?: "<null>"
+            }
+            assertEquals(
+                "tap must arm the deferred switch (active=$activeAfterTap)",
+                bId,
+                pendAfterTap
+            )
+            assertEquals("switch must defer while stroking", a, hookActive())
+            // UP lands on A: the stroke commits there, then the switch fires.
+            composeRule.activityRule.scenario.onActivity {
+                esA.dispatchTouchEvent(
+                    MotionEvent.obtain(
+                        t0, t0 + 300, MotionEvent.ACTION_UP,
+                        cx + 80f, cy, 1f, 1f, 0, 1f, 1f, 0, 0
+                    )
+                )
+            }
+            var stillDrawing = true
+            var drawingChecks = 0
+            val tUp = SystemClock.uptimeMillis()
+            while (stillDrawing && SystemClock.uptimeMillis() - tUp < 5000) {
+                composeRule.activityRule.scenario.onActivity {
+                    stillDrawing = esA.isDrawingNow()
+                }
+                drawingChecks++
+                if (stillDrawing) Thread.sleep(300)
+            }
+            assertTrue(
+                "stroke must close after UP (checks=$drawingChecks)",
+                !stillDrawing
+            )
+            var pend = "<unset>"
+            composeRule.activityRule.scenario.onActivity { act ->
+                pend = act.activityTestHooks.pendingTab?.invoke() ?: "<null>"
+            }
+            assertTrue("pending must clear after UP (pending=$pend)", pend == "<null>")
+            assertTrue("switch must complete after UP", awaitActive(bId))
+            Thread.sleep(500)
+            var bb = pullFull(esB)
+            assertEquals("B must be virgin (no leaked points)", 0, countInk(bb))
+            bb.recycle()
+            var ab = pullFull(esA)
+            assertTrue("stroke must have committed on A", countInk(ab) > 100)
+            ab.recycle()
+            // Timeout path: fresh stroke on B, tap A, never lift for 5 s.
+            hookActivate(bId)
+            assertTrue(awaitActive(bId))
+            val t2 = SystemClock.uptimeMillis()
+            composeRule.activityRule.scenario.onActivity {
+                esB.dispatchTouchEvent(simpleDown(t2, cx - 80f, cy))
+                esB.dispatchTouchEvent(
+                    MotionEvent.obtain(
+                        t2, t2 + 16, MotionEvent.ACTION_MOVE,
+                        cx, cy, 1f, 1f, 0, 1f, 1f, 0, 0
+                    )
+                )
+            }
+            Thread.sleep(400)
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.requestActivate?.invoke(a)
+            }
+            Thread.sleep(5800)
+            assertEquals("expired defer must stay on B", bId, hookActive())
+            // Release and switch normally.
+            composeRule.activityRule.scenario.onActivity {
+                esB.dispatchTouchEvent(
+                    MotionEvent.obtain(
+                        t2, t2 + 6000, MotionEvent.ACTION_UP,
+                        cx, cy, 1f, 1f, 0, 1f, 1f, 0, 0
+                    )
+                )
+            }
+            Thread.sleep(400)
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.requestActivate?.invoke(a)
+            }
+            assertTrue(awaitActive(a))
+        } finally {
+            slice6Reset()
+        }
+    }
+
+    // Slice 6.3: 1-tap save clears dirty on the saved doc only.
+    @Test
+    fun slice6_saveOneTapClearsDirtyOnlyThere() {
+        val a = slice6Reset()
+        val esA = awaitDocReady(a)
+        var saveFile: File? = null
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 24f, curve = 0f)
+            strokeAcross(
+                esA, esA.height * 0.5f, SystemClock.uptimeMillis(),
+                esA.width * 0.5f
+            )
+            awaitDirty(a, true)
+            // Inject a direct file path (no SAF dialog on the emulator).
+            var path = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                path = File(act.cacheDir, "slice6-A.ora").absolutePath
+                act.activityTestHooks.setSavePath?.invoke(a, path)
+            }
+            saveFile = File(path)
+            if (saveFile.exists()) saveFile.delete()
+            composeRule.onNodeWithTag("doc-save").performClick()
+            awaitDirty(a, false, 15000)
+            assertTrue(
+                "save file must exist",
+                saveFile.exists() && saveFile.length() > 0
+            )
+            // Untouched B stays clean; dirtying B leaves A clean.
+            val bId = hookOpen("B", 2048, 1536, -1)
+            awaitDocReady(bId)
+            awaitDirty(bId, false)
+            awaitPaper(bId)
+            val esB = hookSurface(bId)!!
+            assertEquals(bId, hookActive())
+            uiSync { it.navigateMode = false }
+            pushTestBrush(radius = 24f, curve = 0f)
+            strokeAcross(
+                esB, esB.height * 0.5f, SystemClock.uptimeMillis() + 5000,
+                esB.width * 0.5f
+            )
+            awaitDirty(bId, true)
+            assertEquals("A must stay clean", false, hookDirty(a))
+        } finally {
+            try {
+                saveFile?.delete()
+            } catch (_: Exception) {
+            }
+            slice6Reset()
+        }
+    }
+
+    // Slice 6.4: ceiling at 4 docs with a polite dialog, synchronous clean
+    // dispose (handle counter), and a dirty-close confirm dialog.
+    @Test
+    fun slice6_fourDocsCeilingAndCleanDispose() {
+        val a = slice6Reset()
+        try {
+            val bId = hookOpen("B", 1024, 768, -1)
+            val cId = hookOpen("C", 1024, 768, -1)
+            val dId = hookOpen("D", 1024, 768, -1)
+            awaitDocReady(bId)
+            awaitDocReady(cId)
+            awaitDocReady(dId)
+            assertEquals(4, hookIds().size)
+            awaitHandles(4)
+            // 5th refused: polite dialog, no 5th handle.
+            composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-add").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("docs-full-hint").assertIsDisplayed()
+            assertEquals(4, hookIds().size)
+            awaitHandles(4)
+            composeRule.onNodeWithTag("docs-full-ok").performClick()
+            composeRule.waitForIdle()
+            // Close clean B through its cross: no dialog, active stays D.
+            composeRule.onNodeWithTag("doc-tab-close-$bId").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-close-$bId").performClick()
+            val ids3 = awaitCount(3)
+            assertEquals(3, ids3.size)
+            assertFalse(ids3.contains(bId))
+            assertEquals("active stays last tab", dId, hookActive())
+            awaitHandles(3)
+            // Ceiling freed: reopen works.
+            val eId = hookOpen("E", 1024, 768, -1)
+            awaitDocReady(eId)
+            awaitPaper(eId)
+            assertEquals(4, hookIds().size)
+            awaitHandles(4)
+            // Dirty close asks: Save / Discard / Cancel.
+            val esE = hookSurface(eId)!!
+            hookActivate(eId)
+            uiSync { it.navigateMode = false }
+            pushTestBrush(radius = 24f, curve = 0f)
+            strokeAcross(
+                esE, esE.height * 0.5f, SystemClock.uptimeMillis(),
+                esE.width * 0.5f
+            )
+            awaitDirty(eId, true)
+            composeRule.onNodeWithTag("doc-tab-close-$eId").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-close-$eId").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("doc-close-dialog").assertIsDisplayed()
+            composeRule.onNodeWithTag("doc-close-discard").assertIsDisplayed()
+            composeRule.onNodeWithTag("doc-close-save").assertIsDisplayed()
+            composeRule.onNodeWithTag("doc-close-cancel").performClick()
+            composeRule.waitForIdle()
+            assertTrue("cancel keeps the tab", hookIds().contains(eId))
+            assertEquals("E still active", eId, hookActive())
+            assertEquals("still dirty", true, hookDirty(eId))
+        } finally {
+            slice6Reset()
+        }
+    }
+
+    // Slice 6.5: new-canvas dialog dims/guard — parameterized surface (JNI
+    // unchanged), transparent paper (center alpha 0), small hint, 4096 cap.
+    @Test
+    fun slice6_newCanvasDialogDimsAndGuard() {
+        val a = slice6Reset()
+        try {
+            // 3000x2000 transparent through the real dialog.
+            composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-add").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("newcanvas-preset-3000").performScrollTo()
+            composeRule.onNodeWithTag("newcanvas-preset-3000").performClick()
+            composeRule.onNodeWithTag("newcanvas-bg-transparent").performScrollTo()
+            composeRule.onNodeWithTag("newcanvas-bg-transparent").performClick()
+            composeRule.onNodeWithTag("newcanvas-confirm").performClick()
+            hookSync()
+            val ids = awaitCount(2)
+            val tId = ids.first { it != a }
+            val esT = awaitDocReady(tId)
+            awaitPaper(tId, 45000)
+            assertEquals(3000, esT.canvasWidth())
+            assertEquals(2000, esT.canvasHeight())
+            // Transparent layer 1: center pixel alpha 0 (poll paper load).
+            var alpha = -1
+            val t0 = SystemClock.uptimeMillis()
+            while (SystemClock.uptimeMillis() - t0 < 25000) {
+                val bmp = pullFull(esT)
+                alpha = (bmp.getPixel(bmp.width / 2, bmp.height / 2) ushr 24) and 0xFF
+                bmp.recycle()
+                if (alpha == 0) break
+                Thread.sleep(500)
+            }
+            assertEquals("transparent paper must load (alpha=$alpha)", 0, alpha)
+            // 100x100: small hint shown, creation still allowed.
+            composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-add").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("newcanvas-width").performScrollTo()
+            composeRule.onNodeWithTag("newcanvas-width").performTextClearance()
+            composeRule.onNodeWithTag("newcanvas-width").performTextInput("100")
+            composeRule.onNodeWithTag("newcanvas-height").performScrollTo()
+            composeRule.onNodeWithTag("newcanvas-height").performTextClearance()
+            composeRule.onNodeWithTag("newcanvas-height").performTextInput("100")
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("newcanvas-small-hint").assertIsDisplayed()
+            composeRule.onNodeWithTag("newcanvas-estimate").assertIsDisplayed()
+            composeRule.onNodeWithTag("newcanvas-confirm").performClick()
+            hookSync()
+            val ids3 = awaitCount(3)
+            val sId = ids3.first { it != a && it != tId }
+            val esS = awaitDocReady(sId)
+            awaitPaper(sId)
+            assertEquals(100, esS.canvasWidth())
+            assertEquals(100, esS.canvasHeight())
+            // 5000px refused politely: no tab created.
+            composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-add").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("newcanvas-width").performScrollTo()
+            composeRule.onNodeWithTag("newcanvas-width").performTextClearance()
+            composeRule.onNodeWithTag("newcanvas-width").performTextInput("5000")
+            composeRule.onNodeWithTag("newcanvas-confirm").performClick()
+            Thread.sleep(800)
+            assertEquals("oversize canvas must be refused", 3, hookIds().size)
+            composeRule.onNodeWithTag("newcanvas-cancel").performClick()
+            composeRule.waitForIdle()
+        } finally {
+            slice6Reset()
+        }
+    }
+
+    // Slice 6.6: workspace round trip — posture only, 6 fields, persisted
+    // last, corrupt JSON falls back to factory presets.
+    @Test
+    fun slice6_workspaceRoundTrip() {
+        slice6Reset()
+        try {
+            var drawName = ""
+            var animName = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                drawName = act.getString(dev.openclip.R.string.workspace_draw)
+                animName = act.getString(dev.openclip.R.string.workspace_anim)
+            }
+            assertTrue(hookApplyWorkspace(animName))
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("timeline-drawer").assertIsDisplayed()
+            // Modify: close the dock + navigate mode on (nav toggle chip).
+            composeRule.onNodeWithTag("dock-toggle").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("tool-nav").performScrollTo()
+            composeRule.onNodeWithTag("tool-nav").performClick()
+            composeRule.waitForIdle()
+            var winLabel = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                winLabel = act.getString(dev.openclip.R.string.menu_window)
+            }
+            var wsLabel = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                wsLabel = act.getString(dev.openclip.R.string.workspace_save_title)
+            }
+            composeRule.waitForIdle()
+            // Save as "Test" through the dialog.
+            composeRule.onNodeWithText(winLabel).performClick()
+            composeRule.onNode(hasText(wsLabel).and(hasClickAction())).performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("workspace-name").performTextInput("Test")
+            composeRule.onNodeWithTag("workspace-save").performClick()
+            composeRule.waitForIdle()
+            // Apply Drawing, then re-apply Test: all 6 fields back.
+            assertTrue(hookApplyWorkspace(drawName))
+            composeRule.waitForIdle()
+            assertTrue(hookApplyWorkspace("Test"))
+            composeRule.waitForIdle()
+            val pose = hookPose()
+            assertNotNull("pose must be readable", pose)
+            assertEquals(false, pose!!.dockOpen)
+            assertEquals(true, pose.timelineOpen)
+            assertEquals(true, pose.navMode)
+            assertEquals(true, pose.commandBarVisible)
+            assertEquals(0, pose.dockTab)
+            assertEquals(
+                listOf("save", "undo", "redo", "export", "fullscreen"),
+                pose.commandBarOrder
+            )
+            composeRule.onNodeWithTag("timeline-drawer").assertIsDisplayed()
+            // Recreate: last workspace restored.
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            awaitHooks()
+            Thread.sleep(800)
+            val pose2 = hookPose()
+            assertNotNull("pose must survive recreate", pose2)
+            assertEquals(false, pose2!!.dockOpen)
+            assertEquals(true, pose2.timelineOpen)
+            assertEquals(true, pose2.navMode)
+            // Corrupt JSON: factory presets, no crash.
+            composeRule.activityRule.scenario.onActivity { act ->
+                File(act.filesDir, "workspaces.json").writeText("{broken")
+                act.activityTestHooks.reloadWorkspaces?.invoke()
+            }
+            composeRule.waitForIdle()
+            assertTrue(hookApplyWorkspace(drawName))
+            val pose3 = hookPose()
+            assertNotNull(pose3)
+            assertEquals(true, pose3!!.dockOpen)
+            assertEquals(false, pose3.timelineOpen)
+            assertEquals(false, pose3.navMode)
+            // Re-save "Test" on the Animation pose, then delete the
+            // current workspace through the dialog: falls back to Drawing.
+            assertTrue(hookApplyWorkspace(animName))
+            composeRule.waitForIdle()
+            composeRule.onNodeWithText(winLabel).performClick()
+            composeRule.onNode(hasText(wsLabel).and(hasClickAction())).performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("workspace-name").performTextInput("Test")
+            composeRule.onNodeWithTag("workspace-save").performClick()
+            composeRule.waitForIdle()
+            assertTrue(hookApplyWorkspace(drawName))
+            assertTrue(hookApplyWorkspace("Test"))
+            composeRule.onNodeWithText(winLabel).performClick()
+            composeRule.onNode(hasText(wsLabel).and(hasClickAction())).performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("workspace-delete-Test").performClick()
+            composeRule.waitForIdle()
+            val pose4 = hookPose()
+            assertNotNull(pose4)
+            assertEquals(true, pose4!!.dockOpen)
+            assertEquals(false, pose4.timelineOpen)
+            assertEquals(false, pose4.navMode)
+        } finally {
+            composeRule.activityRule.scenario.onActivity { act ->
+                try {
+                    File(act.filesDir, "workspaces.json").delete()
+                } catch (_: Exception) {
+                }
+                act.activityTestHooks.reloadWorkspaces?.invoke()
+            }
+            slice6Reset()
+        }
+    }
+
+    // Slice 6.7: command bar hides/shows + persists, fullscreen overlays the
+    // chrome without touching the workspace, touch targets >= 48dp.
+    @Test
+    fun slice6_commandBarPinAndFullscreen() {
+        slice6Reset()
+        try {
+            // Edit mode toggle (⋯) hides export; long-press on the bar
+            // enters the same mode (manual path).
+            composeRule.onNodeWithTag("cmdbar-edit-toggle").performScrollTo()
+            composeRule.onNodeWithTag("cmdbar-edit-toggle").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("cmdbar-edit").assertIsDisplayed()
+            composeRule.onNodeWithTag("cmdbar-vis-export").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("cmdbar-export").assertDoesNotExist()
+            // Order conserved across recreate (recreate flushes via onPause).
+            Thread.sleep(900)
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            awaitHooks()
+            Thread.sleep(800)
+            composeRule.onNodeWithTag("cmdbar-export").assertDoesNotExist()
+            composeRule.onNodeWithTag("cmdbar-save").assertIsDisplayed()
+            // Fullscreen: dock + timeline + bar gone, canvas alone.
+            composeRule.onNodeWithTag("cmdbar-fullscreen").performScrollTo()
+            composeRule.onNodeWithTag("cmdbar-fullscreen").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("dock-toggle").assertDoesNotExist()
+            composeRule.onNodeWithTag("fullscreen-exit").assertIsDisplayed()
+            // Exit restores the exact posture.
+            composeRule.onNodeWithTag("fullscreen-exit").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("dock-toggle").assertIsDisplayed()
+            composeRule.onNodeWithTag("cmdbar-save").assertIsDisplayed()
+            // Touch targets >= 48dp (0.5dp tolerance).
+            fun tall(tag: String) {
+                composeRule.waitForIdle()
+                val u = composeRule.onNodeWithTag(tag).getUnclippedBoundsInRoot()
+                val h = u.bottom - u.top
+                assertTrue(
+                    "$tag must be >= 48dp, got $h",
+                    h >= (48.dp - 0.5.dp)
+                )
+            }
+            for (doc in hookIds()) {
+                tall("doc-tab-$doc")
+                tall("doc-tab-close-$doc")
+            }
+            tall("doc-save")
+            tall("cmdbar-save")
+            tall("cmdbar-undo")
+            tall("cmdbar-fullscreen")
+        } finally {
+            composeRule.activityRule.scenario.onActivity { act ->
+                try {
+                    File(act.filesDir, "commandbar.json").delete()
+                } catch (_: Exception) {
+                }
+                act.activityTestHooks.commandSetVisible?.invoke("export", true)
+            }
+            slice6Reset()
+        }
+    }
+
+    // Slice 6.8: closing the last doc shows an honest empty canvas; the
+    // shell stays usable and + recreates a drawable doc.
+    @Test
+    fun slice6_closeLastDocShowsEmptyCanvas() {
+        val a = slice6Reset()
+        val esA = awaitDocReady(a)
+        try {
+            uiSync { it.navigateMode = false; it.resetView() }
+            pushTestBrush(radius = 24f, curve = 0f)
+            strokeAcross(
+                esA, esA.height * 0.5f, SystemClock.uptimeMillis(),
+                esA.width * 0.5f
+            )
+            awaitDirty(a, true)
+            // Dirty close through the dialog (discard path).
+            composeRule.onNodeWithTag("doc-tab-close-$a").performScrollTo()
+            composeRule.onNodeWithTag("doc-tab-close-$a").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("doc-close-discard").performClick()
+            composeRule.waitForIdle()
+            assertEquals(0, awaitCount(0).size)
+            awaitHandles(0)
+            composeRule.onNodeWithTag("newcanvas-empty-cta").assertIsDisplayed()
+            // Window + Help menus still open (no dead shell).
+            var winLabel = ""
+            var helpLabel = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                winLabel = act.getString(dev.openclip.R.string.menu_window)
+                helpLabel = act.getString(dev.openclip.R.string.menu_help)
+            }
+            composeRule.onNodeWithText(winLabel).performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithText(helpLabel).performClick()
+            composeRule.waitForIdle()
+            // + recreates a drawable doc.
+            composeRule.onNodeWithTag("newcanvas-empty-cta").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("newcanvas-confirm").performClick()
+            hookSync()
+            val ids = awaitCount(1)
+            assertEquals(1, ids.size)
+            val esN = awaitDocReady(ids[0])
+            awaitPaper(ids[0])
+            pushTestBrush(radius = 24f, curve = 0f)
+            strokeAcross(
+                esN, esN.height * 0.5f, SystemClock.uptimeMillis() + 5000,
+                esN.width * 0.5f
+            )
+            Thread.sleep(600)
+            val nb = pullFull(esN)
+            assertTrue("recreated doc must draw", countInk(nb) > 100)
+            nb.recycle()
+        } finally {
+            slice6Reset()
         }
     }
 }

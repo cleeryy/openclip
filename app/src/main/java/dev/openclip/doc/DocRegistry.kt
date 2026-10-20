@@ -16,9 +16,17 @@ data class DocEntry(
 )
 
 class DocRegistry {
+    companion object {
+        // Slice 6 RAM ceiling: 2048x1536 ~= 12.6 MB per full layer; 4 docs
+        // fit a 3 GB tablet, the 5th tab is refused with a polite dialog.
+        const val MAX_OPEN_DOCS = 4
+    }
+
     private val docs = LinkedHashMap<String, DocEntry>()
     var activeDocId: String? = null
         private set
+
+    fun canOpen(): Boolean = docs.size < MAX_OPEN_DOCS
 
     fun open(docId: String, name: String): DocEntry {
         val entry = docs.getOrPut(docId) { DocEntry(docId, name) }
