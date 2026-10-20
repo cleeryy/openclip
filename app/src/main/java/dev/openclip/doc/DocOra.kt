@@ -15,6 +15,88 @@ import java.util.zip.ZipOutputStream
 
 object DocOra {
 
+    /** One raster layer for [writeLayersOra] (bottom-first order in the list). */
+    data class OraLayer(
+        val name: String,
+        val bitmap: Bitmap,
+        val opacity: Float = 1f,
+        val visible: Boolean = true,
+        /** Engine blend name, e.g. "svg:normal" (see blend.h). */
+        val blendSvg: String = "svg:normal"
+    )
+
+    /**
+     * Writes a multi-layer ORA file. Layers are stored bottom-first, with
+     * name/opacity/visibility/blend so the engine loader restores them.
+     * Used by DocClip (.clip import); the solid-paper path below stays
+     * the new-canvas default.
+     */
+    fun writeLayersOra(dst: File, w: Int, h: Int, layers: List<OraLayer>): Boolean {
+        if (w <= 0 || h <= 0 || layers.isEmpty()) return false
+        return try {
+            val pngs = layers.map { layer ->
+                val bos = java.io.ByteArrayOutputStream()
+                if (!layer.bitmap.compress(Bitmap.CompressFormat.PNG, 100, bos)) {
+                    return false
+                }
+                bos.toByteArray()
+            }
+            val xml = StringBuilder()
+            xml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+            xml.append(String.format(Locale.US, "<image w=\"%d\" h=\"%d\">\n<stack>\n", w, h))
+            layers.forEachIndexed { i, layer ->
+                val op = layer.opacity.coerceIn(0f, 1f)
+                xml.append(
+                    String.format(
+                        Locale.US,
+                        "<layer name=\"%s\" src=\"data/layer%03d.png\" " +
+                            "opacity=\"%.4f\" visibility=\"%s\" composite-op=\"%s\"/>\n",
+                        xmlEscape(layer.name.ifBlank { "Layer" }.take(128)),
+                        i,
+                        op,
+                        if (layer.visible) "visible" else "hidden",
+                        xmlEscape(layer.blendSvg.ifBlank { "svg:normal" })
+                    )
+                )
+            }
+            xml.append("</stack>\n</image>\n")
+            ZipOutputStream(dst.outputStream().buffered()).use { z ->
+                z.putNextEntry(ZipEntry("mimetype"))
+                z.write("image/openraster".toByteArray(Charsets.US_ASCII))
+                z.closeEntry()
+                z.putNextEntry(ZipEntry("stack.xml"))
+                z.write(xml.toString().toByteArray(Charsets.UTF_8))
+                z.closeEntry()
+                pngs.forEachIndexed { i, png ->
+                    z.putNextEntry(ZipEntry(String.format(Locale.US, "data/layer%03d.png", i)))
+                    z.write(png)
+                    z.closeEntry()
+                }
+            }
+            true
+        } catch (_: Exception) {
+            try {
+                dst.delete()
+            } catch (_: Exception) {
+            }
+            false
+        }
+    }
+
+    private fun xmlEscape(s: String): String {
+        val b = StringBuilder(s.length)
+        for (ch in s) {
+            when (ch) {
+                '&' -> b.append("&amp;")
+                '<' -> b.append("&lt;")
+                '>' -> b.append("&gt;")
+                '"' -> b.append("&quot;")
+                else -> b.append(ch)
+            }
+        }
+        return b.toString()
+    }
+
     /**
      * Writes a 1-layer ORA file. [argb] null = transparent layer,
      * otherwise the opaque/alpha fill color.

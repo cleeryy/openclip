@@ -1025,6 +1025,235 @@ class EngineConformanceTest {
         }
     }
 
+    // .clip palier (a): a programmatically-built .clip (CSFCHUNK envelope
+    // + embedded SQLite + zlib RGBA8 tiles + CanvasPreview PNG — no Celsys
+    // binary anywhere) imports to 2 ORA layers with the right composite,
+    // and a labeled proof bitmap is left in cacheDir for the screenshot.
+    @Test
+    fun clipImportDecodesRasterLayers() {
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val clip = File(dir, "clip-a-test.clip")
+        writeTestClip(clip, withLayers = true)
+        val out = dev.openclip.doc.DocClip.importToOra(clip, dir)
+        assertTrue("clip must import, got $out", out is dev.openclip.doc.DocClip.Outcome.Ok)
+        val import = (out as dev.openclip.doc.DocClip.Outcome.Ok).import
+        try {
+            assertEquals(2, import.report.layerCount)
+            assertEquals(48, import.report.width)
+            assertEquals(32, import.report.height)
+            assertFalse("raster path must not be preview-only", import.report.previewOnly)
+
+            val handle = EngineHost.nInit(48, 32, 160f)
+            val px = IntArray(48 * 32)
+            try {
+                assertTrue(EngineHost.nLoadDocument(handle, import.oraFile.absolutePath))
+                assertEquals(2, EngineHost.nLayerCount(handle))
+                val state = EngineHost.nLayerState(handle)
+                assertTrue("layer names must survive, got $state", state.contains("Base"))
+                assertTrue("layer names must survive, got $state", state.contains("Top"))
+                assertEquals(48 * 32, EngineHost.nCompositeInto(handle, px, 48, 32))
+                // Top layer is opaque blue over opaque red: composite is blue.
+                assertEquals(0xFF0000FF.toInt(), px[5 * 48 + 5])
+            } finally {
+                EngineHost.nDispose(handle)
+            }
+
+            // Proof artifact for the mission screenshot (pulled via adb).
+            writeClipProof(dir, px, 48, 32, import.report.layerCount, import.report.previewOnly)
+        } finally {
+            clip.delete()
+            try {
+                import.oraFile.delete()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // .clip palier (a) fallback + hostile policy: preview-only file yields
+    // one Preview layer, garbage and truncated envelopes are refused.
+    @Test
+    fun clipImportPreviewFallbackAndRefusesHostile() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dir = ctx.cacheDir
+        val clip = File(dir, "clip-a-preview.clip")
+        writeTestClip(clip, withLayers = false)
+        val out = dev.openclip.doc.DocClip.importToOra(clip, dir)
+        assertTrue("preview clip must import, got $out", out is dev.openclip.doc.DocClip.Outcome.Ok)
+        val import = (out as dev.openclip.doc.DocClip.Outcome.Ok).import
+        try {
+            assertTrue(import.report.previewOnly)
+            assertEquals(1, import.report.layerCount)
+            val handle = EngineHost.nInit(48, 32, 160f)
+            try {
+                assertTrue(EngineHost.nLoadDocument(handle, import.oraFile.absolutePath))
+                assertEquals(1, EngineHost.nLayerCount(handle))
+                val px = IntArray(48 * 32)
+                assertEquals(48 * 32, EngineHost.nCompositeInto(handle, px, 48, 32))
+                // Preview fixture is opaque green.
+                assertEquals(0xFF00FF00.toInt(), px[5 * 48 + 5])
+            } finally {
+                EngineHost.nDispose(handle)
+            }
+        } finally {
+            clip.delete()
+            try {
+                import.oraFile.delete()
+            } catch (_: Exception) {
+            }
+        }
+
+        val garbage = File(dir, "clip-a-garbage.clip")
+        garbage.writeBytes("definitely not a clip studio file".toByteArray())
+        assertTrue(
+            "garbage must be refused",
+            dev.openclip.doc.DocClip.importToOra(garbage, dir)
+                is dev.openclip.doc.DocClip.Outcome.Err
+        )
+        garbage.delete()
+
+        val truncated = File(dir, "clip-a-trunc.clip")
+        val head = "CSFCHUNK".toByteArray() + "CHNKSQLi".toByteArray() +
+            byteArrayOf(0, 1, 0, 0) + ByteArray(16)
+        truncated.writeBytes(head)
+        assertTrue(
+            "truncated envelope must be refused",
+            dev.openclip.doc.DocClip.importToOra(truncated, dir)
+                is dev.openclip.doc.DocClip.Outcome.Err
+        )
+        truncated.delete()
+    }
+
+    // ---- .clip test fixtures (clean-room, generated in-code) ----
+    // Minimal writer mirroring the public envelope shape: CSFCHUNK magic,
+    // then tag(8 ASCII) + BE u32 length + payload chunks; CHNKSQLi carries
+    // a real SQLite db built with the platform API.
+
+    private fun deflateRaw(raw: ByteArray): ByteArray {
+        val def = java.util.zip.Deflater()
+        try {
+            def.setInput(raw)
+            def.finish()
+            val bos = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(4096)
+            while (!def.finished()) {
+                val n = def.deflate(buf)
+                if (n <= 0) break
+                bos.write(buf, 0, n)
+            }
+            return bos.toByteArray()
+        } finally {
+            def.end()
+        }
+    }
+
+    private fun solidTileArgb(w: Int, h: Int, argb: Int): ByteArray {
+        val a = (argb ushr 24) and 0xFF
+        val r = (argb ushr 16) and 0xFF
+        val g = (argb ushr 8) and 0xFF
+        val b = argb and 0xFF
+        val raw = ByteArray(w * h * 4)
+        for (i in 0 until w * h) {
+            raw[i * 4] = r.toByte()
+            raw[i * 4 + 1] = g.toByte()
+            raw[i * 4 + 2] = b.toByte()
+            raw[i * 4 + 3] = a.toByte()
+        }
+        return deflateRaw(raw)
+    }
+
+    private fun chunk(tag: String, payload: ByteArray): ByteArray {
+        val t = tag.toByteArray(Charsets.US_ASCII)
+        val out = ByteBuffer.allocate(8 + 4 + payload.size).order(ByteOrder.BIG_ENDIAN)
+        out.put(t, 0, 8)
+        out.putInt(payload.size)
+        out.put(payload)
+        return out.array()
+    }
+
+    /** Builds a synthetic .clip: 48x32, red base + blue top (+ green preview). */
+    private fun writeTestClip(dst: File, withLayers: Boolean) {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dbPath = File(ctx.cacheDir, "clip-a-fixture.db")
+        if (dbPath.exists()) dbPath.delete()
+        val db = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(dbPath, null)
+        try {
+            db.execSQL("CREATE TABLE Canvas(width INTEGER, height INTEGER)")
+            db.execSQL("INSERT INTO Canvas(width, height) VALUES (48, 32)")
+            if (withLayers) {
+                db.execSQL(
+                    "CREATE TABLE Layer(id TEXT, name TEXT, opacity REAL, " +
+                        "visible INTEGER, blend TEXT)"
+                )
+                db.execSQL(
+                    "INSERT INTO Layer(id, name, opacity, visible, blend) " +
+                        "VALUES ('base', 'Base', 1.0, 1, 'normal')"
+                )
+                db.execSQL(
+                    "INSERT INTO Layer(id, name, opacity, visible, blend) " +
+                        "VALUES ('top', 'Top', 1.0, 1, 'normal')"
+                )
+                db.execSQL(
+                    "CREATE TABLE ExternalChunk(layerId TEXT, x INTEGER, " +
+                        "y INTEGER, w INTEGER, h INTEGER, layout TEXT, data BLOB)"
+                )
+                val red = solidTileArgb(48, 32, 0xFFFF0000.toInt())
+                val blue = solidTileArgb(48, 32, 0xFF0000FF.toInt())
+                db.execSQL(
+                    "INSERT INTO ExternalChunk(layerId, x, y, w, h, layout, data) " +
+                        "VALUES ('base', 0, 0, 48, 32, 'rgba8', ?)",
+                    arrayOf(red)
+                )
+                db.execSQL(
+                    "INSERT INTO ExternalChunk(layerId, x, y, w, h, layout, data) " +
+                        "VALUES ('top', 0, 0, 48, 32, 'rgba8', ?)",
+                    arrayOf(blue)
+                )
+            }
+            val preview = Bitmap.createBitmap(48, 32, Bitmap.Config.ARGB_8888)
+            preview.eraseColor(0xFF00FF00.toInt())
+            val bos = java.io.ByteArrayOutputStream()
+            preview.compress(Bitmap.CompressFormat.PNG, 100, bos)
+            preview.recycle()
+            db.execSQL("CREATE TABLE CanvasPreview(png BLOB)")
+            db.execSQL("INSERT INTO CanvasPreview(png) VALUES (?)", arrayOf(bos.toByteArray()))
+        } finally {
+            db.close()
+        }
+        val dbBytes = dbPath.readBytes()
+        dbPath.delete()
+        val out = java.io.ByteArrayOutputStream()
+        out.write("CSFCHUNK".toByteArray(Charsets.US_ASCII))
+        out.write(chunk("CHNKHead", byteArrayOf(1, 0, 0, 0)))
+        out.write(chunk("CHNKSQLi", dbBytes))
+        out.write(chunk("CHNKFoot", ByteArray(0)))
+        dst.writeBytes(out.toByteArray())
+    }
+
+    /** Labeled proof bitmap: real composite x6 + status strip (adb-pulled). */
+    private fun writeClipProof(
+        dir: File, px: IntArray, w: Int, h: Int, layers: Int, previewOnly: Boolean
+    ) {
+        val comp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        comp.setPixels(px, 0, w, 0, 0, w, h)
+        val proof = Bitmap.createBitmap(w * 6, h * 6 + 40, Bitmap.Config.ARGB_8888)
+        val cv = android.graphics.Canvas(proof)
+        cv.drawColor(0xFF000000.toInt())
+        val scaled = Bitmap.createScaledBitmap(comp, w * 6, h * 6, false)
+        cv.drawBitmap(scaled, 0f, 0f, null)
+        scaled.recycle()
+        comp.recycle()
+        val paint = android.graphics.Paint()
+        paint.color = 0xFFFFFFFF.toInt()
+        paint.textSize = 14f
+        paint.isAntiAlias = true
+        val mode = if (previewOnly) "preview" else "layers"
+        cv.drawText("clip-a: $layers $mode composite OK", 8f, h * 6 + 28f, paint)
+        File(dir, "clip-a-proof.png").outputStream().use { o ->
+            proof.compress(Bitmap.CompressFormat.PNG, 100, o)
+        }
+        if (!proof.isRecycled) proof.recycle()
+    }
+
     private fun findEngineSurface(root: View): EngineSurface? {
         if (root is EngineSurface) return root
         if (root is ViewGroup) {

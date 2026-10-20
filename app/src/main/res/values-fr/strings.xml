@@ -43,6 +43,8 @@
     <string name="import_doc">Ouvrir un document…</string>
     <string name="import_failed">Échec de l’ouverture.</string>
     <string name="import_ok">Ouvert.</string>
+    <string name="clip_failed">Échec de l’import .clip.</string>
+    <string name="clip_preview_only">%1$s ouvert (aperçu seul — calques illisibles).</string>
     <string name="layer_add_group">Ajouter un groupe</string>
     <string name="layer_add_vector">+ Vectoriel</string>
     <string name="rulers_title">Règles</string>

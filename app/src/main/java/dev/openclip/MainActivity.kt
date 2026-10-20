@@ -66,6 +66,7 @@ import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
 import dev.openclip.media.WebdavClient
+import dev.openclip.doc.DocClip
 import dev.openclip.doc.DocOra
 import dev.openclip.doc.DocRegistry
 import dev.openclip.ui.CollapsibleDrawer
@@ -311,6 +312,51 @@ class MainActivity : ComponentActivity() {
                 val name = queryDisplayName(ctx, uri) ?: "imported.ora"
                 val dst = java.io.File(ctx.cacheDir, name)
                 copyTo(ctx, uri, dst)
+                // .clip (Clip Studio Paint) goes through the app-side
+                // DocClip converter first: CSFCHUNK envelope + embedded
+                // SQLite -> multi-layer ORA (or preview-only ORA), then
+                // the existing nLoadDocument flow. No new JNI symbol.
+                if (name.endsWith(".clip", ignoreCase = true)) {
+                    Thread {
+                        val converted = DocClip.importToOra(dst, ctx.cacheDir)
+                        val okImport = converted as? DocClip.Outcome.Ok
+                        mainHandler.post {
+                            val oraPath = okImport?.import?.oraFile
+                            val report = okImport?.import?.report
+                            if (oraPath != null && report != null) {
+                                surface.loadFrom(oraPath.absolutePath) { ok ->
+                                    try {
+                                        oraPath.delete()
+                                    } catch (_: Exception) {
+                                    }
+                                    if (ok) {
+                                        val id = activeDocId.value
+                                        if (id != null) {
+                                            docRegistry.open(id, name)
+                                            docs.firstOrNull { it.docId == id }?.name = name
+                                            docRegistry.markDirty(id, false)
+                                        }
+                                    }
+                                    status.value = when {
+                                        !ok -> ctx.getString(R.string.clip_failed)
+                                        report.previewOnly ->
+                                            ctx.getString(R.string.clip_preview_only, name)
+                                        else -> ctx.getString(R.string.import_ok) + " " + name
+                                    }
+                                    refreshKey.value++
+                                }
+                            } else {
+                                try {
+                                    dst.delete()
+                                } catch (_: Exception) {
+                                }
+                                status.value = ctx.getString(R.string.clip_failed)
+                                refreshKey.value++
+                            }
+                        }
+                    }.start()
+                    return@rememberLauncherForActivityResult
+                }
                 surface.loadFrom(dst.absolutePath) { ok ->
                     if (ok) {
                         val id = activeDocId.value

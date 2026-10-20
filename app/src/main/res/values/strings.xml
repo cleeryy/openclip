@@ -43,6 +43,8 @@
     <string name="import_doc">Open document…</string>
     <string name="import_failed">Open failed.</string>
     <string name="import_ok">Opened.</string>
+    <string name="clip_failed">Clip import failed.</string>
+    <string name="clip_preview_only">Opened %1$s (preview only — layers unreadable).</string>
     <string name="layer_visible">Visible</string>
     <string name="layer_hidden">Hidden</string>
     <string name="layer_opacity">Layer opacity</string>
