@@ -90,7 +90,10 @@ fun TimelineStrip(
     onImportAudio: () -> Unit = {},
     onClearAudio: () -> Unit = {},
     onExportWebm: () -> Unit = {},
-    onAiUpscale: (Int) -> Unit = {}
+    onAiUpscale: (Int) -> Unit = {},
+    // V+3 §7: external play/pause requests (space bar). Each increment
+    // toggles; 0 (initial) never fires.
+    playToggle: Int = 0,
 ) {
     var count by remember { mutableStateOf(1) }
     var cur by remember { mutableStateOf(0) }
@@ -109,6 +112,14 @@ fun TimelineStrip(
     var deleteArmed by remember { mutableStateOf(false) }
     var scrubCandidate by remember { mutableStateOf<Int?>(null) }
     val playTick = remember { mutableStateOf(0) }
+    var lastPlayToggle by remember { mutableStateOf(0) }
+    // V+3 §7 (space bar): external toggle requests.
+    LaunchedEffect(playToggle) {
+        if (playToggle != 0 && playToggle != lastPlayToggle) {
+            lastPlayToggle = playToggle
+            playing = !playing
+        }
+    }
     // V+2: per-cel exposure holds (nSetCelHold 1..32, default 1 when
     // absent). Keyed by frame index; reorder swaps the entries along.
     val holds = remember { mutableStateMapOf<Int, Int>() }

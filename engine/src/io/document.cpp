@@ -4,6 +4,7 @@
 
 #include "openclip/ora.h"
 #include "openclip/psd.h"
+#include "openclip/tiff.h"
 
 #include <cstdio>
 
@@ -28,6 +29,11 @@ DocFormat detectFormat(const std::string& path) {
         return DocFormat::Psd;
     if (head[0] == 0x89 && head[1] == 'P' && head[2] == 'N' && head[3] == 'G')
         return DocFormat::Png;
+    if (head[0] == 'I' && head[1] == 'I' && head[2] == 42 &&
+        head[3] == 0)
+        return DocFormat::Tiff;
+    if (head[0] == 'M' && head[1] == 'M' && head[2] == 0 && head[3] == 42)
+        return DocFormat::Tiff;
     if (head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4) {
         // ZIP container: possible ORA — check the stored mimetype area
         // heuristically (first local file entry header). Definitive check
@@ -54,6 +60,8 @@ bool loadDocument(Canvas& c, const std::string& path, std::string& error) {
         }
         case DocFormat::Psd:
             return loadPsd(c, path, error);
+        case DocFormat::Tiff:
+            return loadTiff(c, path, error);
         case DocFormat::Unknown:
         default:
             error = "document: unknown or unsupported format for " + path;

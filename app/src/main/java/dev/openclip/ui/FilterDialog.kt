@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -55,6 +56,13 @@ private sealed class FilterParam {
 
     // Free-text JSON param (gradientMap stops), shown as a text field.
     data class Text(override val key: String, val default: String) : FilterParam()
+
+    // Fixed-choice JSON param (V+3 denoise mode), shown as chips.
+    data class Choice(
+        override val key: String,
+        val options: List<String>,
+        val default: String
+    ) : FilterParam()
 }
 
 private data class FilterSpec(
@@ -120,6 +128,14 @@ private val FILTERS = listOf(
     FilterSpec(
         "gradientMap", R.string.filter_gradient_map,
         listOf(FilterParam.Text("stops", "#000000:0,#FFFFFF:1"))
+    ),
+    // V+3 classic denoise (§8.1): strength blend + median/bilateral.
+    FilterSpec(
+        "denoise", R.string.filter_denoise,
+        listOf(
+            FilterParam.Num("strength", 0f, 1f, 0.5f),
+            FilterParam.Choice("mode", listOf("median", "bilateral"), "median")
+        )
     )
 )
 
@@ -127,6 +143,7 @@ private fun FilterParam.defaultString(): String = when (this) {
     is FilterParam.Num -> if (int) default.roundToInt().toString() else default.toString()
     is FilterParam.Toggle -> default.toString()
     is FilterParam.Text -> default
+    is FilterParam.Choice -> default
 }
 
 private fun buildParamsJson(values: Map<String, String>, spec: FilterSpec): String {
@@ -134,6 +151,7 @@ private fun buildParamsJson(values: Map<String, String>, spec: FilterSpec): Stri
         val raw = values[p.key] ?: p.defaultString()
         val value = when (p) {
             is FilterParam.Text -> "\"" + raw.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+            is FilterParam.Choice -> "\"$raw\""
             else -> raw
         }
         "\"${p.key}\":$value"
@@ -225,6 +243,19 @@ fun FilterDialog(
                                 label = { Text(p.key) },
                                 modifier = Modifier.fillMaxWidth()
                             )
+                        }
+                        is FilterParam.Choice -> {
+                            val cur = values[p.key] ?: p.default
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                p.options.forEach { opt ->
+                                    FilterChip(
+                                        selected = cur == opt,
+                                        onClick = { values[p.key] = opt },
+                                        label = { Text(opt) },
+                                        modifier = Modifier.testTag("filter-choice-$opt")
+                                    )
+                                }
+                            }
                         }
                     }
                 }

@@ -171,6 +171,16 @@ class SelectionMask(val w: Int, val h: Int) {
         return bits[yi * w + xi] != 0.toByte()
     }
 
+    // V+3 channels (§4): raw bit access for save/reload + boolean ops.
+    fun copyBits(): ByteArray = bits.copyOf()
+
+    fun loadBits(src: ByteArray): Boolean {
+        if (src.size != bits.size) return false
+        src.copyInto(bits)
+        outline = emptyList()
+        return true
+    }
+
     /** FNV-1a hash (tab-switch survival probe). */
     fun hash(): Long {
         var acc = -3750763034362895579L

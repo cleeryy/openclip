@@ -14,6 +14,7 @@ enum class DocFormat : std::uint8_t {
     Ora,
     Png,
     Psd,
+    Tiff,  // V+3 baseline (uncompressed/LZW, RGB/RGBA8, strips, page 1)
 };
 
 // Sniff the byte signature; extension only as a hint for ambiguous ZIP

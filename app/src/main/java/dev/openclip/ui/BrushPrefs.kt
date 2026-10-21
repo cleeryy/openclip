@@ -101,6 +101,14 @@ class BrushPrefs(appContext: Context) {
     var curvePts by mutableStateOf(BRUSH_FALLBACK_CURVE_PTS.copyOf())
         private set
 
+    // V+3 mixer knife (§1.1): mix amount 0..1 (0 = plain brush) +
+    // pickup-window factor 0.5..2.0. Persisted like radius/opacity,
+    // pushed through the same single toBrushJson path.
+    var mix by mutableStateOf(0f)
+        private set
+    var mixRadius by mutableStateOf(1f)
+        private set
+
     // Live tool mirrors (not persisted): ToolPalette syncs these on every
     // push so the pinned bar can rebuild the identical brush JSON through
     // the single hoisted store (never two concurrent setBrush callers).
@@ -205,9 +213,21 @@ class BrushPrefs(appContext: Context) {
         schedule()
     }
 
+    /** V+3 knife amount (0 = plain brush, 1 = pure knife). */
+    fun updateMix(v: Float) {
+        mix = v.coerceIn(0f, 1f)
+        schedule()
+    }
+
+    /** V+3 pickup-window factor (× dab radius). */
+    fun updateMixRadius(v: Float) {
+        mixRadius = v.coerceIn(0.5f, 2.0f)
+        schedule()
+    }
+
     fun toBrushJson(color: String, isBrush: Boolean, curve: Float): String = String.format(
         Locale.US,
-        """{"radius":%.2f,"hardness":%.2f,"opaque":%.2f,"spacing":0.15,"color":"%s","stabilize":%.2f,"curve":%.2f,"mode":"%s"}""",
+        """{"radius":%.2f,"hardness":%.2f,"opaque":%.2f,"spacing":0.15,"color":"%s","stabilize":%.2f,"curve":%.2f,"mode":"%s","mix":%.2f,"mixRadius":%.2f}""",
         if (isBrush) radius else eraserRadius,
         if (isBrush) 0.7f else 0.9f,
         if (isBrush) opaque else eraserOpaque,
@@ -217,7 +237,11 @@ class BrushPrefs(appContext: Context) {
         // V+1: the raster eraser is a real dest-out erase
         // ("alpha-erase"); the legacy "eraser" white-paint alias stays
         // frozen engine-side for old presets only.
-        if (isBrush) "brush" else "alpha-erase"
+        if (isBrush) "brush" else "alpha-erase",
+        // V+3 mixer knife (§1.1): 0 = plain brush. Eraser strokes ignore
+        // mix engine-side (dest-out has no ink to blend).
+        if (isBrush) mix else 0f,
+        if (isBrush) mixRadius else 1f
     )
 
     /** Debounced write (500 ms) + explicit flush on onPause. */
@@ -241,19 +265,20 @@ class BrushPrefs(appContext: Context) {
             file.writeText(
                 String.format(
                     Locale.US,
-                    """{"radius":%.2f,"opaque":%.3f,"stabilize":%.3f,"curve":%.3f,"curvePts":[%.3f,%.3f,%.3f,%.3f],"eRadius":%.2f,"eOpaque":%.3f,"tool":"%s","eraserNote":%s}""",
+                    """{"radius":%.2f,"opaque":%.3f,"stabilize":%.3f,"curve":%.3f,"curvePts":[%.3f,%.3f,%.3f,%.3f],"eRadius":%.2f,"eOpaque":%.3f,"tool":"%s","eraserNote":%s,"mix":%.3f,"mixRadius":%.3f}""",
                     radius, opaque, stabilize, curve,
                     curvePts[0], curvePts[1], curvePts[2], curvePts[3],
                     eraserRadius, eraserOpaque,
                     if (isEraser) "eraser" else "brush",
-                    if (eraserAlphaNoteShown) "true" else "false"
+                    if (eraserAlphaNoteShown) "true" else "false",
+                    mix, mixRadius
                 )
             )
         } catch (_: Exception) {
         }
     }
 
-    private val numRe = Regex("\"(radius|opaque|stabilize|curve|eRadius|eOpaque)\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)")
+    private val numRe = Regex("\"(radius|opaque|stabilize|curve|eRadius|eOpaque|mix|mixRadius)\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)")
     private val ptsRe = Regex("\"curvePts\"\\s*:\\s*\\[([^\\]]*)\\]")
     private val toolRe = Regex("\"tool\"\\s*:\\s*\"([^\"]*)\"")
     private val noteRe = Regex("\"eraserNote\"\\s*:\\s*(true|false)")
@@ -270,6 +295,8 @@ class BrushPrefs(appContext: Context) {
             curve = (m["curve"] ?: BRUSH_FALLBACK_CURVE).coerceIn(0f, 1f)
             eraserRadius = (m["eRadius"] ?: BRUSH_FALLBACK_ERASER_RADIUS).coerceIn(1f, 128f)
             eraserOpaque = (m["eOpaque"] ?: BRUSH_FALLBACK_ERASER_OPAQUE).coerceIn(0f, 1f)
+            mix = (m["mix"] ?: 0f).coerceIn(0f, 1f)
+            mixRadius = (m["mixRadius"] ?: 1f).coerceIn(0.5f, 2.0f)
             ptsRe.find(t)?.groupValues?.get(1)?.split(",")?.mapNotNull {
                 it.trim().toFloatOrNull()?.coerceIn(0f, 1f)
             }?.takeIf { it.size == 4 }?.let { curvePts = it.toFloatArray() }
@@ -284,6 +311,8 @@ class BrushPrefs(appContext: Context) {
             stabilize = BRUSH_FALLBACK_STABILIZE
             eraserRadius = BRUSH_FALLBACK_ERASER_RADIUS
             eraserOpaque = BRUSH_FALLBACK_ERASER_OPAQUE
+            mix = 0f
+            mixRadius = 1f
             isEraser = false
             toolEraser = false
             curve = BRUSH_FALLBACK_CURVE

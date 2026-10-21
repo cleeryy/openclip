@@ -34,6 +34,11 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -117,6 +122,20 @@ import dev.openclip.ui.TextSpec
 import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 import dev.openclip.ui.WebdavDialog
+// V+3 confort pro (§1.2, §1.3, §3, §4, §5, §6, §7): panels + pure units.
+import dev.openclip.ui.ChannelsPanel
+import dev.openclip.ui.HarmonyPanel
+import dev.openclip.ui.ImportPanel
+import dev.openclip.ui.PdfImport
+import dev.openclip.ui.PosePanel
+import dev.openclip.ui.ProofPanel
+import dev.openclip.ui.ShortcutAction
+import dev.openclip.ui.ShortcutHelpDialog
+import dev.openclip.ui.ShortcutMap
+import dev.openclip.ui.ShortcutToolState
+import dev.openclip.ui.TextOnPath
+import dev.openclip.ui.TextPathPanel
+import dev.openclip.ui.v2ActiveLayer
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 
@@ -251,6 +270,11 @@ class MainActivity : ComponentActivity() {
         val showWorkspaces = remember { mutableStateOf(false) }
         val showMultidocHelp = remember { mutableStateOf(false) }
         val cmdbarVisible = remember { mutableStateOf(true) }
+        // V+3 §7: physical-keyboard shortcuts (fixed table, help dialog)
+        // + external play-toggle requests for the timeline.
+        val showShortcuts = remember { mutableStateOf(false) }
+        val playTickExt = remember { mutableStateOf(0) }
+        val toolState = remember { ShortcutToolState() }
         // Slice 7: command bar folds to a pastille (phone default
         // posture); expanded by default so 1-tap save stays 1-tap.
         val cmdbarCollapsed = remember { mutableStateOf(false) }
@@ -312,6 +336,111 @@ class MainActivity : ComponentActivity() {
         // Slice 6 multi-doc registry: one entry per tab, explicit dispose
         // per handle (anti-leak DisposableEffect per surface below).
         val docRegistry = remember { DocRegistry() }
+
+        fun markActiveDirty() {
+            val aid = activeDocId.value
+            if (aid != null) docRegistry.markDirty(aid, true)
+            refreshKey.value++
+        }
+
+        fun pushBrushPrefs() {
+            val s = activeSurface() ?: return
+            brushPrefs.bindTool(
+                store.inkHex, brushPrefs.toolEraser, brushPrefs.toolCurve
+            )
+            s.setBrush(brushPrefs.currentJson())
+        }
+
+        // V+3 §7: fixed-table keyboard dispatch (B/E/M tool switch,
+        // Ctrl+Z/Y undo/redo, +/- size, I pipette, [] layers, PgUp/PgDn
+        // cels, Space play, F fullscreen, Shift+? help). Priority over
+        // gestures while a physical keyboard is visible (documented).
+        fun handleShortcut(action: ShortcutAction): Boolean {
+            val s = activeSurface()
+            return when (action) {
+                ShortcutAction.UNDO -> {
+                    if (s?.undo() == true) {
+                        markActiveDirty()
+                        true
+                    } else false
+                }
+                ShortcutAction.REDO -> {
+                    if (s?.redo() == true) {
+                        markActiveDirty()
+                        true
+                    } else false
+                }
+                ShortcutAction.TOOL_BRUSH -> {
+                    toolState.dispatchTool(action)
+                    brushPrefs.setTool(false)
+                    pushBrushPrefs()
+                    true
+                }
+                ShortcutAction.TOOL_ERASER -> {
+                    toolState.dispatchTool(action)
+                    brushPrefs.setTool(true)
+                    pushBrushPrefs()
+                    true
+                }
+                ShortcutAction.TOOL_KNIFE -> {
+                    toolState.dispatchTool(action)
+                    brushPrefs.setTool(false)
+                    brushPrefs.updateMix(0.5f)
+                    pushBrushPrefs()
+                    true
+                }
+                ShortcutAction.SIZE_UP, ShortcutAction.SIZE_DOWN -> {
+                    val d = if (action == ShortcutAction.SIZE_UP) 2f else -2f
+                    if (brushPrefs.isEraser) {
+                        brushPrefs.updateEraserRadius(brushPrefs.eraserRadius + d)
+                    } else {
+                        brushPrefs.updateRadius(brushPrefs.radius + d)
+                    }
+                    pushBrushPrefs()
+                    true
+                }
+                ShortcutAction.PICKER -> {
+                    store.pipetteArmed = true
+                    true
+                }
+                ShortcutAction.LAYER_UP, ShortcutAction.LAYER_DOWN -> {
+                    if (s == null) return false
+                    val n = s.layerCount()
+                    if (n <= 0) return false
+                    val cur = v2ActiveLayer(s).coerceIn(0, n - 1)
+                    val next = if (action == ShortcutAction.LAYER_UP) {
+                        (cur + 1).coerceAtMost(n - 1)
+                    } else {
+                        (cur - 1).coerceAtLeast(0)
+                    }
+                    s.setActiveLayer(next) >= 0
+                }
+                ShortcutAction.FRAME_NEXT, ShortcutAction.FRAME_PREV -> {
+                    if (s == null) return false
+                    val n = s.frameCount()
+                    if (n <= 1) return false
+                    val cur = s.currentFrameIndex().coerceIn(0, n - 1)
+                    val next = if (action == ShortcutAction.FRAME_NEXT) {
+                        (cur + 1).coerceAtMost(n - 1)
+                    } else {
+                        (cur - 1).coerceAtLeast(0)
+                    }
+                    s.setFrame(next)
+                }
+                ShortcutAction.PLAY_TOGGLE -> {
+                    playTickExt.value++
+                    true
+                }
+                ShortcutAction.FULLSCREEN -> {
+                    fullscreen.value = !fullscreen.value
+                    true
+                }
+                ShortcutAction.HELP -> {
+                    showShortcuts.value = true
+                    true
+                }
+            }
+        }
         // Deferred-switch poller holder (assigned with the doc funs below;
         // cancelled here so no callback outlives the composition).
         var deferCheck: Runnable? = null
@@ -474,6 +603,63 @@ class MainActivity : ComponentActivity() {
                     refModelName.value = null
                     status.value = ctx.getString(R.string.ref_failed)
                 }
+            }
+        }
+
+        // V+3 §6.2: PDF first page via the platform renderer (150 dpi),
+        // then the PNG bridge (nLoadDocument). Page 1 only, honest.
+        val openPdf = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            val surface = activeSurface()
+            if (uri != null && surface != null) {
+                val name = queryDisplayName(ctx, uri) ?: "import.pdf"
+                val dst = java.io.File(
+                    ctx.cacheDir, "pdf-${System.currentTimeMillis()}-$name"
+                )
+                copyTo(ctx, uri, dst)
+                Thread {
+                    val bmp = PdfImport.renderFirstPage(dst, 150)
+                    if (bmp == null) {
+                        mainHandler.post {
+                            status.value = ctx.getString(R.string.import_failed)
+                        }
+                        return@Thread
+                    }
+                    val png = java.io.File(
+                        ctx.cacheDir,
+                        "pdf-page-${System.currentTimeMillis()}.png"
+                    )
+                    if (!TextOnPath.bitmapToPng(bmp, png)) {
+                        bmp.recycle()
+                        mainHandler.post {
+                            status.value = ctx.getString(R.string.import_failed)
+                        }
+                        return@Thread
+                    }
+                    bmp.recycle()
+                    mainHandler.post {
+                        surface.loadFrom(png.absolutePath) { ok ->
+                            try {
+                                png.delete()
+                                dst.delete()
+                            } catch (_: Exception) {
+                            }
+                            if (ok) {
+                                val id = activeDocId.value
+                                if (id != null) {
+                                    docRegistry.open(id, name)
+                                    docs.firstOrNull { it.docId == id }?.name = name
+                                    docRegistry.markDirty(id, false)
+                                }
+                            }
+                            status.value = if (ok)
+                                ctx.getString(R.string.import_ok) + " " + name
+                            else ctx.getString(R.string.import_failed)
+                            refreshKey.value++
+                        }
+                    }
+                }.start()
             }
         }
 
@@ -653,7 +839,7 @@ class MainActivity : ComponentActivity() {
 
         fun applyPose(name: String, pose: WorkspacePose) {
             dockOpen.value = pose.dockOpen
-            dockTab.value = pose.dockTab.coerceIn(0, 2)
+            dockTab.value = pose.dockTab.coerceIn(0, 3)
             showTimeline.value = pose.timelineOpen
             navMode.value = pose.navMode
             activeSurface()?.navigateMode = pose.navMode
@@ -1258,6 +1444,19 @@ class MainActivity : ComponentActivity() {
                 .fillMaxSize()
                 .background(Color(0xFF141418))
                 .systemBarsPadding()
+                // V+3 §7: physical-keyboard shortcuts (single hook).
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val code = try {
+                        event.nativeKeyEvent.keyCode
+                    } catch (_: Exception) {
+                        return@onPreviewKeyEvent false
+                    }
+                    val action = ShortcutMap.actionFor(
+                        code, event.isCtrlPressed, event.isShiftPressed
+                    ) ?: return@onPreviewKeyEvent false
+                    handleShortcut(action)
+                }
         ) {
             // 1. Top Studio Menu Bar + Toolbar (slice 0 shell: every
             // entry reuses an existing SAF/export/engine action).
@@ -1330,6 +1529,11 @@ class MainActivity : ComponentActivity() {
                     StudioMenuItem(
                         label = stringResource(R.string.multidoc_help),
                         onClick = { showMultidocHelp.value = true }
+                    ),
+                    // V+3 §7: fixed-table keyboard shortcuts (?).
+                    StudioMenuItem(
+                        label = stringResource(R.string.shortcut_title),
+                        onClick = { showShortcuts.value = true }
                     )
                 )
             )
@@ -1999,6 +2203,17 @@ class MainActivity : ComponentActivity() {
                                     },
                                     modifier = Modifier.testTag("dock-tab-bd")
                                 )
+                                FilterChip(
+                                    selected = dockTab.value == 3,
+                                    onClick = { dockTab.value = 3 },
+                                    label = {
+                                        Text(
+                                            stringResource(R.string.v2_confort_tab),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("dock-tab-confort")
+                                )
                             }
                         }
                     ) {
@@ -2040,7 +2255,7 @@ class MainActivity : ComponentActivity() {
                                     onWebdav = { showWebdav.value = true },
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                            } else {
+                            } else if (dockTab.value == 2) {
                                 // V+2 Comic tab: cases/bulles/vitesse,
                                 // transfo, collage, Bézier, guides,
                                 // exports longs, pages, navigateur,
@@ -2068,7 +2283,9 @@ class MainActivity : ComponentActivity() {
                                 BezierPanel(
                                     surface = surface,
                                     onStatus = { status.value = it },
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier.fillMaxWidth(),
+                                    cacheDir = ctx.cacheDir,
+                                    docKey = v2key
                                 )
                                 GuidesPanel(
                                     surface = surface,
@@ -2130,6 +2347,49 @@ class MainActivity : ComponentActivity() {
                                     lastWrite = autosaveLast.value,
                                     modifier = Modifier.fillMaxWidth()
                                 )
+                            } else {
+                                // V+3 Confort tab: harmonies, channels,
+                                // text-on-path, pose, proof, imports
+                                // (spec docs/v3-confort.md).
+                                val v3key = activeDocId.value ?: "solo"
+                                HarmonyPanel(
+                                    store = store,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                ChannelsPanel(
+                                    surface = surface,
+                                    docKey = v3key,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                TextPathPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    docKey = v3key,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                PosePanel(
+                                    surface = surface,
+                                    docKey = v3key,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                ProofPanel(
+                                    surface = surface,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                ImportPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    onPickTiff = { openDoc.launch(arrayOf("*/*")) },
+                                    onPickPdf = { openPdf.launch(arrayOf("application/pdf")) },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
                     }
@@ -2181,7 +2441,8 @@ class MainActivity : ComponentActivity() {
                             },
                             onAiUpscale = { frameIdx ->
                                 aiUpscaleFrame(surface, frameIdx)
-                            }
+                            },
+                            playToggle = playTickExt.value
                         )
                     }
                 }
@@ -2313,6 +2574,10 @@ class MainActivity : ComponentActivity() {
                 }
                 if (showBrushHelp.value) {
                     BrushHelpDialog(onDismiss = { showBrushHelp.value = false })
+                }
+                // V+3 §7: keyboard shortcut table (? key or Help menu).
+                if (showShortcuts.value) {
+                    ShortcutHelpDialog(onDismiss = { showShortcuts.value = false })
                 }
                 // V+1: one-shot eraser migration note (dialog, persisted
                 // in BrushPrefs so it shows once per install).

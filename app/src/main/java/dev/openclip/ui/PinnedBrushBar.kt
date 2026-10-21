@@ -170,6 +170,45 @@ fun PinnedBrushBar(
                 maxLines = 1
             )
         }
+        // V+3 mixer knife (§1.1): toggle + amount slider. mix 0 = plain
+        // brush; the toggle arms 50 %, tapping again disarms.
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .height(48.dp)
+                .clickable {
+                    prefs.updateMix(if (prefs.mix <= 0f) 0.5f else 0f)
+                    push()
+                }
+                .testTag("pinned-knife")
+                .padding(horizontal = 4.dp)
+        ) {
+            Text(
+                stringResource(R.string.mixer_knife),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (prefs.mix > 0f) Color(0xFFFFC46B) else Color(0xFFB8B8C8),
+                maxLines = 1
+            )
+        }
+        if (prefs.mix > 0f) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .requiredHeight(48.dp)
+                    .testTag("pinned-mix"),
+                contentAlignment = Alignment.Center
+            ) {
+                Slider(
+                    value = prefs.mix,
+                    onValueChange = {
+                        prefs.updateMix(it)
+                        push()
+                    },
+                    valueRange = 0f..1f,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier

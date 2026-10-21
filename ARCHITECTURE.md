@@ -488,3 +488,73 @@ clear-all + re-add: the pre-edit snapshot is consumed, so one vector
 undo empties the layer and the original only comes back via an
 app-side re-commit — documented deviation from the "1 undo"
 shorthand, surfaced honestly in the UI).
+
+V+3 additions (decided 2026-10-20, confort-pro round —
+spec docs/v3-confort.md; 8/11 items are 0-JNI app-side, only §1.1,
+§2b, §5, §6.1 and §8.1 touch the engine, and of those only §5 adds
+symbols):
+
+- Mixer knife (§1.1): NO new symbol. `nSetBrush` JSON grows two keys
+  (M2 pattern): `"mix"` 0..1 (default 0 = byte-identical brush,
+  existing tests lock it) and `"mixRadius"` 0.5..2.0 (pickup-window
+  factor × dab radius, default 1). Per dab: average the straight
+  local color under the pickup disc on the ACTIVE layer, blend
+  ink*(1-mix)+pickup*mix, stamp with the normal size/opacity/
+  pressure path. Intra-layer only (same scope as M3 filters).
+  Undo = touchTile like strokes. On an armed mask target the mix is
+  ignored (same redirect-to-mask stroke as brush/gomme V+1, the V+1
+  guard); on adjustment layers the app refuses the stroke (existing
+  guard); vector layers keep the M6 path.
+- Rulers snap keys (§2b): NO new symbol. `nSetRulers` JSON grows
+  `"snapTol"` (px, default 2 = V+2 behavior; <=0 disables ALL snap),
+  `"grid"` (0|8|16|32, default 0 = off, other values ignored) and
+  `"snapPaths"` (bool, default false: snap to neighboring vector
+  path vertices within tolerance). Pipeline order stays SMOOTH THEN
+  SNAP (spec §2): guides first, then grid, then path vertices —
+  nearest snap wins per stage. Unknown shapes/keys ignored (M3 rule).
+- V+3 text = existing bridges only (§3): text-on-path layouts
+  app-side (platform drawTextOnPath, system font) and commits via
+  `nBlitPngIntoLayer` (1 undo, V+1 pattern); warp reuses
+  `nSelectionBlit` mode mesh (V+2); fiches flow through
+  `nSetLayerMeta` (`x-openclip-text-path`, `x-openclip-text-offset`).
+- Mannequin pose (§5): TWO new symbols (the only new symbols of
+  V+3), gated on a libre model (gate asset, spec §5):
+  - `nRefJoints(handle): String` — read-only introspection (M9
+    `nVectorPaths` pattern, no pixels): named glTF scene nodes as
+    `{"joints":[{"name":..,"parent":idx|-1,"pos":[x,y,z]}]}` (rest
+    translation). Unnamed nodes (helpers, the M9 cube fixture) are
+    EXCLUDED — a model with no named nodes reports
+    `{"joints":[]}`. Empty string on bad handle.
+  - `nSetRefPose(handle, json): Boolean` — `{bone:eulerDeg...}`
+    where each value is either a single number (yaw about Y, the
+    turntable axis) or `[x,y,z]` Euler degrees XYZ (R = Rz·Ry·Rx).
+    Unknown bones ignored (M3 rule); each axis clamped to ±180;
+    NaN/unparseable entries ignored. Always returns true on a live
+    handle (never fails, like clamps elsewhere). Overlay-only:
+    posed joints re-derive the node world matrices at render time
+    in `nCompositeInto` (tracing aid, never in `nFrameCompositeInto`
+    — thumbnails/exports stay clean, M9 rule); never in undo.
+  - Skinning stays rigid-per-node (no weights in V+3): each node's
+    subtree rotates about the node's rest translation. Pose is
+    stored on the session model; `pose.json` persistence is
+    app-side. Without a libre model only the cube-fixture behavior
+    is guaranteed (empty joints, pose accepted but with no named
+    bone to address).
+- TIFF import (§6.1): NO new symbol. `nLoadDocument` accepts
+  `.tif`/`.tiff`: baseline from scratch (no libtiff — single-file
+  rule) — uncompressed + LZW, RGB/RGBA8, strips, planar 1, FIRST
+  IFD only (page 1/N reported honestly). Refused with a message
+  (false + session untouched, M4 contract): JPEG-in-TIFF, CMYK,
+  16-bit, tiled. Endianness II/MM, SHORT/LONG tag types.
+- Denoise (§8.1): NO new symbol. `nApplyFilter` registry gains
+  `"denoise"` with params `{"strength":0..1 (default 0.5),
+  "mode":"median|bilateral" (default median)}` — median 3×3 and
+  naïve bilateral 3×3 from scratch, blended src*(1-s)+filtered*s
+  (strength 0 = byte-identical no-op). Alpha contract M3 holds
+  (alpha untouched, rgb clamped to [0,alpha]).
+- 0-JNI by construction (§1.2 proof CMYK, §1.3 harmonies, §4 named
+  channels, §6.2 PDF first-page via PdfRenderer, §6.3 SVG <path>
+  subset → nAppendVectorPath, §7 physical-keyboard shortcuts,
+  §8.2/§8.3 AI): no ARCHITECTURE.md change beyond this paragraph.
+  §8.2/§8.3 stay CONDITIONAL (no permissive <5 Mo ONNX weight
+  confirmed — same gate as M8); only classic §8.1 ships.

@@ -62,10 +62,11 @@ TEST(filters_registry_known) {
     CHECK(canApply("addNoise"));
     CHECK(canApply("mosaic"));
     CHECK(canApply("gradientMap"));
+    CHECK(canApply("denoise"));  // V+3 classic
     CHECK(!canApply("nope"));
     CHECK(!canApply("GaussianBlur"));
     CHECK(!canApply(""));
-    CHECK_EQ(openclip::filterNames().size(), (std::size_t)10);
+    CHECK_EQ(openclip::filterNames().size(), (std::size_t)11);
 }
 
 TEST(filters_unknown_no_side_effects) {
@@ -292,4 +293,41 @@ TEST(filters_gradient_map_endpoints) {
     CHECK_EQ(c.get(0, 0).b, 0);
     CHECK_EQ(c.get(1, 0).r, 0);
     CHECK_EQ(c.get(1, 0).b, 255);
+}
+
+// V+3 classic denoise (ARCHITECTURE.md "V+3 additions"): median 3x3
+// removes impulse noise, strength 0 is byte-identical, bad params fail
+// cleanly with the surface untouched.
+TEST(filters_denoise_reduces_impulse_noise) {
+    Surface s = solid(32, 32, 128, 128, 128, 255);
+    s.set(5, 5, Pixel{255, 255, 255, 255});
+    s.set(6, 5, Pixel{0, 0, 0, 255});
+    s.set(20, 20, Pixel{255, 255, 255, 255});
+    s.set(21, 21, Pixel{0, 0, 0, 255});
+    const double before = varianceR(s);
+    CHECK(before > 1.0);
+    std::string err;
+    CHECK(openclip::applyFilter(s, "denoise", "{\"strength\":1}", err));
+    CHECK(varianceR(s) < before);
+    CHECK(alphaColEq(s, solid(32, 32, 128, 128, 128, 255)));
+    // Bilateral mode is a valid no-crash path on the same fixture.
+    Surface b = solid(32, 32, 128, 128, 128, 255);
+    b.set(5, 5, Pixel{255, 255, 255, 255});
+    CHECK(openclip::applyFilter(
+        b, "denoise", "{\"strength\":1,\"mode\":\"bilateral\"}", err));
+    CHECK(varianceR(b) < before);
+}
+
+TEST(filters_denoise_zero_identity_bad_params_refused) {
+    Surface s = solid(16, 16, 10, 200, 90, 255);
+    const auto ref = s.bytes();
+    std::string err;
+    CHECK(openclip::applyFilter(s, "denoise", "{\"strength\":0}", err));
+    CHECK(s.bytes() == ref);  // no-op success, byte-identical
+    CHECK(!openclip::applyFilter(s, "denoise", "{\"strength\":2}", err));
+    CHECK(!err.empty());
+    CHECK(s.bytes() == ref);
+    CHECK(!openclip::applyFilter(
+        s, "denoise", "{\"strength\":0.5,\"mode\":\"wavelet\"}", err));
+    CHECK(s.bytes() == ref);
 }

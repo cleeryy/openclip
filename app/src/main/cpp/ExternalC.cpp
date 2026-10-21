@@ -162,6 +162,12 @@ struct Session {
     // ARCHITECTURE.md "V+2 additions"). Applied in rulerStamp AFTER
     // smoothing (smooth THEN snap, spec §4.4).
     std::vector<openclip::Guide> guides;
+    // V+3 snap keys (ARCHITECTURE.md "V+3 additions"): snapTol (px,
+    // default 2 = V+2 behavior; <= 0 disables ALL snap), grid
+    // (0|8|16|32, default 0 = off), snapPaths (neighbor vertices).
+    float snapTol = 2.0f;
+    float snapGridStep = 0.0f;
+    bool snapPaths = false;
 };
 
 Session* asSession(jlong handle) { return reinterpret_cast<Session*>(handle); }
@@ -250,7 +256,9 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
         // Ink luminance drives mask alpha (white keeps, black hides);
         // alpha-erase and eraser flags do not apply to masks: the V+1
         // rule stamps BLACK (hide) for alpha-erase, session ink for
-        // the legacy eraser (unchanged M5 behavior).
+        // the legacy eraser (unchanged M5 behavior). V+3: the mixer
+        // knife is ignored on mask targets (redirect-to-mask stroke,
+        // same guard as brush/gomme V+1).
         openclip::Dab stamped =
             s->alphaEraser
                 ? openclip::dabFromPressure(s->brush, dab.x, dab.y,
@@ -295,6 +303,19 @@ bool stampResolved(Session* s, const openclip::Dab& d) {
 // M6 rulers: project one input point to the active ruler (ellipse
 // boundary of the first ellipse; nearest point on the first line) and
 // emit stamps at the transformed point plus its symmetry mirrors.
+void collectSnapPoints(const openclip::Layer& l,
+                       std::vector<openclip::Vec2>& out) {
+    if (l.isVector) {
+        for (const auto& p : l.vectorData)
+            for (const auto& q : p.pts) {
+                if (out.size() >= 65536) return;
+                out.push_back(q);
+            }
+    }
+    if (l.isGroup)
+        for (const auto& ch : l.children) collectSnapPoints(ch, out);
+}
+
 void rulerStamp(Session* s, float x, float y, float pressure) {
     float px = x, py = y;
     if (!s->ellipses.empty()) {
@@ -333,14 +354,27 @@ void rulerStamp(Session* s, float x, float y, float pressure) {
         px = s->lastX * a + px * (1.0f - a);
         py = s->lastY * a + py * (1.0f - a);
     }
-    // V+2: guides snap AFTER smoothing (smooth THEN snap, spec §4.4) —
+    // V+2 guides snap AFTER smoothing (smooth THEN snap, spec §4.4) —
     // the M6 ellipse/line projection above keeps running first, so a
-    // guide within tolerance wins over the legacy ruler.
-    if (!s->guides.empty()) {
-        float gx = px, gy = py;
-        if (openclip::snapGuides(s->guides, gx, gy)) {
-            px = gx;
-            py = gy;
+    // guide within tolerance wins over the legacy ruler. V+3: the
+    // tolerance is snapTol (<= 0 disables everything), then the grid,
+    // then neighboring vector-path vertices (spec §2 order).
+    if (s->snapTol > 0.0f) {
+        if (!s->guides.empty()) {
+            float gx = px, gy = py;
+            if (openclip::snapGuides(s->guides, gx, gy, s->snapTol)) {
+                px = gx;
+                py = gy;
+            }
+        }
+        if (s->snapGridStep > 0.0f)
+            openclip::snapGrid(px, py, s->snapGridStep, s->snapTol);
+        if (s->snapPaths) {
+            std::vector<openclip::Vec2> pts;
+            for (std::size_t li = 0;
+                 li < static_cast<std::size_t>(cur(s).layerCount()); ++li)
+                collectSnapPoints(cur(s).layer(li), pts);
+            openclip::snapPathPoints(pts, px, py, s->snapTol);
         }
     }
     const float x0 = s->strokeOpen ? s->lastX : px;
@@ -426,6 +460,13 @@ Java_dev_openclip_engine_EngineHost_nSetBrush(JNIEnv* env, jclass,
     s->stabilize = stab < 0.0f ? 0.0f : (stab > 1.0f ? 1.0f : stab);
     const float curve = static_cast<float>(jsonNum(j, "curve", s->curve));
     s->curve = curve < 0.0f ? 0.0f : (curve > 1.0f ? 1.0f : curve);
+    // V+3 mixer knife (ARCHITECTURE.md "V+3 additions"): clamped
+    // defensively like stabilize/curve above; mix 0 = plain brush.
+    const float mix = static_cast<float>(jsonNum(j, "mix", s->brush.mix));
+    s->brush.mix = mix < 0.0f ? 0.0f : (mix > 1.0f ? 1.0f : mix);
+    const float mixR =
+        static_cast<float>(jsonNum(j, "mixRadius", s->brush.mixRadius));
+    s->brush.mixRadius = mixR < 0.5f ? 0.5f : (mixR > 2.0f ? 2.0f : mixR);
     const std::string mode = jsonStr(j, "mode");
     if (mode == "alpha-erase") {
         s->alphaEraser = true;
@@ -942,6 +983,28 @@ Java_dev_openclip_engine_EngineHost_nSetRefVisible(JNIEnv*, jclass,
     return JNI_TRUE;
 }
 
+// V+3 pose rig (ARCHITECTURE.md "V+3 additions"): read-only joints
+// introspection (M9 nVectorPaths pattern) + pose merge. No pixels,
+// overlay-only, never in undo, never in nFrameCompositeInto.
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_openclip_engine_EngineHost_nRefJoints(JNIEnv* env, jclass,
+                                               jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return nullptr;
+    return env->NewStringUTF(openclip::refJointsJson(s->refModel).c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetRefPose(JNIEnv* env, jclass,
+                                                jlong handle, jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    // Stored even with no model loaded (re-resolved on load); unknown
+    // bones ignored, axes clamped, never fails on a live handle.
+    if (json) openclip::applyRefPoseJson(s->refModel, toStd(env, json));
+    return JNI_TRUE;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
                                                  jfloat x, jfloat y,
@@ -1389,6 +1452,9 @@ Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
     s->ellipses.clear();
     s->lines.clear();
     s->guides.clear();
+    s->snapTol = 2.0f;
+    s->snapGridStep = 0.0f;
+    s->snapPaths = false;
     if (j.empty()) return JNI_TRUE;  // clearing is a valid no-op state
     if (j.find("\"symmetryX\"") != std::string::npos) {
         s->symXAt = static_cast<float>(jsonNum(j, "symmetryX", 0.0));
@@ -1496,6 +1562,29 @@ Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
                 if (arrEnd != std::string::npos &&
                     (nxt == std::string::npos || arrEnd < nxt))
                     break;
+            }
+        }
+    }
+    // V+3 snap keys (ARCHITECTURE.md "V+3 additions"): "snapTol" px
+    // (default 2 = V+2; <= 0 disables), "grid" 0|8|16|32 (other values
+    // ignored), "snapPaths" bool. Unknown keys ignored (M3 rule).
+    const double tol = jsonNum(j, "snapTol", 2.0);
+    s->snapTol =
+        static_cast<float>(tol < 0.0 ? 0.0 : (tol > 64.0 ? 64.0 : tol));
+    const double grid = jsonNum(j, "grid", 0.0);
+    s->snapGridStep = (grid == 8.0 || grid == 16.0 || grid == 32.0)
+                          ? static_cast<float>(grid)
+                          : 0.0f;
+    {
+        const std::size_t sp = j.find("\"snapPaths\"");
+        if (sp != std::string::npos) {
+            const std::size_t colon = j.find(':', sp + 11);
+            if (colon != std::string::npos) {
+                std::size_t q = colon + 1;
+                while (q < j.size() &&
+                       (j[q] == ' ' || j[q] == '\t' || j[q] == '\n'))
+                    ++q;
+                s->snapPaths = (q < j.size() && j[q] == 't');
             }
         }
     }

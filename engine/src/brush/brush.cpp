@@ -105,7 +105,40 @@ void paintDab(Surface& s, const Dab& d, const BrushParams& p) {
     const int y0 = static_cast<int>(std::floor(d.y - d.radius));
     const int y1 = static_cast<int>(std::ceil(d.y + d.radius));
     const float sa = d.opacity;
-    const float fr = d.r / 255.0f, fg = d.g / 255.0f, fb = d.b / 255.0f;
+    // V+3 mixer knife: straight pickup color averaged over the pickup
+    // disc (radius * mixRadius), blended ink*(1-mix)+pickup*mix. mix<=0
+    // skips sampling entirely (byte-identical brush path below).
+    float fr = d.r / 255.0f, fg = d.g / 255.0f, fb = d.b / 255.0f;
+    if (p.mix > 0.0f) {
+        float rm = p.mixRadius < 0.5f ? 0.5f : (p.mixRadius > 2.0f ? 2.0f : p.mixRadius);
+        const float pr = d.radius * rm;
+        const int px0 = static_cast<int>(std::floor(d.x - pr));
+        const int px1 = static_cast<int>(std::ceil(d.x + pr));
+        const int py0 = static_cast<int>(std::floor(d.y - pr));
+        const int py1 = static_cast<int>(std::ceil(d.y + pr));
+        double sr = 0, sg = 0, sb = 0;
+        long n = 0;
+        for (int y = py0; y <= py1; ++y) {
+            for (int x = px0; x <= px1; ++x) {
+                const float dx = (x + 0.5f) - d.x;
+                const float dy = (y + 0.5f) - d.y;
+                if (std::sqrt(dx * dx + dy * dy) > pr) continue;
+                const Pixel q = s.get(x, y);
+                if (q.a == 0) continue;
+                const float ia = 255.0f / q.a;
+                sr += q.r * ia;
+                sg += q.g * ia;
+                sb += q.b * ia;
+                ++n;
+            }
+        }
+        if (n > 0) {
+            const float k = p.mix < 0.0f ? 0.0f : (p.mix > 1.0f ? 1.0f : p.mix);
+            fr = fr * (1.0f - k) + static_cast<float>(sr / n) / 255.0f * k;
+            fg = fg * (1.0f - k) + static_cast<float>(sg / n) / 255.0f * k;
+            fb = fb * (1.0f - k) + static_cast<float>(sb / n) / 255.0f * k;
+        }
+    }
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
             const float dx = (x + 0.5f) - d.x;

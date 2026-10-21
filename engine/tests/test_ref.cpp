@@ -165,3 +165,131 @@ TEST(ref_empty_model_draws_nothing) {
     renderRefEdges(m, v, w, h, buf, drawn);
     CHECK_EQ(drawn, 0);
 }
+
+// V+3 pose rig (ARCHITECTURE.md "V+3 additions"): two NAMED nodes
+// (hips root + head child translated +1y), both meshed with the unit
+// cube. Unnamed-cube fixtures report no joints; poses rotate subtrees
+// about the node rest translation.
+bool writeRigGlb(const std::string& path) {
+    const float verts[8][3] = {
+        {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, -0.5f},
+        {-0.5f, 0.5f, -0.5f},  {-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f},
+        {0.5f, 0.5f, 0.5f},    {-0.5f, 0.5f, 0.5f},
+    };
+    const std::uint16_t idx[36] = {
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1,
+        3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+    };
+    std::vector<std::uint8_t> bin;
+    for (int i = 0; i < 8; ++i)
+        for (int c = 0; c < 3; ++c) putF32(bin, verts[i][c]);
+    for (int i = 0; i < 36; ++i) putU16(bin, idx[i]);
+
+    const std::string json =
+        "{\"asset\":{\"version\":\"2.0\"},"
+        "\"buffers\":[{\"byteLength\":" + std::to_string(bin.size()) + "}],"
+        "\"bufferViews\":["
+        "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":96,\"target\":34962},"
+        "{\"buffer\":0,\"byteOffset\":96,\"byteLength\":72,\"target\":34963}],"
+        "\"accessors\":["
+        "{\"bufferView\":0,\"componentType\":5126,\"count\":8,\"type\":\"VEC3\"},"
+        "{\"bufferView\":1,\"componentType\":5123,\"count\":36,\"type\":\"SCALAR\"}],"
+        "\"meshes\":["
+        "{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]},"
+        "{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}],"
+        "\"nodes\":["
+        "{\"name\":\"hips\",\"mesh\":0,\"children\":[1]},"
+        "{\"name\":\"head\",\"mesh\":1,\"translation\":[0.0,1.0,0.0]}],"
+        "\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
+    std::vector<std::uint8_t> jchunk(json.begin(), json.end());
+    while (jchunk.size() % 4 != 0) jchunk.push_back(' ');
+
+    std::vector<std::uint8_t> out;
+    putU32(out, 0x46546C67);  // "glTF"
+    putU32(out, 2);
+    putU32(out, static_cast<std::uint32_t>(12 + 8 + jchunk.size() + 8 +
+                                           bin.size()));
+    putU32(out, static_cast<std::uint32_t>(jchunk.size()));
+    putU32(out, 0x4E4F534A);  // "JSON"
+    out.insert(out.end(), jchunk.begin(), jchunk.end());
+    putU32(out, static_cast<std::uint32_t>(bin.size()));
+    putU32(out, 0x004E4942);  // "BIN\0"
+    out.insert(out.end(), bin.begin(), bin.end());
+
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(out.data(), 1, out.size(), f) == out.size();
+    std::fclose(f);
+    return ok;
+}
+
+TEST(ref_joints_empty_on_cube) {
+    const std::string path = "/tmp/openclip_cube.glb";
+    CHECK(writeCubeGlb(path));
+    RefModel m;
+    std::string err;
+    CHECK(loadRefModel(path, m, err));
+    CHECK_EQ(openclip::refJointsJson(m), "{\"joints\":[]}");
+    std::remove(path.c_str());
+}
+
+TEST(ref_pose_unknown_ignored_and_clamped) {
+    const std::string cube = "/tmp/openclip_cube.glb";
+    CHECK(writeCubeGlb(cube));
+    RefModel m;
+    std::string err;
+    CHECK(loadRefModel(cube, m, err));
+    // Unknown bones are ignored (M3 rule), never a failure.
+    CHECK(openclip::applyRefPoseJson(m, "{\"nope\":[1,2,3]}"));
+    CHECK(m.pose.empty());
+    CHECK(openclip::applyRefPoseJson(m, "{\"hips\":45}"));
+    CHECK(m.pose.empty());  // cube has no named bones at all
+    std::remove(cube.c_str());
+
+    const std::string rig = "/tmp/openclip_rig.glb";
+    CHECK(writeRigGlb(rig));
+    RefModel r;
+    CHECK(loadRefModel(rig, r, err));
+    CHECK_EQ(r.joints.size(), (std::size_t)2);
+    // Out-of-range clamps to ±180 per axis.
+    CHECK(openclip::applyRefPoseJson(r, "{\"head\":[0,0,500]}"));
+    CHECK_EQ(r.pose["head"][2], 180.0f);
+    // Single number = yaw about Y.
+    CHECK(openclip::applyRefPoseJson(r, "{\"hips\":45}"));
+    CHECK_EQ(r.pose["hips"][0], 0.0f);
+    CHECK_EQ(r.pose["hips"][1], 45.0f);
+    CHECK_EQ(r.pose["hips"][2], 0.0f);
+    std::remove(rig.c_str());
+}
+
+TEST(ref_pose_moves_overlay) {
+    const std::string rig = "/tmp/openclip_rig.glb";
+    CHECK(writeRigGlb(rig));
+    RefModel m;
+    std::string err;
+    CHECK(loadRefModel(rig, m, err));
+    const std::string joints = openclip::refJointsJson(m);
+    CHECK(joints.find("\"name\":\"hips\"") != std::string::npos);
+    CHECK(joints.find("\"name\":\"head\",\"parent\":0") != std::string::npos);
+    const int w = 256, h = 256;
+    RefView v;
+    v.dist = 3;
+    v.fov = 45;
+    std::vector<std::uint8_t> rest(static_cast<std::size_t>(w) * h * 4, 0);
+    int d0 = 0;
+    renderRefEdges(m, v, w, h, rest, d0);
+    CHECK(d0 > 0);
+    CHECK(openclip::applyRefPoseJson(m, "{\"head\":[0,45,0]}"));
+    std::vector<std::uint8_t> posed(static_cast<std::size_t>(w) * h * 4, 0);
+    int d1 = 0;
+    renderRefEdges(m, v, w, h, posed, d1);
+    CHECK(d1 > 0);
+    CHECK(rest != posed);  // yaw 45 on the head subtree moves the overlay
+    // Identity pose renders exactly like rest (no-op merge).
+    CHECK(openclip::applyRefPoseJson(m, "{\"head\":[0,0,0]}"));
+    std::vector<std::uint8_t> ident(static_cast<std::size_t>(w) * h * 4, 0);
+    int d2 = 0;
+    renderRefEdges(m, v, w, h, ident, d2);
+    CHECK(ident == rest);
+    std::remove(rig.c_str());
+}

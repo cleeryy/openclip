@@ -16,6 +16,7 @@ SRCS = src/raster/surface.cpp \
        src/io/ora.cpp \
        src/io/psd.cpp \
        src/io/gif.cpp \
+       src/io/tiff.cpp \
        src/io/document.cpp \
        src/filters/filters.cpp \
        src/raster/vector.cpp \
@@ -40,6 +41,7 @@ TEST_SRCS = tests/main.cpp \
             tests/test_cels.cpp \
             tests/test_transform.cpp \
             tests/test_guides.cpp \
+            tests/test_tiff.cpp \
             tests/test_gif.cpp
 
 OBJDIR = obj

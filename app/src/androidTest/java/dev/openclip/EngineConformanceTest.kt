@@ -6,7 +6,9 @@
 package dev.openclip
 
 import android.graphics.Bitmap
+import android.graphics.pdf.PdfDocument
 import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -77,6 +79,24 @@ import dev.openclip.ui.parsePanelMeta
 import dev.openclip.ui.refreshPanelOverlay
 import dev.openclip.ui.v2LayerMetas
 import dev.openclip.ui.v2VectorLayers
+// V+3 confort-pro pure units + JSON bridges (no new engine pixels).
+import dev.openclip.ui.ChannelOp
+import dev.openclip.ui.ChannelOps
+import dev.openclip.ui.ChannelStore
+import dev.openclip.ui.CmykProof
+import dev.openclip.ui.Harmony
+import dev.openclip.ui.PdfImport
+import dev.openclip.ui.PoseStore
+import dev.openclip.ui.Rdp
+import dev.openclip.ui.SelectionMask
+import dev.openclip.ui.ShortcutAction
+import dev.openclip.ui.ShortcutMap
+import dev.openclip.ui.ShortcutToolState
+import dev.openclip.ui.SnapPt
+import dev.openclip.ui.SnapSettings
+import dev.openclip.ui.SvgImport
+import dev.openclip.ui.TextOnPath
+import dev.openclip.ui.buildVectorJson
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -7579,6 +7599,721 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
                 }
             }
             closeFreshDoc(id)
+        }
+    }
+
+    // ================= V+3 confort pro (docs/v3-confort.md) =================
+
+    // §1.1 mixerSmearsStroke: knife (mix 1) pushes local paint, introduces
+    // no new ink; undo restores the red stroke exactly.
+    @Test
+    fun mixerSmearsStroke() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#FF0000"}"""
+            )
+            var id = EngineHost.nStrokeBegin(handle, 60f, 128f, 1f)
+            for (x in 70..196 step 5) EngineHost.nStrokeMove(handle, id, x.toFloat(), 128f, 1f)
+            EngineHost.nStrokeEnd(handle, id)
+            val red = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, red, w, h))
+            fun px(a: IntArray, x: Int, y: Int): Int = a[y * w + x]
+            val r0 = px(red, 128, 128)
+            assertTrue("red stroke must paint red", ((r0 shr 16) and 0xFF) > 200 && (r0 and 0xFF) < 100)
+            // Knife pass with blue ink over the red stroke.
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":12,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#0000FF","mix":1.0,"mixRadius":1.0}"""
+            )
+            id = EngineHost.nStrokeBegin(handle, 100f, 128f, 1f)
+            for (x in 105..156 step 5) EngineHost.nStrokeMove(handle, id, x.toFloat(), 128f, 1f)
+            EngineHost.nStrokeEnd(handle, id)
+            val mixed = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, mixed, w, h))
+            val r1 = px(mixed, 128, 128)
+            assertTrue(
+                "knife must push red, not introduce blue (got ${Integer.toHexString(r1)})",
+                ((r1 shr 16) and 0xFF) > 150 && (r1 and 0xFF) < 150
+            )
+            assertTrue("knife must undo cleanly", EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue("undo restores the red stroke", undone.contentEquals(red))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §1.2 proofCmykOverlayOnly: the preview never mutates its input
+    // (dialog close = byte-identical canvas).
+    @Test
+    fun proofCmykOverlayOnly() {
+        val src = IntArray(64) { 0xFFFF0000.toInt() }
+        val before = src.copyOf()
+        val sim = CmykProof.preview(src, gamutWarning = true)
+        assertTrue("preview must not mutate its input", src.contentEquals(before))
+        assertTrue("paper-tinted preview must differ", !sim.contentEquals(before))
+        assertEquals(64, sim.size)
+    }
+
+    // §1.2 proofGamutFlagsSaturated: pure cyan flags, neutral gray never.
+    @Test
+    fun proofGamutFlagsSaturated() {
+        assertTrue("pure cyan must flag", CmykProof.isOutOfGamut(0, 255, 255))
+        assertFalse("neutral gray must not flag", CmykProof.isOutOfGamut(128, 128, 128))
+        assertFalse("black must not flag", CmykProof.isOutOfGamut(0, 0, 0))
+    }
+
+    // §1.3 harmonyComplementAdopts: 0° → 180° adopted into ink hex.
+    @Test
+    fun harmonyComplementAdopts() {
+        val hues = Harmony.huesFor(0f, "complement")
+        assertEquals(listOf(0f, 180f), hues)
+        val adopted = Harmony.adopt("#FF0000", 180f)
+        val h = Harmony.hexToHsv(adopted)[0]
+        assertTrue("adopted hue must be ~180°, got $h in $adopted", h > 178f || h < 2f)
+        assertEquals(3, Harmony.huesFor(30f, "triadic").size)
+        assertEquals(4, Harmony.huesFor(30f, "square").size)
+    }
+
+    // §2a simplifyReducesPoints: 100-pt sine → < 40, endpoints kept.
+    @Test
+    fun simplifyReducesPoints() {
+        val pts = (0 until 100).map { i ->
+            val x = i * 2f
+            SnapPt(x, 100f + 40f * kotlin.math.sin(i / 99f * Math.PI.toFloat() * 2f))
+        }
+        val simple = Rdp.simplify(pts, 1f)
+        assertTrue("simplified ${simple.size} must be < 40", simple.size < 40)
+        assertTrue("simplified ${simple.size} must keep >= 2", simple.size >= 2)
+        assertEquals(pts.first().x, simple.first().x)
+        assertEquals(pts.last().x, simple.last().x)
+    }
+
+    // §2b snapGridPersists: reload re-reads tol/grid/paths/epsilon.
+    @Test
+    fun snapGridPersists() {
+        val dir = composeRule.activity.cacheDir
+        val key = "v3snaptest"
+        val s = SnapSettings(snapTol = 4f, grid = 16, snapPaths = true, simplifyEps = 2f)
+        assertTrue(SnapSettings.save(dir, key, s))
+        val back = SnapSettings.load(dir, key)
+        assertEquals(4f, back.snapTol)
+        assertEquals(16, back.grid)
+        assertTrue(back.snapPaths)
+        assertEquals(2f, back.simplifyEps)
+    }
+
+    // §2b rulerSnapKeysRoundTrip: grid 16/tol 8 snaps a radius-2 stroke;
+    // snapTol 0 leaves it on the input line (JNI end to end).
+    @Test
+    fun rulerSnapKeysRoundTrip() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":2,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#000000"}"""
+            )
+            assertTrue(EngineHost.nSetRulers(handle, """{"grid":16,"snapTol":8.0,"snapPaths":false}"""))
+            var id = EngineHost.nStrokeBegin(handle, 20f, 100f, 1f)
+            for (y in 105..150 step 5) EngineHost.nStrokeMove(handle, id, 20f, y.toFloat(), 1f)
+            EngineHost.nStrokeEnd(handle, id)
+            val snapped = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, snapped, w, h))
+            assertTrue("grid must pull the stroke to x=16", snapped[128 * w + 16] != -1)
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(EngineHost.nSetRulers(handle, """{"grid":16,"snapTol":0.0}"""))
+            id = EngineHost.nStrokeBegin(handle, 20f, 100f, 1f)
+            for (y in 105..150 step 5) EngineHost.nStrokeMove(handle, id, 20f, y.toFloat(), 1f)
+            EngineHost.nStrokeEnd(handle, id)
+            val free = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, free, w, h))
+            assertEquals("tol 0 must not snap (16 stays white)", -1, free[128 * w + 16])
+            assertTrue("input line still paints", free[128 * w + 20] != -1)
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §3 textOnPathCommits: layout along an arc commits pixels via
+    // nBlitPngIntoLayer; one undo restores the blank canvas.
+    @Test
+    fun textOnPathCommits() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val li = EngineHost.nAddVectorLayer(handle, "Trace")
+            assertTrue(li >= 0)
+            val arc = (0..12).map { k ->
+                val a = (-60 + k * 10) * Math.PI.toFloat() / 180f
+                Pair(128f + 60f * kotlin.math.cos(a), 150f + 60f * kotlin.math.sin(a))
+            }
+            val json = buildVectorJson(arc, 4f)
+            assertTrue(EngineHost.nAppendVectorPath(handle, li, json) >= 0)
+            // Reference WITH the arc (vector layers rasterize black ink):
+            // undo must restore exactly this, not a blank canvas.
+            val withArc = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, withArc, w, h))
+            val bmp = TextOnPath.renderToBitmap(
+                "Bonjour", arc.map { (x, y) -> SnapPt(x, y) },
+                w, h, 48f, "#141414", 0f, false
+            )
+            assertNotNull("text must lay out along the arc", bmp)
+            val png = File(composeRule.activity.cacheDir, "v3-textpath.png")
+            assertTrue(TextOnPath.bitmapToPng(bmp!!, png))
+            bmp.recycle()
+            assertTrue(EngineHost.nBlitPngIntoLayer(handle, 0, png.absolutePath))
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            assertTrue("committed text must dirty pixels", after.any { it != -1 })
+            assertTrue("text must add pixels beyond the arc", !after.contentEquals(withArc))
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue("undo restores the arc-only composite", undone.contentEquals(withArc))
+            png.delete()
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §3 textOnPathRoundTrip: fiches survive nSetLayerMeta → nLayerState.
+    @Test
+    fun textOnPathRoundTrip() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertTrue(EngineHost.nSetLayerMeta(handle, 0, "x-openclip-text-path", "1"))
+            assertTrue(EngineHost.nSetLayerMeta(handle, 0, "x-openclip-text-offset", "0.25"))
+            val state = EngineHost.nLayerState(handle)
+            assertTrue("path fiche must round-trip, got $state", state.contains("x-openclip-text-path"))
+            assertTrue("offset fiche must round-trip, got $state", state.contains("0.25"))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §3 textMeshWarpUndoable: mesh warp on committed pixels changes the
+    // composite and undoes exactly (V+2 bridge).
+    @Test
+    fun textMeshWarpUndoable() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#0000FF"}"""
+            )
+            val id = EngineHost.nStrokeBegin(handle, 60f, 60f, 1f)
+            for (i in 1..20) EngineHost.nStrokeMove(handle, id, (60 + i * 5).toFloat(), (60 + i * 5).toFloat(), 1f)
+            EngineHost.nStrokeEnd(handle, id)
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            // Selection mask: white rect on black, exact canvas size.
+            val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            maskBmp.eraseColor(android.graphics.Color.BLACK)
+            val cv = android.graphics.Canvas(maskBmp)
+            val paint = android.graphics.Paint()
+            paint.color = android.graphics.Color.WHITE
+            cv.drawRect(100f, 0f, 156f, h.toFloat(), paint)
+            val maskFile = File(composeRule.activity.cacheDir, "v3-mask.png")
+            maskBmp.compress(Bitmap.CompressFormat.PNG, 100, maskFile.outputStream())
+            maskBmp.recycle()
+            assertTrue(EngineHost.nSetSelectionMask(handle, maskFile.absolutePath))
+            val mesh = (0 until 9).flatMap { k ->
+                if (k == 4) listOf("40", "0") else listOf("0", "0")
+            }.joinToString(",")
+            assertTrue(
+                EngineHost.nSelectionBlit(handle, """{"dx":0,"dy":0,"scale":1,"angle":0,"mode":"mesh","mesh":[$mesh]}""")
+            )
+            val warped = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, warped, w, h))
+            assertTrue("mesh warp must move masked pixels", !warped.contentEquals(before))
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue("warp undoes exactly", undone.contentEquals(before))
+            maskFile.delete()
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §4 channelSaveReload: mask → PNG → bits round trip + store listing.
+    @Test
+    fun channelSaveReload() {
+        val dir = composeRule.activity.cacheDir
+        val key = "v3chantest"
+        val mask = SelectionMask(64, 64)
+        mask.setRect(10f, 10f, 30f, 30f)
+        val bits = mask.copyBits()
+        val png = ChannelOps.bitsToPng(64, 64, bits)
+        assertNotNull(png)
+        val back = ChannelOps.pngToBits(64, 64, png!!)
+        assertNotNull(back)
+        assertTrue("channel bits must round-trip", back!!.contentEquals(bits))
+        assertTrue(ChannelStore.save(dir, key, listOf("Sel1")))
+        assertEquals(listOf("Sel1"), ChannelStore.list(dir, key))
+        ChannelStore.delete(dir, key, "Sel1")
+        assertEquals(emptyList<String>(), ChannelStore.list(dir, key))
+    }
+
+    // §4 channelBooleanOps: replace/add/subtract/intersect on fixtures.
+    @Test
+    fun channelBooleanOps() {
+        val w2 = 20
+        val h2 = 20
+        fun rect(x0: Int, y0: Int, x1: Int, y1: Int): ByteArray {
+            val b = ByteArray(w2 * h2)
+            for (y in y0 until y1) for (x in x0 until x1) b[y * w2 + x] = 1
+            return b
+        }
+        val a = rect(0, 0, 10, 10)
+        val b = rect(5, 5, 15, 15)
+        val add = ChannelOps.apply(ChannelOp.ADD, a, b)
+        assertEquals(1.toByte(), add[0])
+        assertEquals(0.toByte(), add[19 * w2 + 19])
+        assertEquals(1.toByte(), add[7 * w2 + 7])
+        val sub = ChannelOps.apply(ChannelOp.SUBTRACT, a, b)
+        assertEquals(1.toByte(), sub[2 * w2 + 2])
+        assertEquals(0.toByte(), sub[7 * w2 + 7])
+        val cut = ChannelOps.apply(ChannelOp.INTERSECT, a, b)
+        assertEquals(0.toByte(), cut[2 * w2 + 2])
+        assertEquals(1.toByte(), cut[7 * w2 + 7])
+        val rep = ChannelOps.apply(ChannelOp.REPLACE, a, b)
+        assertTrue(rep.contentEquals(b))
+    }
+
+    // §4 channelRenameDelete: rename/delete + guards (0 channels OK,
+    // size mismatch refuses load).
+    @Test
+    fun channelRenameDelete() {
+        val dir = composeRule.activity.cacheDir
+        val key = "v3chanopstest"
+        File(ChannelStore.dir(dir, key), "channels.json").delete()
+        assertTrue(ChannelStore.save(dir, key, listOf("a", "b")))
+        assertTrue(ChannelStore.rename(dir, key, "a", "c"))
+        assertEquals(listOf("c", "b"), ChannelStore.list(dir, key))
+        assertTrue(ChannelStore.delete(dir, key, "c"))
+        assertEquals(listOf("b"), ChannelStore.list(dir, key))
+        assertFalse(ChannelStore.rename(dir, key, "missing", "x"))
+        // Size guard: bits of the wrong size never load.
+        val mask = SelectionMask(8, 8)
+        assertFalse("wrong-size bits must refuse", mask.loadBits(ByteArray(7)))
+        assertTrue("empty channel list is a valid state", ChannelStore.list(dir, "v3-no-such-key").isEmpty())
+    }
+
+    // §5 poseHandlesMove: named rig (hips+head) — joints introspected,
+    // pose yaw 45 on the head moves the wireframe overlay.
+    @Test
+    fun poseHandlesMove() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val glb = File(composeRule.activity.cacheDir, "rig.glb")
+            writeRigGlb(glb)
+            assertTrue("rig must load", EngineHost.nLoadGlbReference(handle, glb.absolutePath) > 0)
+            val joints = EngineHost.nRefJoints(handle)
+            assertTrue("hips joint, got $joints", joints.contains("\"name\":\"hips\""))
+            assertTrue("head joint, got $joints", joints.contains("\"name\":\"head\""))
+            assertTrue(EngineHost.nSetRefVisible(handle, true))
+            val rest = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, rest, w, h))
+            assertTrue("rig must draw edges", rest.any { it != -1 })
+            assertTrue(EngineHost.nSetRefPose(handle, "{\"head\":[0,45,0]}"))
+            val posed = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, posed, w, h))
+            assertTrue("head yaw must move the overlay", !posed.contentEquals(rest))
+            assertTrue(glb.delete())
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // Minimal 2-bone rig in-code (hips root + head child at +1y, unit
+    // cubes; clean-room, no binary assets in git).
+    private fun writeRigGlb(dst: File) {
+        val verts = floatArrayOf(
+            -0.5f, -0.5f, -0.5f, 0.5f, -0.5f, -0.5f, 0.5f, 0.5f, -0.5f,
+            -0.5f, 0.5f, -0.5f, -0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f,
+            0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f
+        )
+        val idx = intArrayOf(
+            0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1,
+            3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2
+        )
+        val bin = ByteBuffer.allocate(96 + 72).order(ByteOrder.LITTLE_ENDIAN)
+        for (v in verts) bin.putFloat(v)
+        for (i in idx) bin.putShort(i.toShort())
+        val binBytes = bin.array()
+        val json = """{"asset":{"version":"2.0"},"buffers":[{"byteLength":${binBytes.size}}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":96,"target":34962},{"buffer":0,"byteOffset":96,"byteLength":72,"target":34963}],"accessors":[{"bufferView":0,"componentType":5126,"count":8,"type":"VEC3"},{"bufferView":1,"componentType":5123,"count":36,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]},{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"nodes":[{"name":"hips","mesh":0,"children":[1]},{"name":"head","mesh":1,"translation":[0.0,1.0,0.0]}],"scenes":[{"nodes":[0]}],"scene":0}"""
+        val jb = json.toByteArray()
+        val pad = (4 - jb.size % 4) % 4
+        val total = 12 + 8 + jb.size + pad + 8 + binBytes.size
+        val out = ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN)
+        out.putInt(0x46546C67)
+        out.putInt(2)
+        out.putInt(total)
+        out.putInt(jb.size + pad)
+        out.putInt(0x4E4F534A)
+        out.put(jb)
+        repeat(pad) { out.put(' '.code.toByte()) }
+        out.putInt(binBytes.size)
+        out.putInt(0x004E4942)
+        out.put(binBytes)
+        dst.writeBytes(out.array())
+    }
+
+    // §5 poseRoundTrip: pose.json save/reload is identical.
+    @Test
+    fun poseRoundTrip() {
+        val dir = composeRule.activity.cacheDir
+        val key = "v3posetest"
+        val pose = mapOf("hips" to floatArrayOf(0f, 45f, 0f), "head" to floatArrayOf(0f, 0f, 90f))
+        assertTrue(PoseStore.save(dir, key, pose))
+        val back = PoseStore.load(dir, key)
+        assertEquals(pose.keys, back.keys)
+        assertTrue(back["hips"]!!.contentEquals(floatArrayOf(0f, 45f, 0f)))
+        assertTrue(back["head"]!!.contentEquals(floatArrayOf(0f, 0f, 90f)))
+        // Unknown-cube model: joints introspect empty, pose still accepted.
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val glb = File(composeRule.activity.cacheDir, "cube.glb")
+            writeCubeGlb(glb)
+            EngineHost.nLoadGlbReference(handle, glb.absolutePath)
+            assertEquals("{\"joints\":[]}", EngineHost.nRefJoints(handle))
+            assertTrue(EngineHost.nSetRefPose(handle, "{\"nope\":45}"))
+            glb.delete()
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §5 poseNeverExports: the wireframe shows in nCompositeInto but
+    // never in nFrameCompositeInto (thumbnails/exports stay clean).
+    @Test
+    fun poseNeverExports() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val glb = File(composeRule.activity.cacheDir, "cube.glb")
+            writeCubeGlb(glb)
+            assertEquals(18, EngineHost.nLoadGlbReference(handle, glb.absolutePath))
+            assertTrue(EngineHost.nSetRefVisible(handle, true))
+            val comp = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, comp, w, h))
+            assertTrue("overlay must show in composite", comp.any { it != -1 })
+            val frame = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nFrameCompositeInto(handle, 0, frame, w, h))
+            assertTrue("frame composite must stay clean", frame.all { it == -1 })
+            assertTrue(glb.delete())
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §6.1 tiffImportBaseline: generated II/RGB/strips TIFF loads through
+    // nLoadDocument with exact pixels.
+    @Test
+    fun tiffImportBaseline() {
+        val w2 = 8
+        val h2 = 4
+        val rgb = ByteArray(w2 * h2 * 3)
+        for (y in 0 until h2) for (x in 0 until w2) {
+            rgb[(y * w2 + x) * 3] = (x * 32).toByte()
+            rgb[(y * w2 + x) * 3 + 1] = (y * 60).toByte()
+            rgb[(y * w2 + x) * 3 + 2] = 128.toByte()
+        }
+        val tif = File(composeRule.activity.cacheDir, "v3base.tif")
+        writeTiff(tif, w2, h2, rgb, strips = 2, compression = 1, photo = 2)
+        val handle = EngineHost.nInit(w2, h2, 160f)
+        try {
+            assertTrue("TIFF must load", EngineHost.nLoadDocument(handle, tif.absolutePath))
+            val px = IntArray(w2 * h2)
+            assertEquals(w2 * h2, EngineHost.nCompositeInto(handle, px, w2, h2))
+            for (y in 0 until h2) for (x in 0 until w2) {
+                val p = px[y * w2 + x]
+                assertEquals((x * 32), (p shr 16) and 0xFF)
+                assertEquals((y * 60), (p shr 8) and 0xFF)
+                assertEquals(128, p and 0xFF)
+            }
+        } finally {
+            EngineHost.nDispose(handle)
+            tif.delete()
+        }
+    }
+
+    // Minimal baseline TIFF writer (II, RGB8, strips; mirrors test_tiff).
+    private fun writeTiff(
+        dst: File, w: Int, h: Int, rgb: ByteArray,
+        strips: Int, compression: Int, photo: Int,
+    ) {
+        val out = ByteBuffer.allocate(1024 + rgb.size + 256).order(ByteOrder.LITTLE_ENDIAN)
+        out.put('I'.code.toByte())
+        out.put('I'.code.toByte())
+        out.putShort(42)
+        out.putInt(8)
+        val rowsPerStrip = (h + strips - 1) / strips
+        fun entry(tag: Int, type: Int, cnt: Int, v: Int) {
+            out.putShort(tag.toShort())
+            out.putShort(type.toShort())
+            out.putInt(cnt)
+            out.putInt(v)
+        }
+        out.putShort(9)
+        entry(256, 3, 1, w)
+        entry(257, 3, 1, h)
+        val bitsPos = out.position() + 8
+        entry(258, 3, 3, 0)
+        entry(259, 3, 1, compression)
+        entry(262, 3, 1, photo)
+        val offPos = out.position() + 8
+        entry(273, 4, strips, 0)
+        entry(277, 3, 1, 3)
+        entry(278, 4, 1, rowsPerStrip)
+        val cntPos = out.position() + 8
+        entry(279, 4, strips, 0)
+        out.putInt(0)
+        val bitsOff = out.position()
+        out.putShort(8)
+        out.putShort(8)
+        out.putShort(8)
+        val offTab = if (strips > 1) out.position() else 0
+        if (strips > 1) repeat(strips) { out.putInt(0) }
+        val cntTab = if (strips > 1) out.position() else 0
+        if (strips > 1) repeat(strips) { out.putInt(0) }
+        val offs = mutableListOf<Int>()
+        val cnts = mutableListOf<Int>()
+        for (s in 0 until strips) {
+            val y0 = s * rowsPerStrip
+            val y1 = minOf(y0 + rowsPerStrip, h)
+            offs.add(out.position())
+            for (y in y0 until y1) out.put(rgb, y * w * 3, w * 3)
+            cnts.add(out.position() - offs.last())
+        }
+        fun patch(pos: Int, v: Int) {
+            val keep = out.position()
+            out.position(pos)
+            out.putInt(v)
+            out.position(keep)
+        }
+        patch(bitsPos, bitsOff)
+        if (strips == 1) {
+            patch(offPos, offs[0])
+            patch(cntPos, cnts[0])
+        } else {
+            patch(offPos, offTab)
+            patch(cntPos, cntTab)
+            for (s in 0 until strips) {
+                patch(offTab + s * 4, offs[s])
+                patch(cntTab + s * 4, cnts[s])
+            }
+        }
+        out.flip()
+        val bytes = ByteArray(out.remaining())
+        out.get(bytes)
+        dst.writeBytes(bytes)
+    }
+
+    // §6.2 pdfImportFirstPage: generated 1-page PDF renders at 150 dpi
+    // and loads through the PNG bridge with real pixels.
+    @Test
+    fun pdfImportFirstPage() {
+        val doc = PdfDocument()
+        val info = PdfDocument.PageInfo.Builder(200, 200, 1).create()
+        val page = doc.startPage(info)
+        page.canvas.drawColor(android.graphics.Color.WHITE)
+        val paint = android.graphics.Paint()
+        paint.color = android.graphics.Color.RED
+        page.canvas.drawRect(20f, 20f, 180f, 180f, paint)
+        doc.finishPage(page)
+        val pdf = File(composeRule.activity.cacheDir, "v3one.pdf")
+        doc.writeTo(pdf.outputStream())
+        doc.close()
+        try {
+            assertEquals("page 1/1 expected", 1, PdfImport.pageCount(pdf))
+            val bmp = PdfImport.renderFirstPage(pdf, 150)
+            assertNotNull("page 1 must rasterize", bmp)
+            val bw = bmp!!.width
+            val bh = bmp.height
+            assertTrue("150dpi of 200pt must exceed 300px, got ${bw}x$bh", bw > 300 && bh > 300)
+            val mid = IntArray(bw * bh)
+            bmp.getPixels(mid, 0, bw, 0, 0, bw, bh)
+            assertTrue("red rect must rasterize", mid.any { ((it shr 16) and 0xFF) > 200 && (it and 0xFF) < 100 })
+            val png = File(composeRule.activity.cacheDir, "v3pdf.png")
+            assertTrue(TextOnPath.bitmapToPng(bmp, png))
+            bmp.recycle()
+            val handle = EngineHost.nInit(bw, bh, 160f)
+            try {
+                assertTrue("PDF raster must load", EngineHost.nLoadDocument(handle, png.absolutePath))
+                val px = IntArray(bw * bh)
+                assertEquals(bw * bh, EngineHost.nCompositeInto(handle, px, bw, bh))
+                assertTrue("loaded PDF must show red", px.any { ((it shr 16) and 0xFF) > 200 && (it and 0xFF) < 100 })
+            } finally {
+                EngineHost.nDispose(handle)
+                png.delete()
+            }
+        } finally {
+            pdf.delete()
+        }
+    }
+
+    // §6.3 svgImportPaths: 2 <path> (M/L + C) commit 2 vector paths.
+    @Test
+    fun svgImportPaths() {
+        val svg = """<svg xmlns="http://www.w3.org/2000/svg"><path d="M10,10 L100,10 L100,100" stroke-width="4"/><path d="M10,120 C40,120 60,160 100,160" stroke-width="2"/></svg>"""
+        val res = SvgImport.parse(svg)
+        assertEquals(2, res.paths.size)
+        assertEquals(0, res.ignoredText)
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val li = EngineHost.nAddVectorLayer(handle, "SVG")
+            assertTrue(li >= 0)
+            var n = 0
+            for (p in res.paths) {
+                val json = buildVectorJson(p.points.map { q -> Pair(q.x, q.y) }, p.widthPx)
+                if (EngineHost.nAppendVectorPath(handle, li, json) >= 0) n++
+            }
+            assertEquals(2, n)
+            val state = EngineHost.nVectorPaths(handle, li)
+            assertEquals("two paths expected, got $state", 2, state.split("\"pts\"").size - 1)
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §6.3 svgImportIgnoresText: <text> is counted and never rasterized.
+    @Test
+    fun svgImportIgnoresText() {
+        val svg = """<svg xmlns="http://www.w3.org/2000/svg"><text x="10" y="20">Hi</text><path d="M5,5 L50,50"/></svg>"""
+        val res = SvgImport.parse(svg)
+        assertEquals(1, res.paths.size)
+        assertTrue("text must be counted, got ${res.ignoredText}", res.ignoredText > 0)
+    }
+
+    // §7 shortcutUndoRedo: Ctrl+Z / Ctrl+Shift+Z dispatch drives the piles.
+    @Test
+    fun shortcutUndoRedo() {
+        assertEquals(ShortcutAction.UNDO, ShortcutMap.actionFor(KeyEvent.KEYCODE_Z, true, false))
+        assertEquals(ShortcutAction.REDO, ShortcutMap.actionFor(KeyEvent.KEYCODE_Y, true, false))
+        assertEquals(ShortcutAction.REDO, ShortcutMap.actionFor(KeyEvent.KEYCODE_Z, true, true))
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
+            )
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            val id = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+            for (x in 70..170 step 5) EngineHost.nStrokeMove(handle, id, x.toFloat(), 128f, 1f)
+            EngineHost.nStrokeEnd(handle, id)
+            val stroked = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, stroked, w, h))
+            assertTrue(!stroked.contentEquals(before))
+            // The same action the ?-dialog documents: UNDO then REDO.
+            val tool = ShortcutToolState()
+            assertFalse(tool.dispatchTool(ShortcutAction.UNDO))
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+            assertTrue(undone.contentEquals(before))
+            assertTrue(EngineHost.nRedo(handle))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §7 shortcutToolSwitch: B/E/M move the tool probe (no keyboard needed).
+    @Test
+    fun shortcutToolSwitch() {
+        assertEquals(ShortcutAction.TOOL_BRUSH, ShortcutMap.actionFor(KeyEvent.KEYCODE_B, false, false))
+        assertEquals(ShortcutAction.TOOL_ERASER, ShortcutMap.actionFor(KeyEvent.KEYCODE_E, false, false))
+        assertEquals(ShortcutAction.TOOL_KNIFE, ShortcutMap.actionFor(KeyEvent.KEYCODE_M, false, false))
+        val tool = ShortcutToolState()
+        assertTrue(tool.dispatchTool(ShortcutAction.TOOL_BRUSH))
+        assertEquals("brush", tool.activeTool)
+        assertTrue(tool.dispatchTool(ShortcutAction.TOOL_ERASER))
+        assertEquals("eraser", tool.activeTool)
+        assertTrue(tool.dispatchTool(ShortcutAction.TOOL_KNIFE))
+        assertEquals("knife", tool.activeTool)
+    }
+
+    // §8.1 denoiseReducesNoise: impulse noise variance drops, alpha intact.
+    @Test
+    fun denoiseReducesNoise() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertTrue(EngineHost.nApplyFilter(handle, "addNoise", "{\"amount\":40,\"monochrome\":1}"))
+            val noisy = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, noisy, w, h))
+            fun variance(a: IntArray): Double {
+                val mean = a.map { (it shr 16) and 0xFF }.average()
+                return a.map { (((it shr 16) and 0xFF) - mean).let { d -> d * d } }.average()
+            }
+            val vBefore = variance(noisy)
+            assertTrue("noise must add variance, got $vBefore", vBefore > 1.0)
+            assertTrue(EngineHost.nApplyFilter(handle, "denoise", "{\"strength\":1,\"mode\":\"median\"}"))
+            val clean = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, clean, w, h))
+            assertTrue(
+                "denoise must reduce variance ($vBefore -> ${variance(clean)})",
+                variance(clean) < vBefore
+            )
+            assertTrue("alpha must stay opaque", clean.all { ((it ushr 24) and 0xFF) == 255 })
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §8.1 denoiseIdentityAtZero: strength 0 is a byte-identical no-op.
+    @Test
+    fun denoiseIdentityAtZero() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            assertTrue(EngineHost.nApplyFilter(handle, "denoise", "{\"strength\":0}"))
+            val after = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+            assertTrue(after.contentEquals(before))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // V+3 confortTabShowsHarmony: the Comfort tab is reachable (row scrolls)
+    // and hosts the V+3 panels; also saves the mission screenshot.
+    @Test
+    fun confortTabShowsHarmony() {
+        ensureDockOpen()
+        composeRule.onNodeWithTag("dock-tab-confort").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dock-tab-confort").performClick()
+        composeRule.waitForIdle()
+        // The dock column scrolls vertically: bring each panel into view.
+        for (tag in listOf(
+            "v3-harmony", "v3-channels", "v3-textpath",
+            "v3-pose", "v3-proof", "v3-import"
+        )) {
+            composeRule.onNodeWithTag(tag).performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag(tag).assertIsDisplayed()
+        }
+        // Mission screenshot for the orchestrator (re-read, not eyeballed).
+        // External files dir is pullable without run-as (debug app).
+        try {
+            val root = composeRule.activity.window.decorView.rootView
+            val wpx = root.width.coerceAtLeast(1)
+            val hpx = root.height.coerceAtLeast(1)
+            val bmp = Bitmap.createBitmap(wpx, hpx, Bitmap.Config.ARGB_8888)
+            root.draw(android.graphics.Canvas(bmp))
+            val dst = File(
+                composeRule.activity.getExternalFilesDir(null),
+                "openclip-v3.png"
+            )
+            dst.outputStream().use {
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            if (!bmp.isRecycled) bmp.recycle()
+        } catch (_: Exception) {
         }
     }
 }

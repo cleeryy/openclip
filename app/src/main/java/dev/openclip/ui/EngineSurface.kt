@@ -761,6 +761,18 @@ class EngineSurface @JvmOverloads constructor(
             .also { if (it) needsComposite = true } else false
     }
 
+    // V+3 pose rig (ARCHITECTURE.md "V+3 additions"): joints
+    // introspection + pose merge. Overlay-only: a pose change needs a
+    // composite refresh like a view change.
+    fun refJoints(): String = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nRefJoints(handle) else "{\"joints\":[]}"
+    }
+
+    fun setRefPose(json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetRefPose(handle, json)
+            .also { if (it) needsComposite = true } else false
+    }
+
     fun applyTone(name: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nApplyTone(handle, name)
             .also {
@@ -2290,6 +2302,25 @@ class EngineSurface @JvmOverloads constructor(
     fun hasSelection(): Boolean = synchronized(selectionLock) {
         selectionMask != null
     }
+
+    // V+3 named channels (§4): raw bit access for save/reload + boolean
+    // ops at activation time. Sizes are engine pixels; mismatches
+    // refuse (loadBits returns false, mask untouched).
+    fun exportSelectionBits(): ByteArray? = synchronized(selectionLock) {
+        selectionMask?.copyBits()
+    }
+
+    fun selectionSize(): Pair<Int, Int> = Pair(engineWidth, engineHeight)
+
+    fun importSelectionBits(bits: ByteArray): Boolean =
+        synchronized(selectionLock) {
+            if (bits.size != engineWidth * engineHeight) return false
+            val m = SelectionMask(engineWidth, engineHeight)
+            if (!m.loadBits(bits)) return false
+            selectionMask = m
+            notifySelectionChanged()
+            true
+        }
 
     fun maskContains(ex: Float, ey: Float): Boolean = synchronized(selectionLock) {
         selectionMask?.contains(ex, ey) ?: true

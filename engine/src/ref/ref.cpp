@@ -2,8 +2,10 @@
 #include "openclip/ref.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <set>
+#include <string>
 
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
@@ -14,9 +16,8 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-// Node world transform baking: world = parent * local; local from
-// matrix or TRS. 4x4 row-major-ish helper (mat = 16 doubles, row-major
-// convention like glTF column-major arrays transposed on load).
+// Node LOCAL transform: matrix or TRS. Row-major Mat4; parent
+// composition happens in posedWorld below (V+3: poses apply).
 struct Mat4 {
     double m[16];
     Mat4() { identity(); }
@@ -45,7 +46,7 @@ void applyMat(const Mat4& m, double x, double y, double z, double& ox,
     oz = m.m[8] * x + m.m[9] * y + m.m[10] * z + m.m[11];
 }
 
-void nodeWorld(const cgltf_node* n, Mat4& out) {
+void nodeLocal(const cgltf_node* n, Mat4& out) {
     if (n->has_matrix) {
         // glTF matrices are column-major; transpose into row-major.
         for (int c = 0; c < 4; ++c)
@@ -87,13 +88,28 @@ void nodeWorld(const cgltf_node* n, Mat4& out) {
         r.m[2] *= sz; r.m[6] *= sz; r.m[10] *= sz;
         out = r;
     }
-    if (n->parent) {
-        Mat4 p;
-        nodeWorld(n->parent, p);
-        Mat4 c;
-        mulMat(p, out, c);
-        out = c;
-    }
+}
+
+// V+3: Euler XYZ (degrees) matrix, R = Rz*Ry*Rx.
+void eulerMat(float xDeg, float yDeg, float zDeg, Mat4& out) {
+    const double x = xDeg * kPi / 180.0, y = yDeg * kPi / 180.0,
+                 z = zDeg * kPi / 180.0;
+    const double cx = std::cos(x), sx = std::sin(x);
+    const double cy = std::cos(y), sy = std::sin(y);
+    const double cz = std::cos(z), sz = std::sin(z);
+    // Rx, Ry, Rz row-major, then R = Rz*Ry*Rx.
+    Mat4 rx, ry, rz, t;
+    rx.m[0] = 1; rx.m[1] = 0; rx.m[2] = 0; rx.m[3] = 0;
+    rx.m[4] = 0; rx.m[5] = cx; rx.m[6] = -sx; rx.m[7] = 0;
+    rx.m[8] = 0; rx.m[9] = sx; rx.m[10] = cx; rx.m[11] = 0;
+    ry.m[0] = cy; ry.m[1] = 0; ry.m[2] = sy; ry.m[3] = 0;
+    ry.m[4] = 0; ry.m[5] = 1; ry.m[6] = 0; ry.m[7] = 0;
+    ry.m[8] = -sy; ry.m[9] = 0; ry.m[10] = cy; ry.m[11] = 0;
+    rz.m[0] = cz; rz.m[1] = -sz; rz.m[2] = 0; rz.m[3] = 0;
+    rz.m[4] = sz; rz.m[5] = cz; rz.m[6] = 0; rz.m[7] = 0;
+    rz.m[8] = 0; rz.m[9] = 0; rz.m[10] = 1; rz.m[11] = 0;
+    mulMat(ry, rx, t);
+    mulMat(rz, t, out);
 }
 
 void rotatePoint(const RefView& v, double x, double y, double z, double& ox,
@@ -139,11 +155,77 @@ bool loadRefModel(const std::string& path, RefModel& out,
             data->scene ? data->scene : &data->scenes[0];
         std::vector<std::pair<std::uint32_t, std::uint32_t>> tris;
         std::vector<float> verts;
+        std::vector<std::uint32_t> vertNode;
+        // V+3: full node-tree walk (roots = scene nodes, then children).
+        // Node ids are walk order; unnamed nodes still own geometry but
+        // never appear in the joints table.
+        std::vector<const cgltf_node*> order;
+        std::vector<int> orderParent;
+        std::vector<const cgltf_node*> stack;
+        std::vector<int> stackParent;
         for (std::size_t ni = 0; ni < scene->nodes_count; ++ni) {
-            const cgltf_node* node = scene->nodes[ni];
+            stack.push_back(scene->nodes[ni]);
+            stackParent.push_back(-1);
+        }
+        while (!stack.empty()) {
+            const cgltf_node* node = stack.back();
+            const int par = stackParent.back();
+            stack.pop_back();
+            stackParent.pop_back();
+            if (!node) continue;
+            const int id = static_cast<int>(order.size());
+            order.push_back(node);
+            orderParent.push_back(par);
+            for (std::size_t ci = 0; ci < node->children_count; ++ci) {
+                stack.push_back(node->children[ci]);
+                stackParent.push_back(id);
+            }
+        }
+        out.nodeNames.clear();
+        out.nodeParents = orderParent;
+        out.nodeLocal.clear();
+        out.nodePos.clear();
+        for (const cgltf_node* node : order) {
+            out.nodeNames.push_back(node->name ? node->name : "");
+            Mat4 local;
+            nodeLocal(node, local);
+            std::array<double, 16> lm;
+            for (int k = 0; k < 16; ++k) lm[k] = local.m[k];
+            out.nodeLocal.push_back(lm);
+            const double tx = node->has_translation ? node->translation[0] : 0;
+            const double ty = node->has_translation ? node->translation[1] : 0;
+            const double tz = node->has_translation ? node->translation[2] : 0;
+            out.nodePos.push_back(static_cast<float>(tx));
+            out.nodePos.push_back(static_cast<float>(ty));
+            out.nodePos.push_back(static_cast<float>(tz));
+        }
+        // V+3 joints: named nodes; parent = nearest named ancestor.
+        out.joints.clear();
+        std::vector<int> nodeToJoint(order.size(), -1);
+        for (std::size_t ni = 0; ni < order.size(); ++ni) {
+            if (out.nodeNames[ni].empty()) continue;
+            int jp = -1;
+            int p = orderParent[ni];
+            while (p >= 0) {
+                if (nodeToJoint[static_cast<std::size_t>(p)] >= 0) {
+                    jp = nodeToJoint[static_cast<std::size_t>(p)];
+                    break;
+                }
+                p = orderParent[static_cast<std::size_t>(p)];
+            }
+            RefJoint j;
+            j.name = out.nodeNames[ni];
+            j.parent = jp;
+            j.pos[0] = out.nodePos[ni * 3];
+            j.pos[1] = out.nodePos[ni * 3 + 1];
+            j.pos[2] = out.nodePos[ni * 3 + 2];
+            nodeToJoint[ni] = static_cast<int>(out.joints.size());
+            out.joints.push_back(j);
+        }
+        for (std::size_t ni = 0; ni < order.size(); ++ni) {
+            const cgltf_node* node = order[ni];
             if (!node || !node->mesh) continue;
-            Mat4 world;
-            nodeWorld(node, world);
+            const std::uint32_t nid = static_cast<std::uint32_t>(ni);
             for (std::size_t pi = 0; pi < node->mesh->primitives_count;
                  ++pi) {
                 const cgltf_primitive& prim = node->mesh->primitives[pi];
@@ -168,11 +250,12 @@ bool loadRefModel(const std::string& path, RefModel& out,
                     std::memcpy(&lx, base + i * stride, sizeof(float));
                     std::memcpy(&ly, base + i * stride + 4, sizeof(float));
                     std::memcpy(&lz, base + i * stride + 8, sizeof(float));
-                    double wx, wy, wz;
-                    applyMat(world, lx, ly, lz, wx, wy, wz);
-                    verts.push_back(static_cast<float>(wx));
-                    verts.push_back(static_cast<float>(wy));
-                    verts.push_back(static_cast<float>(wz));
+                    // V+3: verts stay node-local; the (posed) world
+                    // matrix composes at render time.
+                    verts.push_back(lx);
+                    verts.push_back(ly);
+                    verts.push_back(lz);
+                    vertNode.push_back(nid);
                 }
                 // Indices: unsigned short or unsigned int only.
                 if (idx && idx->count >= 3 &&
@@ -221,6 +304,8 @@ bool loadRefModel(const std::string& path, RefModel& out,
         }
         for (const auto& e : unique) out.edges.push_back(e);
         out.verts.swap(verts);
+        out.vertNode.swap(vertNode);
+        out.pose.clear();
         ok = !out.verts.empty();
     }
     cgltf_free(data);
@@ -229,7 +314,6 @@ bool loadRefModel(const std::string& path, RefModel& out,
 }
 
 void parseRefViewJson(const std::string& json, RefView& v) {
-    // Same flat-JSON conventions as the M3 shim: jsonNum(json, key, def).
     auto has = [&](const char* k) {
         return json.find(std::string("\"") + k + "\"") != std::string::npos;
     };
@@ -263,14 +347,74 @@ void renderRefEdges(const RefModel& m, const RefView& v, int w, int h,
     drawnEdges = 0;
     if (w <= 0 || h <= 0 || rgba.size() != static_cast<std::size_t>(w) * h * 4)
         return;
+    // V+3 posed world matrices: world(n) = parent * T * E * T^-1 * local,
+    // where E is the stored Euler pose (identity when no pose entry).
+    // Rotation happens about the node's rest translation (the joint).
+    const std::size_t nn = m.nodeLocal.size();
+    std::vector<Mat4> worlds(nn);
+    std::vector<char> done(nn, 0);
+    for (std::size_t ni = 0; ni < nn; ++ni) {
+        // Iterative: parents always have smaller... no — walk order is
+        // DFS, parents come FIRST (parent pushed before children pop?
+        // children are pushed after, so parents have smaller ids). The
+        // walk above assigns parent ids before children (preorder), so
+        // a single forward pass resolves every parent.
+        Mat4 local;
+        for (int k = 0; k < 16; ++k) local.m[k] = m.nodeLocal[ni][k];
+        const std::string& nm =
+            ni < m.nodeNames.size() ? m.nodeNames[ni] : std::string();
+        const auto pit = nm.empty() ? m.pose.end() : m.pose.find(nm);
+        if (pit != m.pose.end()) {
+            Mat4 e, tinv, t1, t2;
+            eulerMat(pit->second[0], pit->second[1], pit->second[2], e);
+            const double tx = (ni * 3 + 2 < m.nodePos.size())
+                                  ? m.nodePos[ni * 3]
+                                  : 0;
+            const double ty = (ni * 3 + 2 < m.nodePos.size())
+                                  ? m.nodePos[ni * 3 + 1]
+                                  : 0;
+            const double tz = (ni * 3 + 2 < m.nodePos.size())
+                                  ? m.nodePos[ni * 3 + 2]
+                                  : 0;
+            tinv.m[3] = -tx;
+            tinv.m[7] = -ty;
+            tinv.m[11] = -tz;
+            mulMat(tinv, local, t1);
+            mulMat(e, t1, t2);
+            Mat4 t;
+            t.m[3] = tx;
+            t.m[7] = ty;
+            t.m[11] = tz;
+            mulMat(t, t2, local);
+        }
+        const int p = (ni < m.nodeParents.size()) ? m.nodeParents[ni] : -1;
+        if (p >= 0 && static_cast<std::size_t>(p) < nn && done[p]) {
+            Mat4 c;
+            mulMat(worlds[p], local, c);
+            worlds[ni] = c;
+        } else {
+            worlds[ni] = local;
+        }
+        done[ni] = 1;
+    }
     const double f = (h / 2.0) / std::tan(v.fov * kPi / 360.0);
     const double k = v.fisheye * 0.001;
     const double cx = w / 2.0 + v.offX;
     const double cy = h / 2.0 + v.offY;
     auto project = [&](std::size_t vi, double& px, double& py) {
+        std::uint32_t nid = (vi < m.vertNode.size()) ? m.vertNode[vi]
+                                                     : 0xFFFFFFFFu;
+        double wx = m.verts[vi * 3], wy = m.verts[vi * 3 + 1],
+               wz = m.verts[vi * 3 + 2];
+        if (nid < nn && done[nid]) {
+            double ox, oy, oz;
+            applyMat(worlds[nid], wx, wy, wz, ox, oy, oz);
+            wx = ox;
+            wy = oy;
+            wz = oz;
+        }
         double rx, ry, rz;
-        rotatePoint(v, m.verts[vi * 3], m.verts[vi * 3 + 1],
-                    m.verts[vi * 3 + 2], rx, ry, rz);
+        rotatePoint(v, wx, wy, wz, rx, ry, rz);
         const double z = rz - v.dist;
         if (z > -1e-6) return false;
         double x = rx * f / -z;
@@ -308,6 +452,94 @@ void renderRefEdges(const RefModel& m, const RefView& v, int w, int h,
         }
         if (any) ++drawnEdges;
     }
+}
+
+std::string refJointsJson(const RefModel& m) {
+    std::string out = "{\"joints\":[";
+    for (std::size_t i = 0; i < m.joints.size(); ++i) {
+        const RefJoint& j = m.joints[i];
+        if (i > 0) out += ',';
+        // Names are glTF-controlled; escape quotes/backslashes only.
+        std::string safe;
+        for (char ch : j.name) {
+            if (ch == '"' || ch == '\\') safe += '\\';
+            safe += ch;
+        }
+        out += "{\"name\":\"" + safe + "\",\"parent\":" +
+               std::to_string(j.parent) + ",\"pos\":[" +
+               std::to_string(j.pos[0]) + "," + std::to_string(j.pos[1]) +
+               "," + std::to_string(j.pos[2]) + "]}";
+    }
+    out += "]}";
+    return out;
+}
+
+bool applyRefPoseJson(RefModel& m, const std::string& json) {
+    // Flat top-level scan: "bone": deg | [x,y,z]. Unknown bones (no
+    // named node) and unparseable entries are ignored; each axis is
+    // clamped to ±180. Always succeeds (never fails, like clamps).
+    auto isBone = [&](const std::string& name) {
+        for (const auto& j : m.joints)
+            if (j.name == name) return true;
+        return false;
+    };
+    std::size_t p = 0;
+    while (p < json.size()) {
+        const std::size_t q1 = json.find('"', p);
+        if (q1 == std::string::npos) break;
+        const std::size_t q2 = json.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        const std::string key = json.substr(q1 + 1, q2 - q1 - 1);
+        const std::size_t colon = json.find(':', q2 + 1);
+        if (colon == std::string::npos) break;
+        std::size_t v = colon + 1;
+        while (v < json.size() &&
+               (json[v] == ' ' || json[v] == '\t' || json[v] == '\n' ||
+                json[v] == '\r'))
+            ++v;
+        float vals[3] = {0, 0, 0};
+        bool have = false;
+        if (v < json.size() && json[v] == '[') {
+            ++v;
+            for (int k = 0; k < 3; ++k) {
+                while (v < json.size() &&
+                       (json[v] == ' ' || json[v] == '\t' ||
+                        json[v] == ',' || json[v] == '\n' ||
+                        json[v] == '\r'))
+                    ++v;
+                if (v < json.size() && json[v] == ']') break;
+                char* e = nullptr;
+                const double d = std::strtod(json.c_str() + v, &e);
+                if (e == json.c_str() + v) break;
+                vals[k] = static_cast<float>(d);
+                have = true;
+                v = static_cast<std::size_t>(e - json.c_str());
+            }
+            const std::size_t close = json.find(']', v);
+            p = (close == std::string::npos) ? json.size() : close + 1;
+        } else {
+            char* e = nullptr;
+            const double d = std::strtod(json.c_str() + v, &e);
+            if (e != json.c_str() + v) {
+                vals[1] = static_cast<float>(d);  // single number = yaw
+                have = true;
+                v = static_cast<std::size_t>(e - json.c_str());
+            }
+            p = v;
+        }
+        if (have && !key.empty() && isBone(key)) {
+            std::array<float, 3> eul;
+            for (int k = 0; k < 3; ++k) {
+                float a = vals[k];
+                if (!(a == a)) a = 0;  // NaN -> 0
+                if (a < -180.0f) a = -180.0f;
+                if (a > 180.0f) a = 180.0f;
+                eul[k] = a;
+            }
+            m.pose[key] = eul;
+        }
+    }
+    return true;
 }
 
 }  // namespace openclip

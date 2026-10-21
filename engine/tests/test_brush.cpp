@@ -90,3 +90,75 @@ TEST(myb_parser) {
         "<brush><setting name=\"radius\" base_value=\"big\"/></brush>", p,
         err));
 }
+
+// V+3 mixer knife (ARCHITECTURE.md "V+3 additions"): mix 0 is the plain
+// brush, mix 1 pushes local paint only, out-of-range clamps.
+TEST(mixer_zero_is_byte_identical) {
+    Canvas a(32, 32);
+    a.addLayer("bg");
+    Canvas b(32, 32);
+    b.addLayer("bg");
+    BrushParams plain;
+    plain.radius = 6.0f;
+    plain.hardness = 1.0f;
+    BrushParams mixed = plain;
+    mixed.mix = 0.0f;
+    mixed.mixRadius = 2.0f;  // radius window is irrelevant at mix 0
+    Dab d = dabFromPressure(plain, 16.0f, 16.0f, 1.0f, 0, 0, 255);
+    paintDab(a.layer(0).surface, d, plain);
+    paintDab(b.layer(0).surface, d, mixed);
+    CHECK(a.layer(0).surface.bytes() == b.layer(0).surface.bytes());
+}
+
+TEST(mixer_one_pushes_local_paint_only) {
+    // White flat, blue ink: a pure knife (mix 1) picks up white and
+    // introduces no blue; the plain brush paints blue.
+    Canvas knife(32, 32);
+    knife.addLayer("bg");
+    Canvas plain(32, 32);
+    plain.addLayer("bg");
+    for (Canvas* c : {&knife, &plain})
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                c->layer(0).surface.set(x, y, {255, 255, 255, 255});
+    BrushParams pk;
+    pk.radius = 6.0f;
+    pk.hardness = 1.0f;
+    pk.mix = 1.0f;
+    BrushParams pb = pk;
+    pb.mix = 0.0f;
+    paintDab(knife.layer(0).surface,
+             dabFromPressure(pk, 16.0f, 16.0f, 1.0f, 0, 0, 255), pk);
+    paintDab(plain.layer(0).surface,
+             dabFromPressure(pb, 16.0f, 16.0f, 1.0f, 0, 0, 255), pb);
+    auto kc = knife.layer(0).surface.get(16, 16);
+    auto pc = plain.layer(0).surface.get(16, 16);
+    // Knife: no new ink introduced (stays white).
+    CHECK_EQ(kc.r, 255);
+    CHECK_EQ(kc.b, 255);
+    // Brush: blue dominates at the dab center.
+    CHECK(pc.b > 200 && pc.r < 100);
+}
+
+TEST(mixer_out_of_range_clamped) {
+    Canvas c(32, 32);
+    c.addLayer("bg");
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            c.layer(0).surface.set(x, y, {255, 255, 255, 255});
+    BrushParams p;
+    p.radius = 6.0f;
+    p.hardness = 1.0f;
+    p.mix = 5.0f;  // clamps to 1: pure knife, no blue on white
+    paintDab(c.layer(0).surface,
+             dabFromPressure(p, 16.0f, 16.0f, 1.0f, 0, 0, 255), p);
+    auto k = c.layer(0).surface.get(16, 16);
+    CHECK_EQ(k.r, 255);
+    CHECK_EQ(k.b, 255);
+    p.mix = -1.0f;  // clamps to 0: plain brush, blue appears
+    p.mixRadius = 99.0f;  // clamps to 2.0, irrelevant at mix 0
+    paintDab(c.layer(0).surface,
+             dabFromPressure(p, 8.0f, 8.0f, 1.0f, 0, 0, 255), p);
+    auto q = c.layer(0).surface.get(8, 8);
+    CHECK(q.b > 200 && q.r < 100);
+}

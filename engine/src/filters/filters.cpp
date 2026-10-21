@@ -440,6 +440,69 @@ static bool fGradient(const std::vector<std::uint8_t>& in,
     return true;
 }
 
+// V+3 classic denoise (ARCHITECTURE.md "V+3 additions", clean-room):
+// median 3x3 or naive bilateral 3x3, blended src*(1-s)+filtered*s.
+// strength 0 = byte-identical early-out (no-op success). Operates on
+// premultiplied RGB; the registry clamps to [0,alpha] afterwards.
+static bool fDenoise(const std::vector<std::uint8_t>& in, int w, int h,
+                     double strength, const std::string& mode,
+                     std::vector<std::uint8_t>& out, std::string& error) {
+    if (!(strength >= 0.0) || strength > 1.0) {
+        error = "denoise: strength must be in [0,1]";
+        return false;
+    }
+    const bool bilateral = (mode == "bilateral");
+    if (mode != "median" && !bilateral) {
+        error = "denoise: mode must be \"median\" or \"bilateral\"";
+        return false;
+    }
+    out = in;
+    if (strength <= 0.0) return true;
+    const double s = strength;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                double fv = 0;
+                if (!bilateral) {
+                    std::uint8_t win[9];
+                    int n = 0;
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx)
+                            win[n++] = pxAt(in, w, h, x + dx, y + dy, c);
+                    std::sort(win, win + 9);
+                    fv = win[4];
+                } else {
+                    // Naive bilateral: spatial 3x3, range weight from
+                    // the RGB distance to the center pixel (sigma=32).
+                    const double cr = pxAt(in, w, h, x, y, 0);
+                    const double cg = pxAt(in, w, h, x, y, 1);
+                    const double cb = pxAt(in, w, h, x, y, 2);
+                    double acc = 0, wsum = 0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const double vr = pxAt(in, w, h, x + dx, y + dy, 0);
+                            const double vg = pxAt(in, w, h, x + dx, y + dy, 1);
+                            const double vb = pxAt(in, w, h, x + dx, y + dy, 2);
+                            const double dr = vr - cr, dg = vg - cg, db = vb - cb;
+                            const double dist2 = dr * dr + dg * dg + db * db;
+                            const double wt = std::exp(-dist2 / (2.0 * 32.0 * 32.0));
+                            const double vc = (c == 0) ? vr : (c == 1 ? vg : vb);
+                            acc += wt * vc;
+                            wsum += wt;
+                        }
+                    }
+                    fv = (wsum > 0) ? acc / wsum : pxAt(in, w, h, x, y, c);
+                }
+                const double src =
+                    static_cast<double>(pxAt(in, w, h, x, y, c));
+                out[(static_cast<std::size_t>(y) * w + x) * 4 + c] =
+                    clamp255(src * (1.0 - s) + fv * s);
+            }
+        }
+    }
+    return true;
+}
+
 }  // namespace (anonymous helpers)
 
 // --- Registry ---
@@ -453,7 +516,7 @@ bool canApply(const std::string& name) {
 std::vector<std::string> filterNames() {
     return {"gaussianBlur", "sharpen", "motionBlur", "radialBlur", "posterize",
             "levels", "chromaticAberration", "addNoise", "mosaic",
-            "gradientMap"};
+            "gradientMap", "denoise"};
 }
 
 bool applyFilter(Surface& s, const std::string& name,
@@ -528,6 +591,15 @@ bool applyFilter(Surface& s, const std::string& name,
             if (jsonStr(paramsJson, "stops", sv) && !sv.empty()) stops = sv;
         }
         ok = fGradient(in, stops, out, error);
+    } else if (name == "denoise") {
+        double strength = 0.5;
+        std::string mode = "median";
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "strength", d)) strength = d;
+            std::string mv;
+            if (jsonStr(paramsJson, "mode", mv) && !mv.empty()) mode = mv;
+        }
+        ok = fDenoise(in, w, h, strength, mode, out, error);
     }
     if (!ok) return false;  // surface untouched
     // Alpha contract: never modify alpha; clamp RGB to [0, alpha].

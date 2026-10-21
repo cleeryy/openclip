@@ -14,7 +14,7 @@ class Surface;
 // Registry lookup: true when `name` is a known filter (exact match,
 // case-sensitive). Known names: "gaussianBlur", "sharpen", "motionBlur",
 // "radialBlur", "posterize", "levels", "chromaticAberration", "addNoise",
-// "mosaic", "gradientMap".
+// "mosaic", "gradientMap", "denoise" (V+3 classic, median/bilateral 3x3).
 bool canApply(const std::string& name);
 
 // Ordered registry names (same list as canApply accepts).
@@ -59,6 +59,13 @@ std::vector<std::string> filterNames();
 //                                             by linear interpolation between
 //                                             "#RRGGBB:pos" stops (pos 0..1,
 //                                             sorted by pos; >=1 stop required)
+//   denoise             {"strength":0.5, "mode":"median"}  V+3 classic:
+//                                             median 3x3 or naive bilateral
+//                                             3x3 (mode "median"|"bilateral"),
+//                                             blended src*(1-s)+filtered*s;
+//                                             strength 0 = byte-identical,
+//                                             strength outside [0,1] or
+//                                             unknown mode is an error
 //
 // Alpha contract (M3): alpha bytes are NEVER modified by any filter; RGB
 // outputs are clamped to [0, alpha] afterwards so premultiplied (rgb <= a)

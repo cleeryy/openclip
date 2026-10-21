@@ -92,6 +92,11 @@ object EngineHost {
     external fun nSetRefView(handle: Long, json: String): Boolean
     external fun nSetRefVisible(handle: Long, on: Boolean): Boolean
 
+    // V+3 additions (ARCHITECTURE.md): pose rig — joints introspection
+    // (M9 nVectorPaths pattern) + pose merge. Overlay-only, no pixels.
+    external fun nRefJoints(handle: Long): String
+    external fun nSetRefPose(handle: Long, json: String): Boolean
+
     // M10 additions (ARCHITECTURE.md): procedural material tones.
     external fun nApplyTone(handle: Long, name: String): Boolean
 }

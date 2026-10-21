@@ -16,6 +16,11 @@ struct BrushParams {
     float hardness = 0.7f;  // 0 soft .. 1 hard (from .myb "hardness")
     float opaque = 1.0f;    // max stamp opacity (from .myb "opaque")
     float spacing = 0.15f;  // stamp spacing as fraction of radius
+    // V+3 mixer knife (ARCHITECTURE.md "V+3 additions"): mix 0 = plain
+    // brush (byte-identical), 1 = pure knife (pushes paint only);
+    // mixRadius scales the local pickup window (× dab radius).
+    float mix = 0.0f;        // 0..1, clamped shim-side
+    float mixRadius = 1.0f;  // 0.5..2.0, clamped shim-side
 };
 
 struct Dab {

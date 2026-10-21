@@ -894,7 +894,9 @@ object V2Bezier {
 fun BezierPanel(
     surface: EngineSurface,
     onStatus: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    cacheDir: File? = null,
+    docKey: String = "",
 ) {
     val ctx = LocalContext.current
     var layer by remember { mutableStateOf(-1) }
@@ -1027,6 +1029,48 @@ fun BezierPanel(
             },
             modifier = Modifier.testTag("v2-bezier-densify")
         ) { Text(stringResource(R.string.v2_bezier_densify)) }
+        // V+3 Ramer-Douglas-Peucker (§2a): simplify the selected path
+        // before re-commit (replaceAll = re-append, 1 undo per path).
+        OutlinedButton(
+            onClick = {
+                v2RunBg {
+                    val paths = current()
+                    if (paths.isEmpty() || pathIdx !in paths.indices) {
+                        onStatus(ctx.getString(R.string.v2_panel_failed))
+                        return@v2RunBg
+                    }
+                    val eps = if (cacheDir != null) {
+                        SnapSettings.load(cacheDir, docKey).simplifyEps
+                    } else {
+                        1f
+                    }
+                    val pts = paths[pathIdx].pts.map {
+                        SnapPt(it.first, it.second, it.third)
+                    }
+                    val simple = Rdp.simplify(pts, eps)
+                    if (simple.size < 2) {
+                        onStatus(ctx.getString(R.string.v2_panel_failed))
+                        return@v2RunBg
+                    }
+                    val all = paths.mapIndexed { i, p ->
+                        if (i == pathIdx) {
+                            simple.map { q -> Triple(q.x, q.y, q.p) }
+                        } else {
+                            p.pts
+                        }
+                    }
+                    if (!V2Bezier.replaceAll(surface, layer, all)) {
+                        onStatus(ctx.getString(R.string.v2_panel_failed))
+                    } else {
+                        info = ctx.getString(
+                            R.string.simplify_done,
+                            paths[pathIdx].pts.size, simple.size
+                        )
+                    }
+                }
+            },
+            modifier = Modifier.testTag("v2-bezier-simplify")
+        ) { Text(stringResource(R.string.simplify_apply)) }
         if (info.isNotEmpty()) {
             Text(info, style = MaterialTheme.typography.bodySmall)
         }
@@ -1055,6 +1099,9 @@ fun GuidesPanel(
     var gx by remember { mutableStateOf("128") }
     var gy by remember { mutableStateOf("128") }
     var gr by remember { mutableStateOf("64") }
+    // V+3 stroke precision (§2): snap settings ride the same rulers
+    // payload (snapTol/grid/snapPaths keys) and persist per document.
+    var snap by remember { mutableStateOf(SnapSettings.load(cacheDir, docKey)) }
 
     fun push(sync: List<DocGuide>) {
         // Rebuild the exact nSetRulers grammar from the parsed list.
@@ -1077,13 +1124,20 @@ fun GuidesPanel(
             }
         }
         sb.append("]}")
-        surface.guideJson = sb.toString().substringAfter("{\"guides\":").dropLast(1)
+        // guideJson stays the guides ARRAY fragment (symmetry merge
+        // below re-appends it); the full payload adds the V+3 snap
+        // keys after it (unknown keys ignored engine-side, M3 rule).
+        val guidesArr = sb.toString().substringAfter("{\"guides\":").dropLast(1)
+        surface.guideJson = guidesArr
+        val snapFrag = snap.toJsonFragment()
+        val full = "{\"guides\":$guidesArr,$snapFrag}"
         // Merge with the symmetry fragment owned by ToolPalette.
         val sym = surface.symmetryJson
         val payload = if (visible) {
-            if (sym.isEmpty()) sb.toString() else "{$sym,\"guides\":${surface.guideJson}}"
+            if (sym.isEmpty()) full else "{$sym,\"guides\":$guidesArr,$snapFrag}"
         } else {
-            if (sym.isEmpty()) "{\"guides\":[]}" else "{$sym}"
+            // Hidden: guides cleared engine-side, snap keys kept.
+            if (sym.isEmpty()) "{\"guides\":[],$snapFrag}" else "{$sym,$snapFrag}"
         }
         if (!surface.setRulers(payload)) {
             onStatus(ctx.getString(R.string.v2_panel_failed))
@@ -1177,6 +1231,72 @@ fun GuidesPanel(
                 modifier = Modifier.testTag("v2-guides-clear")
             ) { Text(stringResource(R.string.v2_clear)) }
         }
+        // V+3 stroke precision (§2): grid step + path snap + RDP epsilon.
+        // Same rulers push (snapTol = guides tolerance), persisted per
+        // document; epsilon feeds BezierPanel simplification.
+        Text(
+            stringResource(R.string.snap_title),
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(0, 8, 16, 32).forEach { step ->
+                FilterChip(
+                    selected = snap.grid == step,
+                    onClick = {
+                        snap = snap.copy(grid = step)
+                        SnapSettings.save(cacheDir, docKey, snap)
+                        push(guides)
+                    },
+                    label = {
+                        Text(
+                            if (step == 0) stringResource(R.string.snap_grid_off)
+                            else step.toString()
+                        )
+                    },
+                    modifier = Modifier.testTag("v2-snap-grid-$step")
+                )
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = snap.snapPaths,
+                onClick = {
+                    snap = snap.copy(snapPaths = !snap.snapPaths)
+                    SnapSettings.save(cacheDir, docKey, snap)
+                    push(guides)
+                },
+                label = { Text(stringResource(R.string.snap_paths)) },
+                modifier = Modifier.testTag("v2-snap-paths")
+            )
+        }
+        Text(
+            stringResource(R.string.simplify_epsilon, snap.simplifyEps),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Slider(
+            value = snap.simplifyEps,
+            onValueChange = {
+                snap = snap.copy(simplifyEps = it)
+                SnapSettings.save(cacheDir, docKey, snap)
+            },
+            valueRange = 0f..8f,
+            modifier = Modifier.testTag("v2-simplify-eps")
+        )
+        Text(
+            stringResource(R.string.snap_tol, snap.snapTol),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Slider(
+            value = snap.snapTol,
+            onValueChange = {
+                snap = snap.copy(snapTol = it)
+                SnapSettings.save(cacheDir, docKey, snap)
+                push(guides)
+            },
+            valueRange = 0f..8f,
+            modifier = Modifier.testTag("v2-snap-tol")
+        )
     }
 }
 
