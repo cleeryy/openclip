@@ -92,7 +92,9 @@ fun CollapsibleDrawer(
                     Text(
                         title,
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF787888)
+                        // V11: the folded rail is an action (tap to open),
+                        // never hint-toned.
+                        color = Color(0xFFC4C4D0)
                     )
                 }
                 TextButton(

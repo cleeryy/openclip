@@ -16,6 +16,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +41,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -338,6 +341,14 @@ fun LayerPanel(
             onValueChange = { search = it },
             label = { Text(stringResource(R.string.layer_search)) },
             singleLine = true,
+            // V17: the M3 placeholder/label is forced to a measured
+            // ≥ 4.5:1 tone on the dock background (never theme-default).
+            colors = OutlinedTextFieldDefaults.colors(
+                unfocusedLabelColor = Color(0xFFA0A0B0),
+                focusedLabelColor = Color(0xFFA0A0B0),
+                unfocusedPlaceholderColor = Color(0xFFA0A0B0),
+                focusedPlaceholderColor = Color(0xFFA0A0B0)
+            ),
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("layer-search")
@@ -475,10 +486,17 @@ fun LayerPanel(
             ) { Text(stringResource(R.string.layer_add_vector), style = MaterialTheme.typography.labelSmall, maxLines = 1) }
         }
         // M8 — adjustment cluster for the selected layer (preserved).
+        // V7: single-line labels + horizontal scroll (this row holds 7
+        // buttons and always overflows a phone dock).
+        val adjustScroll = rememberScrollState()
         Row(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(adjustScroll)
+                .scrollFade("adjust-row", adjustScroll)
+                .testTag("adjust-row")
         ) {
             ADJUST_TYPES.forEach { (type, res) ->
                 TextButton(onClick = { pushAdjust(type, adjustAmount) }) {
@@ -486,7 +504,10 @@ fun LayerPanel(
                         (if (adjustType == type) "[" else "") +
                             stringResource(res) +
                             (if (adjustType == type) "]" else ""),
-                        style = MaterialTheme.typography.labelSmall
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
             }
@@ -497,7 +518,10 @@ fun LayerPanel(
             }) {
                 Text(
                     stringResource(R.string.adjustment_clear),
-                    style = MaterialTheme.typography.labelSmall
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                 )
             }
         }
@@ -597,15 +621,12 @@ private fun LayerRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            // V6: selection = tint alone (the thumb keeps its own ring);
+            // the old 3dp outer border doubled the thumb ring.
             .background(
                 if (selected) MaterialTheme.colorScheme.secondaryContainer
-                else Color.Transparent
-            )
-            .then(
-                if (selected) Modifier.border(
-                    3.dp, MaterialTheme.colorScheme.primary,
-                    RoundedCornerShape(2.dp)
-                ) else Modifier
+                else Color.Transparent,
+                RoundedCornerShape(2.dp)
             )
             .padding(4.dp)
             .testTag("layer-row-${info.index}")
@@ -756,6 +777,8 @@ private fun LayerRow(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+                // V6: short "%d %%" form (the slider sits next door —
+                // the word adds nothing) at a width that never clips.
                 Text(
                     stringResource(
                         R.string.layer_opacity_layer, (slider * 100).toInt()
@@ -764,7 +787,11 @@ private fun LayerRow(
                         fontFamily = FontFamily.Monospace
                     ),
                     maxLines = 1,
-                    modifier = Modifier.width(44.dp)
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .width(60.dp)
+                        .testTag("layer-dosage-${info.index}")
                 )
                 val blendDesc = stringResource(R.string.layer_blend) + " " +
                     blendDisplay(info.blend)

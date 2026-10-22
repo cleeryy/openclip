@@ -186,7 +186,7 @@
     <string name="layer_rename_hint2">Double-tap to rename</string>
     <string name="layer_longpress">Hold for more</string>
     <string name="layer_opacity_brush">Brush %1$d%%</string>
-    <string name="layer_opacity_layer">Layer %1$d%%</string>
+    <string name="layer_opacity_layer">%1$d %%</string>
     <string name="layer_clipped_on">Clipped to below</string>
     <string name="layer_mask_editing">Editing mask</string>
     <string name="layer_fx_present">Adjustment on</string>
@@ -212,6 +212,7 @@
     <string name="doc_save">Save</string>
     <string name="save_ok">Saved</string>
     <string name="save_failed">Save failed</string>
+    <string name="doc_close">Close document</string>
     <string name="doc_close_save">Save</string>
     <string name="doc_close_discard">Close without saving</string>
     <string name="doc_close_cancel">Cancel</string>
@@ -227,6 +228,8 @@
     <string name="newcanvas_bg_ink">Ink tint</string>
     <string name="newcanvas_empty_cta">New canvas…</string>
     <string name="cmdbar_edit">Arrange actions…</string>
+    <string name="undo_empty">Nothing to undo</string>
+    <string name="redo_empty">Nothing to redo</string>
     <string name="cmdbar_fullscreen">Full screen</string>
     <string name="cmdbar_exit_fullscreen">Exit</string>
     <string name="workspace_draw">Drawing</string>

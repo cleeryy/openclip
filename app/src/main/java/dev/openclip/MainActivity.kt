@@ -20,9 +20,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,11 +50,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -119,6 +123,9 @@ import dev.openclip.ui.StudioMenu
 import dev.openclip.ui.StudioMenuItem
 import dev.openclip.ui.TextPanel
 import dev.openclip.ui.TextSpec
+import dev.openclip.ui.RecomposeTestHooks
+import dev.openclip.ui.UndoAvailability
+import dev.openclip.ui.scrollFade
 import dev.openclip.ui.TimelineStrip
 import dev.openclip.ui.ToolPalette
 import dev.openclip.ui.WebdavDialog
@@ -235,6 +242,12 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun OpenClipScreen(dpi: Float) {
         val refreshKey = remember { mutableStateOf(0) }
+        // V15: isolated poke tick — read by nothing structural, so the
+        // poke hook never recomposes chrome or dock.
+        val pokeTick = remember { mutableStateOf(0) }
+        // V10: hoisted undo/redo availability (ToolPalette writes,
+        // command bar reads).
+        val undoAvail = remember { UndoAvailability() }
         val store = colorStore
         val inkHex = store.inkHex
         val status = remember { mutableStateOf("") }
@@ -955,11 +968,13 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Plain status + refreshKey write that reliably schedules a
-        // recomposition after doc-state mutations.
+        // V2/V15: poke() no longer writes the user-visible status
+        // (POKE leaked into the footer) nor the panels' refreshKey
+        // (every poke recomposed the whole dock). It bumps an isolated
+        // tick as a test hook; the surrounding state mutations already
+        // schedule the recompositions they need.
         fun poke() {
-            status.value = "POKE"
-            refreshKey.value++
+            pokeTick.value++
         }
 
         fun doActivate(docId: String) {
@@ -1439,7 +1454,10 @@ class MainActivity : ComponentActivity() {
             activityTestHooks.commandOrder = { commandStore.order.toList() }
         }
 
-        Column(
+        // V16: short viewports (landscape phones) can't stack 8 chrome
+        // rows — the column scrolls and the canvas keeps a fixed half
+        // of the viewport instead of collapsing to zero.
+        BoxWithConstraints(
             Modifier
                 .fillMaxSize()
                 .background(Color(0xFF141418))
@@ -1458,6 +1476,18 @@ class MainActivity : ComponentActivity() {
                     handleShortcut(action)
                 }
         ) {
+            val outerMaxH = maxHeight
+            val shortH = maxHeight < 600.dp
+            val outerScroll = rememberScrollState()
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (shortH) Modifier.verticalScroll(outerScroll)
+                        else Modifier
+                    )
+                    .testTag("studio-column")
+            ) {
             // 1. Top Studio Menu Bar + Toolbar (slice 0 shell: every
             // entry reuses an existing SAF/export/engine action).
             // Slice 6: chrome hides in fullscreen (canvas + exit only).
@@ -1616,6 +1646,13 @@ class MainActivity : ComponentActivity() {
                                 StudioMenuItem(
                                     label = stringResource(R.string.webdav),
                                     onClick = { showWebdav.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.doc_close),
+                                    onClick = {
+                                        val aid = activeDocId.value
+                                        if (aid != null) requestClose(aid)
+                                    }
                                 )
                             )
                         ),
@@ -1761,6 +1798,10 @@ class MainActivity : ComponentActivity() {
                     docDirty = docRegistry.all().firstOrNull {
                         it.docId == activeId
                     }?.dirty == true,
+                    // V3: compact never shows its own title — the title
+                    // bar (1 doc) or the tabs (≥ 2 docs) are the single
+                    // name source; the bar keeps only ☰ + Save.
+                    showTitle = false,
                     onSave = {
                         val aid = activeDocId.value
                         if (aid != null) saveDoc(aid)
@@ -1775,6 +1816,7 @@ class MainActivity : ComponentActivity() {
                         navigateMode = navMode.value,
                         onNavigateToggle = { toggleNav() },
                         onStatus = { status.value = it },
+                        undoAvail = undoAvail,
                         onFileClicked = { showExport.value = true },
                         onImportClicked = { openDoc.launch(arrayOf("*/*")) }
                     )
@@ -1784,12 +1826,18 @@ class MainActivity : ComponentActivity() {
             // Slice 6 tabs + title + command bar (overlay chrome, never
             // engine pixels). Tabs stay visible with 0 docs so the "+" can
             // recreate a canvas.
+            // V3: compact + exactly 1 doc shows a "+"-only row (same 48dp
+            // height, no name chip — the title bar stays the single name
+            // source). The height never moves, so opening/closing a tab
+            // never resizes the canvas (the engine resets the view zoom
+            // on surface size changes).
             val tabEntries = docRegistry.all()
             DocTabs(
                 docs = tabEntries,
                 activeDocId = activeDocId.value,
                 preselectedDocId = preselectId.value,
                 compact = compact,
+                hideNames = compact && tabEntries.size == 1,
                 onActivate = { requestActivate(it) },
                 onClose = { requestClose(it) },
                 onAdd = {
@@ -1842,6 +1890,13 @@ class MainActivity : ComponentActivity() {
                         CommandBar(
                             store = commandStore,
                             labels = cmdLabels,
+                            undoAvail = undoAvail,
+                            onDisabledHint = { action ->
+                                status.value = ctx.getString(
+                                    if (action == "redo") R.string.redo_empty
+                                    else R.string.undo_empty
+                                )
+                            },
                             onAction = { action ->
                                 val aid = activeDocId.value
                                 when (action) {
@@ -1873,17 +1928,29 @@ class MainActivity : ComponentActivity() {
             }
             } // fullscreen chrome gate
 
-            // 2. Central Workspace Row: Dominant Canvas on the left, Collapsible Studio Dock on the right
-            Row(
+            // 2. Central area: dominant canvas. Wide windows keep the
+            // side-by-side dock; phones (< 600dp, V5) get a bottom-sheet
+            // overlay + scrim so the canvas keeps its full width.
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .then(
+                        if (shortH) Modifier.height(outerMaxH * 0.55f)
+                        else Modifier.weight(1f)
+                    )
+                    .testTag("central-area")
             ) {
+                val phoneDock = maxWidth < 600.dp
+                // Side dock steals canvas width (wide only): keep every
+                // canvas pixel visible instead of painting under the dock.
+                val sideDockW = if (phoneDock || fullscreen.value) 0.dp
+                else if (dockOpen.value) 290.dp else 56.dp
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
+                        .fillMaxSize()
                         .background(Color(0xFF141418))
+                        .padding(end = sideDockW)
+                        .testTag("canvas-box")
                 ) {
                     // Slice 6 N surfaces, 1 visible: the active tab composites
                     // on top; inactives keep full size (surface stays valid)
@@ -2085,40 +2152,14 @@ class MainActivity : ComponentActivity() {
                     }
                     // Slice 6 fullscreen: overlay exit only (posture untouched,
                     // the workspace JSON is never modified by this toggle).
+                    // V15: the status read lives in the overlay scope, not
+                    // in the screen root.
                     if (fullscreen.value) {
-                        Row(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(8.dp)
-                                .background(Color(0xCC101014))
-                                .padding(horizontal = 8.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (status.value.isNotEmpty()) {
-                                Text(
-                                    status.value,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF80E27E),
-                                    maxLines = 1,
-                                    modifier = Modifier.weight(1f, fill = false)
-                                )
-                            }
-                            TextButton(
-                                onClick = { fullscreen.value = false },
-                                modifier = Modifier
-                                    .height(48.dp)
-                                    .testTag("fullscreen-exit")
-                            ) {
-                                Text(
-                                    "✕ " + stringResource(
-                                        R.string.cmdbar_exit_fullscreen),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = Color(0xFFECECF1),
-                                    maxLines = 1
-                                )
-                            }
-                        }
+                        FullscreenTopBar(
+                            status = status,
+                            onExit = { fullscreen.value = false },
+                            modifier = Modifier.align(Alignment.TopEnd)
+                        )
                     }
                     // V+1: the raster eraser is a real dest-out erase
                     // (alpha-erase) — the honest banner is gone. A
@@ -2138,7 +2179,12 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .padding(
-                                    start = 8.dp, end = 8.dp, bottom = 8.dp
+                                    start = 8.dp, end = 8.dp,
+                                    // V5: the folded phone rail (28dp)
+                                    // overlays the canvas foot — lift the
+                                    // bar above it.
+                                    bottom = if (phoneDock && !dockOpen.value) 40.dp
+                                    else 8.dp
                                 )
                         )
                     }
@@ -2146,29 +2192,23 @@ class MainActivity : ComponentActivity() {
 
                 if (!fullscreen.value) {
                 activeSurface()?.let { surface ->
-                    VerticalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
-                    CollapsibleDrawer(
-                        title = stringResource(R.string.window_dock),
-                        open = dockOpen.value,
-                        onToggle = { dockOpen.value = !dockOpen.value },
-                        modifier = Modifier
-                            .width(if (dockOpen.value) 290.dp else 56.dp)
-                            .fillMaxHeight(),
-                        expandGlyph = "⟨",
-                        collapseGlyph = "⟩",
-                        showTitleWhenCollapsed = false,
-                        toggleTag = "dock-toggle",
-                        headerExtra = {
-                            // V+2: 3 chips overflow the 290dp header —
-                            // the tab row scrolls so the collapse
-                            // toggle is never pushed off-screen (silent
-                            // no-op clicks wedged the dock open).
+                    // V5/V8: shared dock pieces — a right side sheet on
+                    // wide windows, a bottom-sheet overlay + scrim on
+                    // phones (the canvas keeps its full width).
+                    val dockTabsScroll = rememberScrollState()
+                    val dockTabsExtra: @Composable RowScope.() -> Unit = {
+                            // V+2: chips overflow the header — the tab row
+                            // scrolls (V4 fade, V8 end padding + tag) so
+                            // the collapse toggle is never pushed
+                            // off-screen (silent no-op clicks wedged the
+                            // dock open).
                             androidx.compose.foundation.layout.Row(
                                 modifier = Modifier
                                     .weight(1f, fill = false)
-                                    .horizontalScroll(
-                                        androidx.compose.foundation.rememberScrollState()
-                                    ),
+                                    .horizontalScroll(dockTabsScroll)
+                                    .scrollFade("dock-tabs-row", dockTabsScroll)
+                                    .padding(end = 12.dp)
+                                    .testTag("dock-tabs-row"),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -2178,7 +2218,10 @@ class MainActivity : ComponentActivity() {
                                     label = {
                                         Text(
                                             stringResource(R.string.window_studio),
-                                            style = MaterialTheme.typography.labelSmall
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 )
@@ -2188,7 +2231,10 @@ class MainActivity : ComponentActivity() {
                                     label = {
                                         Text(
                                             stringResource(R.string.window_tones),
-                                            style = MaterialTheme.typography.labelSmall
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 )
@@ -2198,7 +2244,10 @@ class MainActivity : ComponentActivity() {
                                     label = {
                                         Text(
                                             stringResource(R.string.v2_bd_tab),
-                                            style = MaterialTheme.typography.labelSmall
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     },
                                     modifier = Modifier.testTag("dock-tab-bd")
@@ -2209,21 +2258,30 @@ class MainActivity : ComponentActivity() {
                                     label = {
                                         Text(
                                             stringResource(R.string.v2_confort_tab),
-                                            style = MaterialTheme.typography.labelSmall
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     },
                                     modifier = Modifier.testTag("dock-tab-confort")
                                 )
                             }
-                        }
-                    ) {
+                    }
+                    // Shared dock body (ColumnScope for the weight fill).
+                    val dockPanels: @Composable ColumnScope.() -> Unit = {
+                        // V15: composition counter — an isolated poke
+                        // must leave this at zero.
+                        RecomposeTestHooks.dockCompositions++
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f)
                                 .verticalScroll(rememberScrollState())
                                 .testTag("dock-scroll")
-                                .padding(8.dp),
+                                // V9: 8dp on every edge except the bottom,
+                                // which gets an explicit end spacer.
+                                .padding(start = 8.dp, end = 8.dp, top = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             if (dockTab.value == 0) {
@@ -2391,11 +2449,98 @@ class MainActivity : ComponentActivity() {
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             }
+                            // V9: bottom-edge breathing room (+ test hook).
+                            Spacer(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .testTag("dock-scroll-endpad")
+                            )
                         }
+                    }
+                    val dockTitle = stringResource(R.string.window_dock)
+                    if (!phoneDock) {
+                        // Wide: right side sheet (the canvas is already
+                        // end-padded to the same width).
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .padding(end = sideDockW - 1.dp)
+                                .width(1.dp)
+                                .fillMaxHeight()
+                                .background(Color(0xFF2E2E38))
+                        ) {}
+                        CollapsibleDrawer(
+                            title = dockTitle,
+                            open = dockOpen.value,
+                            onToggle = { dockOpen.value = !dockOpen.value },
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .width(
+                                    if (dockOpen.value) 290.dp else 56.dp
+                                )
+                                .fillMaxHeight(),
+                            expandGlyph = "⟨",
+                            collapseGlyph = "⟩",
+                            showTitleWhenCollapsed = false,
+                            toggleTag = "dock-toggle",
+                            headerExtra = dockTabsExtra
+                        ) {
+                            dockPanels()
+                        }
+                    } else if (dockOpen.value) {
+                        // V5: phone bottom sheet over the full-width canvas.
+                        // Exact 70% height (not just a max): the inner
+                        // dock-scroll column needs a BOUNDED height for its
+                        // weight(1f) to resolve, otherwise the content
+                        // wraps and never scrolls (V9).
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0x73000000))
+                                .clickable { dockOpen.value = false }
+                                .testTag("dock-scrim")
+                        ) {}
+                        CollapsibleDrawer(
+                            title = dockTitle,
+                            open = true,
+                            onToggle = { dockOpen.value = false },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .height(maxHeight * 0.7f),
+                            expandGlyph = "⟨",
+                            collapseGlyph = "⟩",
+                            showTitleWhenCollapsed = false,
+                            toggleTag = "dock-toggle",
+                            headerExtra = dockTabsExtra
+                        ) {
+                            dockPanels()
+                        }
+                    } else {
+                        // Phone, dock folded: slim bottom rail (same
+                        // toggle tag + expand glyph as the side rail, so
+                        // the dock stays one tap away with zero canvas
+                        // cost beyond 28dp). No title — the folded rail
+                        // must read as chrome, not content (slice 7).
+                        CollapsibleDrawer(
+                            title = dockTitle,
+                            open = false,
+                            onToggle = { dockOpen.value = true },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth(),
+                            expandGlyph = "⟨",
+                            collapseGlyph = "⟩",
+                            showTitleWhenCollapsed = false,
+                            toggleTag = "dock-toggle",
+                            headerExtra = {},
+                            content = {}
+                        )
                     }
                 }
             }
-            } // central Row (canvas + dock)
+            } // central area (canvas + dock)
 
             // 3. Collapsible Bottom Timeline Drawer + Slim Status Footer
             // (hidden in fullscreen — canvas + exit only).
@@ -2416,9 +2561,12 @@ class MainActivity : ComponentActivity() {
                             .heightIn(max = 175.dp)
                             .background(Color(0xFF1C1C22))
                             .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            // V9: 8dp on every edge so the first/last item
+                            // never hides under the drawer borders.
+                            .padding(horizontal = 8.dp, vertical = 8.dp)
                             .testTag("timeline-drawer")
                     ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
                         TimelineStrip(
                             surface = surface,
                             refreshKey = refreshKey.value,
@@ -2444,67 +2592,26 @@ class MainActivity : ComponentActivity() {
                             },
                             playToggle = playTickExt.value
                         )
+                        // V9: bottom-edge breathing room (+ test hook).
+                        Spacer(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(8.dp)
+                                .testTag("timeline-endpad")
+                        )
+                        }
                     }
                 }
                 HorizontalDivider(color = Color(0xFF2E2E38), thickness = 1.dp)
 
                 // Slim Studio Status Bar (slice 7: single source — WebDAV
                 // button + the one status message, never dims/name).
-                // Tap the message to clear it (content-description
-                // status_dismiss); errors show in err red, all else ok.
-                val dismissLabel = stringResource(R.string.status_dismiss)
-                val errMsgs = setOf(
-                    stringResource(R.string.save_failed),
-                    stringResource(R.string.export_failed),
-                    stringResource(R.string.import_failed),
-                    stringResource(R.string.filter_failed),
-                    stringResource(R.string.webdav_failed),
-                    stringResource(R.string.ai_failed),
-                    stringResource(R.string.ref_failed),
-                    stringResource(R.string.audio_failed)
+                // V15: the status read lives in the footer scope, so a
+                // status write no longer recomposes the whole screen.
+                StatusFooter(
+                    status = status,
+                    onWebdav = { showWebdav.value = true }
                 )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(34.dp)
-                        .background(Color(0xFF1E1E24))
-                        .padding(horizontal = 8.dp)
-                        .testTag("status-bar"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    TextButton(
-                        onClick = { showWebdav.value = true },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.height(28.dp)
-                    ) {
-                        Text(
-                            stringResource(R.string.webdav),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFC4C4D0),
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Text(
-                        status.value,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (status.value in errMsgs) Color(0xFFE08080)
-                        else Color(0xFF80E27E),
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("status-line")
-                            .clickable(
-                                onClickLabel = dismissLabel,
-                                role = Role.Button,
-                                onClick = { status.value = "" }
-                            )
-                    )
-                }
             }
 
                 if (showWebdav.value) {
@@ -2812,11 +2919,120 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
-        }
+            } // studio column (scrollable when short)
+        } // outer constraints (V16 short-viewport mode)
     }
 
-    private fun queryDisplayName(ctx: Context, uri: Uri): String? = try {
-        ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+/**
+ * V15: fullscreen top overlay — owns the status read so the screen root
+ * never recomposes on a status write while fullscreen.
+ */
+@Composable
+private fun FullscreenTopBar(
+    status: MutableState<String>,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .padding(8.dp)
+            .background(Color(0xCC101014))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (status.value.isNotEmpty()) {
+            Text(
+                status.value,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF80E27E),
+                maxLines = 1,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+        }
+        TextButton(
+            onClick = onExit,
+            modifier = Modifier
+                .height(48.dp)
+                .testTag("fullscreen-exit")
+        ) {
+            Text(
+                "✕ " + stringResource(R.string.cmdbar_exit_fullscreen),
+                style = MaterialTheme.typography.labelMedium,
+                color = Color(0xFFECECF1),
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/**
+ * V15: slim studio status bar — the single status read in the app
+ * (WebDAV button + the one message, tap to clear). Errors in red,
+ * everything else green; never name/dims.
+ */
+@Composable
+private fun StatusFooter(
+    status: MutableState<String>,
+    onWebdav: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val dismissLabel = stringResource(R.string.status_dismiss)
+    val errMsgs = setOf(
+        stringResource(R.string.save_failed),
+        stringResource(R.string.export_failed),
+        stringResource(R.string.import_failed),
+        stringResource(R.string.filter_failed),
+        stringResource(R.string.webdav_failed),
+        stringResource(R.string.ai_failed),
+        stringResource(R.string.ref_failed),
+        stringResource(R.string.audio_failed)
+    )
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(34.dp)
+            .background(Color(0xFF1E1E24))
+            .padding(horizontal = 8.dp)
+            .testTag("status-bar"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        TextButton(
+            onClick = onWebdav,
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            modifier = Modifier.height(28.dp)
+        ) {
+            Text(
+                stringResource(R.string.webdav),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFC4C4D0),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            status.value,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (status.value in errMsgs) Color(0xFFE08080)
+            else Color(0xFF80E27E),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .testTag("status-line")
+                .clickable(
+                    onClickLabel = dismissLabel,
+                    role = Role.Button,
+                    onClick = { status.value = "" }
+                )
+        )
+    }
+}
+
+    private fun queryDisplayName(ctx: Context, uri: Uri): String? = try {        ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
             val idx = c.getColumnIndex(
                 android.provider.OpenableColumns.DISPLAY_NAME
             )

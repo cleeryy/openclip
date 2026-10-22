@@ -83,6 +83,10 @@ private fun smoothCurve(pts: FloatArray, samples: Int = 32): List<Offset> {
 fun PressureCurveEditor(
     prefs: BrushPrefs,
     onCommit: () -> Unit,
+    // V14: drag-tick vs drag-end pushes (default: every caller is a
+    // discrete commit).
+    onTick: () -> Unit = onCommit,
+    onEnd: () -> Unit = onCommit,
     modifier: Modifier = Modifier
 ) {
     val pts = prefs.curvePts
@@ -209,7 +213,11 @@ fun PressureCurveEditor(
             ) {
                 Slider(
                     value = prefs.curve,
-                    onValueChange = { prefs.updateCurveScalar(it); onCommit() },
+                    onValueChange = {
+                        prefs.updateCurveScalar(it)
+                        onTick()
+                    },
+                    onValueChangeFinished = { onEnd() },
                     valueRange = 0f..1f,
                     modifier = Modifier
                         .fillMaxWidth()

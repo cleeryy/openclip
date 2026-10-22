@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OpenClip launcher foreground (clean-room): ink dot + brush swoosh,
+     kept inside the 72dp safe zone of the 108dp adaptive grid. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#0F6FFF"
+        android:pathData="M54,22a32,32 0 1,0 0.01,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,64c8,-18 14,-26 28,-32c-4,14 -10,26 -22,32z" />
+</vector>

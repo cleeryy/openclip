@@ -97,7 +97,11 @@ fun TimelineStrip(
 ) {
     var count by remember { mutableStateOf(1) }
     var cur by remember { mutableStateOf(0) }
-    val thumbs = remember { mutableStateMapOf<Int, Bitmap>() }
+    // V13: bounded LRU (24) with recycle-on-evict, like the LayerPanel
+    // 60-entry cache — a long clip no longer pins a full-width Bitmap
+    // per frame.
+    val thumbCache = remember { ThumbLru(TimelineTestHooks.maxCache) }
+    var thumbTick by remember { mutableStateOf(0) }
     // fps is app-side state (M7 contract: no engine symbol, default 12).
     var fps by remember { mutableStateOf(12f) }
     var playing by remember { mutableStateOf(false) }
@@ -128,7 +132,10 @@ fun TimelineStrip(
 
     fun refreshThumb(i: Int) {
         surface.pullFrameThumbnail(i) { bmp ->
-            if (bmp != null) thumbs[i] = bmp
+            if (bmp != null) {
+                thumbCache.put(i, bmp)
+                thumbTick++
+            }
         }
     }
 
@@ -138,7 +145,8 @@ fun TimelineStrip(
         if (cur >= count) cur = count - 1
         for (i in 0 until count) refreshThumb(i)
         // Drop thumbnails of deleted frames.
-        thumbs.keys.filter { it >= count }.forEach { thumbs.remove(it) }
+        thumbCache.dropFrom(count)
+        thumbTick++
     }
 
     // V+2: the engine now draws the real N neighbors per side
@@ -153,6 +161,16 @@ fun TimelineStrip(
     }
 
     LaunchedEffect(refreshKey) { refresh() }
+
+    // V13: cache snapshot for the bounded-cache test; the whole cache
+    // is recycled when the strip leaves the composition.
+    LaunchedEffect(Unit) {
+        TimelineTestHooks.thumbSnapshot = { thumbCache.snapshot() }
+        TimelineTestHooks.countOf = { count }
+    }
+    DisposableEffect(Unit) {
+        onDispose { thumbCache.dropFrom(0) }
+    }
 
     // Auto-scroll the programmatic row to the current cel (tap, scrub
     // release, add/duplicate, play steps). Anchored on cur-1 so the
@@ -306,7 +324,11 @@ fun TimelineStrip(
                             }
                             .clickable { gotoFrame(i) }
                     ) {
-                        val bmp = thumbs[i]
+                        // V13: read through the bounded cache (thumbTick
+                        // resubscribes after each async pull).
+                        @Suppress("UNUSED_EXPRESSION")
+                        thumbTick
+                        val bmp = thumbCache.get(i)
                         val frameMod = Modifier.size(128.dp, 96.dp)
                         val bordered = when (ghost) {
                             "before" -> frameMod.border(
@@ -343,10 +365,9 @@ fun TimelineStrip(
                 }
             }
             // Pastille i/N overlaid top-end (zero height cost): shown
-            // once the clip outgrows the visible window (~3 thumbs on
-            // a phone portrait). Plain text: drags pass through to the
-            // track container.
-            if (count > 3) {
+            // from 2 cels (V11 — the rail glyph alone reads as inert).
+            // Plain text: drags pass through to the track container.
+            if (count > 1) {
                 Text(
                     stringResource(R.string.cel_count, cur + 1, count),
                     style = MaterialTheme.typography.labelSmall,

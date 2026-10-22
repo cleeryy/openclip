@@ -73,14 +73,17 @@ fun ToolPalette(
     navigateMode: Boolean = false,
     onNavigateToggle: () -> Unit = {},
     onStatus: (String) -> Unit = {},
+    // V10: hoisted undo/redo availability shared with the command bar.
+    undoAvail: UndoAvailability? = null,
     modifier: Modifier = Modifier
 ) {
     // Slice 5: the tool lives in the hoisted BrushPrefs (persisted);
     // isBrush here is a read-through, never a second source of truth.
     val isBrush = !prefs.isEraser
     var inkColor by remember { mutableStateOf(initialColor) }
-    var canUndo by remember { mutableStateOf(false) }
-    var canRedo by remember { mutableStateOf(false) }
+    // V10: shared availability when the host provides it, else a local
+    // fallback (same behavior as before for standalone previews).
+    val avail = undoAvail ?: remember { UndoAvailability() }
     var showFilters by remember { mutableStateOf(false) }
     var showAdvanced by remember { mutableStateOf(false) }
     var symX by remember { mutableStateOf(false) }
@@ -97,6 +100,25 @@ fun ToolPalette(
     fun pushBrush() {
         prefs.bindTool(inkColor, !isBrush, prefs.curve)
         surface.setBrush(prefs.currentJson())
+    }
+    // V10: each (doc-bound) ToolPalette instance resets the hoisted
+    // availability — the engine undo pile lives per surface, so a fresh
+    // surface starts with both actions unavailable.
+    LaunchedEffect(Unit) {
+        avail.canUndo = false
+        avail.canRedo = false
+    }
+    // V14: drag ticks preview locally (prefs) while the engine push is
+    // throttled (~33ms) + forced on release; discrete taps push at once.
+    val brushThrottle = remember(surface) {
+        BrushPushThrottler(push = { pushBrush() })
+    }
+    fun pushTick(update: () -> Unit) {
+        update()
+        brushThrottle.onDragTick()
+    }
+    fun pushEnd() {
+        brushThrottle.onDragEnd()
     }
 
     fun pushSymmetry() {
@@ -126,8 +148,8 @@ fun ToolPalette(
         val prev = surface.onStrokeChanged
         surface.onStrokeChanged = {
             prev?.invoke()
-            canUndo = true
-            canRedo = false
+            avail.canUndo = true
+            avail.canRedo = false
         }
         pushBrush()
     }
@@ -142,10 +164,12 @@ fun ToolPalette(
             .background(Color(0xFF202026))
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
+        val toolScroll = rememberScrollState()
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
+                .horizontalScroll(toolScroll)
+                .scrollFade("tool-row", toolScroll)
                 .testTag("tool-row"),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -266,10 +290,12 @@ fun ToolPalette(
                 Slider(
                     value = shownRadius,
                     onValueChange = {
-                        if (isBrush) prefs.updateRadius(it)
-                        else prefs.updateEraserRadius(it)
-                        pushBrush()
+                        pushTick {
+                            if (isBrush) prefs.updateRadius(it)
+                            else prefs.updateEraserRadius(it)
+                        }
                     },
+                    onValueChangeFinished = { pushEnd() },
                     valueRange = 1f..128f,
                     modifier = Modifier
                         .width(110.dp)
@@ -290,10 +316,12 @@ fun ToolPalette(
                 Slider(
                     value = shownOpaque,
                     onValueChange = {
-                        if (isBrush) prefs.updateOpaque(it)
-                        else prefs.updateEraserOpaque(it)
-                        pushBrush()
+                        pushTick {
+                            if (isBrush) prefs.updateOpaque(it)
+                            else prefs.updateEraserOpaque(it)
+                        }
                     },
+                    onValueChangeFinished = { pushEnd() },
                     modifier = Modifier
                         .width(96.dp)
                         .height(28.dp)
@@ -319,9 +347,9 @@ fun ToolPalette(
             OutlinedButton(
                 onClick = {
                     val ok = surface.undo()
-                    if (ok) canRedo = true else canUndo = false
+                    if (ok) avail.canRedo = true else avail.canUndo = false
                 },
-                enabled = canUndo,
+                enabled = avail.canUndo,
                 contentPadding = compactPad,
                 modifier = Modifier.height(48.dp)
             ) {
@@ -336,9 +364,9 @@ fun ToolPalette(
             OutlinedButton(
                 onClick = {
                     val ok = surface.redo()
-                    if (ok) canUndo = true else canRedo = false
+                    if (ok) avail.canUndo = true else avail.canRedo = false
                 },
-                enabled = canRedo,
+                enabled = avail.canRedo,
                 contentPadding = compactPad,
                 modifier = Modifier.height(48.dp)
             ) {
@@ -404,10 +432,12 @@ fun ToolPalette(
         // V+1: selection mode selector (shown while armed) + the
         // session-only note (no persistence — closing the doc drops it).
         if (selArmed) {
+            val selScroll = rememberScrollState()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
+                    .horizontalScroll(selScroll)
+                    .scrollFade("selection-modes", selScroll)
                     .padding(top = 2.dp)
                     .testTag("selection-modes"),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -466,7 +496,10 @@ fun ToolPalette(
                 )
                 Slider(
                     value = prefs.stabilize,
-                    onValueChange = { prefs.updateStabilize(it); pushBrush() },
+                    onValueChange = {
+                        pushTick { prefs.updateStabilize(it) }
+                    },
+                    onValueChangeFinished = { pushEnd() },
                     valueRange = 0f..1f,
                     modifier = Modifier
                         .width(110.dp)
@@ -502,6 +535,8 @@ fun ToolPalette(
             PressureCurveEditor(
                 prefs = prefs,
                 onCommit = { pushBrush() },
+                onTick = { pushTick {} },
+                onEnd = { pushEnd() },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 4.dp)

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.IconButton
@@ -39,20 +40,29 @@ fun DocTabs(
     onActivate: (String) -> Unit,
     onClose: (String) -> Unit,
     onAdd: () -> Unit,
+    // V3: compact + single doc shows a "+"-only row (same 48dp height,
+    // no name chip): the single name source stays the title bar, and
+    // the chrome height never moves — a height change would resize the
+    // canvas and the engine would reset the view zoom (surfaceChanged).
+    hideNames: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val tabsScroll = rememberScrollState()
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(48.dp)
             .background(Color(0xFF1A1A20))
-            .horizontalScroll(rememberScrollState())
+            .horizontalScroll(tabsScroll)
+            // V4: 12dp end fade so a cut chip reads as scrollable.
+            .scrollFade("doc-tabs", tabsScroll, edgeColor = Color(0xFF1A1A20))
             .padding(horizontal = 8.dp)
             .testTag("doc-tabs"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         val maxChars = if (compact) 12 else 16
+        if (!hideNames) {
         for (doc in docs) {
             val selected = doc.docId == activeDocId
             val preselected = doc.docId == preselectedDocId
@@ -95,6 +105,7 @@ fun DocTabs(
                     .testTag("doc-tab-${doc.docId}")
             )
         }
+        } // hideNames: "+"-only row, same height, no name chip (V3).
         IconButton(
             onClick = onAdd,
             modifier = Modifier

@@ -39,8 +39,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
@@ -174,11 +178,21 @@ fun CommandBar(
     onAction: (String) -> Unit,
     onEditHint: () -> Unit,
     modifier: Modifier = Modifier,
+    // V10: hoisted undo/redo availability (ToolPalette writes). Tapping
+    // an unavailable action posts a status hint instead of dying silent.
+    undoAvail: UndoAvailability? = null,
+    onDisabledHint: (String) -> Unit = {},
     // Slice 7: collapse affordance (phone pastille, §5). Expanded by
     // default so the 1-tap save/undo/redo contract (slice 6) holds.
     onCollapse: () -> Unit = {}
 ) {
     val editMode = remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
+    fun availFor(action: String): Boolean = when (action) {
+        "undo" -> undoAvail?.canUndo ?: true
+        "redo" -> undoAvail?.canRedo ?: true
+        else -> true
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -186,10 +200,12 @@ fun CommandBar(
             .background(Color(0xFF1A1A20))
             .testTag("command-bar")
     ) {
+        val cmdScroll = rememberScrollState()
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
+                .horizontalScroll(cmdScroll)
+                .scrollFade("command-bar-row", cmdScroll, edgeColor = Color(0xFF1A1A20))
                 .combinedClickable(
                     onClick = {},
                     onLongClick = {
@@ -202,19 +218,39 @@ fun CommandBar(
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             for (action in store.shownActions()) {
+                val avail = availFor(action)
+                // V10: unavailable undo/redo reads as hint (never white)
+                // and announces its state; the tap still reports a hint.
+                val unavailableDesc = when (action) {
+                    "undo" -> if (!avail) ctx.getString(R.string.undo_empty) else null
+                    "redo" -> if (!avail) ctx.getString(R.string.redo_empty) else null
+                    else -> null
+                }
                 TextButton(
-                    onClick = { onAction(action) },
+                    onClick = {
+                        if (!avail) onDisabledHint(action)
+                        else onAction(action)
+                    },
                     modifier = Modifier
                         .height(48.dp)
                         .testTag("cmdbar-$action")
+                        .then(
+                            if (unavailableDesc != null) {
+                                Modifier.semantics {
+                                    contentDescription = unavailableDesc
+                                }
+                            } else Modifier
+                        )
                 ) {
                     Text(
                         labels[action] ?: action,
                         style = MaterialTheme.typography.labelMedium,
-                        color = Color(0xFFECECF1),
+                        color = if (avail) Color(0xFFECECF1) else Color(0xFF787888),
                         maxLines = 1,
                         softWrap = false,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (avail) Modifier
+                        else Modifier.graphicsLayer { alpha = 0.6f }
                     )
                 }
             }

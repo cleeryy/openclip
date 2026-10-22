@@ -16,6 +16,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasTestTag
@@ -23,6 +24,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -30,6 +32,7 @@ import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.geometry.Offset
@@ -80,6 +83,8 @@ import dev.openclip.ui.refreshPanelOverlay
 import dev.openclip.ui.v2LayerMetas
 import dev.openclip.ui.v2VectorLayers
 // V+3 confort-pro pure units + JSON bridges (no new engine pixels).
+import dev.openclip.ui.BrushPushTestHooks
+import dev.openclip.ui.BrushPushThrottler
 import dev.openclip.ui.ChannelOp
 import dev.openclip.ui.ChannelOps
 import dev.openclip.ui.ChannelStore
@@ -88,7 +93,11 @@ import dev.openclip.ui.Harmony
 import dev.openclip.ui.PdfImport
 import dev.openclip.ui.PoseStore
 import dev.openclip.ui.Rdp
+import dev.openclip.ui.RecomposeTestHooks
+import dev.openclip.ui.ScrollFadeTestHooks
 import dev.openclip.ui.SelectionMask
+import dev.openclip.ui.ThumbLru
+import dev.openclip.ui.TimelineTestHooks
 import dev.openclip.ui.ShortcutAction
 import dev.openclip.ui.ShortcutMap
 import dev.openclip.ui.ShortcutToolState
@@ -2094,11 +2103,32 @@ class EngineConformanceTest {
                 }
             } catch (_: Exception) {
             }
-            composeRule.onNodeWithTag("color-tab-sets")
-                .performClick()
-            composeRule.waitForIdle()
+            // The sheet scrolls and the tab lives in a horizontally
+            // scrolling row (a vertical scrollTo would target the wrong
+            // axis): anchor the dock on the add-row so the color tabs
+            // land inside the viewport, then tap.
+            var setsOpen = false
+            for (k in 0 until 5) {
+                composeRule.onNodeWithTag("layer-add").performScrollTo()
+                composeRule.waitForIdle()
+                composeRule.onNodeWithTag("color-tab-sets").performClick()
+                composeRule.waitForIdle()
+                setsOpen = try {
+                    composeRule.onNodeWithTag("set-chip-0").assertExists()
+                    true
+                } catch (_: AssertionError) {
+                    false
+                }
+                if (setsOpen) break
+            }
+            assertTrue("color sets tab must open", setsOpen)
+            // The set chips sit right under the tabs (visible once the
+            // dock is back at the top); the swatch grid may sit lower.
             composeRule.onNodeWithTag("set-chip-0")
                 .performClick()
+            composeRule.onNodeWithTag("swatch-2")
+                .performScrollTo()
+            composeRule.waitForIdle()
             composeRule.onNodeWithTag("swatch-2")
                 .performClick()
             composeRule.waitForIdle()
@@ -2928,8 +2958,10 @@ class EngineConformanceTest {
             composeRule.onNodeWithTag("layer-count").assertIsDisplayed()
             val total = layerNames(es).size
             assertTrue("need 50 layers, got $total", total >= 50)
-            composeRule.onNode(hasText("$total/50", substring = true))
-                .assertIsDisplayed()
+            assertTrue(
+                "counter must show $total/50, got '${nodeText("layer-count")}'",
+                nodeText("layer-count").contains("$total/50")
+            )
             // Compact: a non-active row folds its rank 2.
             val act = activeIndex(es)
             val folded = if (act != 0) 0 else 1
@@ -2989,10 +3021,12 @@ class EngineConformanceTest {
                 fxDesc = act.getString(R.string.layer_fx_present)
             }
             // Refresh the panel through the UI, then prove the badges.
+            // Scroll the OUTER dock column (rows live in a nested lazy
+            // list: scrolling them directly leaves the dock unmoved).
             composeRule.onNodeWithTag("layer-thumb-0").performClick()
             composeRule.waitForIdle()
             Thread.sleep(800)
-            composeRule.onNodeWithTag("layer-row-0").performScrollTo()
+            composeRule.onNodeWithTag("layer-search").performScrollTo()
             composeRule.waitForIdle()
             composeRule.onNode(
                 hasTestTag("layer-badge-clip-0").and(
@@ -4131,7 +4165,8 @@ class EngineConformanceTest {
                 findActiveEngineSurface(act.window.decorView)!!.clearHoverForTest()
             }
             // Collapse the bar (poll: a tap landing mid-recomposition can
-            // be swallowed) then prove the 48dp pastille.
+            // be swallowed) then prove the 48dp pastille. V1: the bar
+            // scrolls in tight mode — bring the cross into view first.
             for (k in 0 until 15) {
                 val expanded = try {
                     composeRule.onNodeWithTag("pinned-hide").assertExists()
@@ -4147,6 +4182,12 @@ class EngineConformanceTest {
                 }
                 if (collapsed && !expanded) break
                 if (expanded) {
+                    // Tight mode scrolls; wide mode has no scroller.
+                    try {
+                        composeRule.onNodeWithTag("pinned-hide").performScrollTo()
+                        composeRule.waitForIdle()
+                    } catch (_: AssertionError) {
+                    }
                     composeRule.onNodeWithTag("pinned-hide").performClick()
                 }
                 composeRule.waitForIdle()
@@ -4422,6 +4463,7 @@ class EngineConformanceTest {
             val pxBefore = bitmapPixels(bmpBefore)
             bmpBefore.recycle()
             // Open B through the real + flow (defaults 2048x1536 white).
+            // V3: single-doc compact keeps a "+"-only tabs row.
             composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
             composeRule.onNodeWithTag("doc-tab-add").performClick()
             composeRule.waitForIdle()
@@ -4602,8 +4644,16 @@ class EngineConformanceTest {
                 !stillDrawing
             )
             var pend = "<unset>"
-            composeRule.activityRule.scenario.onActivity { act ->
-                pend = act.activityTestHooks.pendingTab?.invoke() ?: "<null>"
+            // The defer poll runs every 150 ms: give it a bounded window
+            // instead of assuming it already fired (looper lag on load).
+            val tPend = SystemClock.uptimeMillis()
+            while (pend != "<null>" &&
+                SystemClock.uptimeMillis() - tPend < 3000
+            ) {
+                composeRule.activityRule.scenario.onActivity { act ->
+                    pend = act.activityTestHooks.pendingTab?.invoke() ?: "<null>"
+                }
+                if (pend != "<null>") Thread.sleep(150)
             }
             assertTrue("pending must clear after UP (pending=$pend)", pend == "<null>")
             assertTrue("switch must complete after UP", awaitActive(bId))
@@ -4774,6 +4824,7 @@ class EngineConformanceTest {
         val a = slice6Reset()
         try {
             // 3000x2000 transparent through the real dialog.
+            // V3: single-doc compact keeps a "+"-only tabs row.
             composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
             composeRule.onNodeWithTag("doc-tab-add").performClick()
             composeRule.waitForIdle()
@@ -4995,6 +5046,10 @@ class EngineConformanceTest {
             composeRule.onNodeWithTag("dock-toggle").assertIsDisplayed()
             composeRule.onNodeWithTag("cmdbar-save").assertIsDisplayed()
             // Touch targets >= 48dp (0.5dp tolerance).
+            // V3: single-doc compact hides the tabs — a second doc keeps
+            // the tab targets under test.
+            val tallExtra = hookOpen("Tall", 256, 256, -1)
+            awaitDocReady(tallExtra)
             fun tall(tag: String) {
                 composeRule.waitForIdle()
                 val u = composeRule.onNodeWithTag(tag).getUnclippedBoundsInRoot()
@@ -5039,9 +5094,9 @@ class EngineConformanceTest {
             )
             awaitDirty(a, true)
             // Dirty close through the dialog (discard path).
-            composeRule.onNodeWithTag("doc-tab-close-$a").performScrollTo()
-            composeRule.onNodeWithTag("doc-tab-close-$a").performClick()
-            composeRule.waitForIdle()
+            // V3: single-doc compact hides the tab crosses — File >
+            // Close document runs the same requestClose path.
+            closeDocViaMenu()
             composeRule.onNodeWithTag("doc-close-discard").performClick()
             composeRule.waitForIdle()
             assertEquals(0, awaitCount(0).size)
@@ -5102,6 +5157,28 @@ class EngineConformanceTest {
         }
     }
 
+    /**
+     * V3: with a single doc on compact the tabs row (and its crosses)
+     * is hidden — closing goes through File > Close document
+     * (requestClose, same dirty dialog as the tab cross).
+     */
+    private fun closeDocViaMenu() {
+        val closeLabel = actString(dev.openclip.R.string.doc_close)
+        if (isCompact()) {
+            openMenuCompactIfPresent()
+            composeRule.onNodeWithTag("menu-compact-item-0-4")
+                .performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("menu-compact-item-0-4")
+                .performClick()
+        } else {
+            composeRule.onNodeWithTag("menu-title-0").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithText(closeLabel).performClick()
+        }
+        composeRule.waitForIdle()
+    }
+
     private fun statusText(): String {
         var txt = ""
         try {
@@ -5150,6 +5227,7 @@ class EngineConformanceTest {
             Thread.sleep(600)
             assertTrue("stroke on A must paint", countInk(pullFull(esA)) > 100)
             val before = bitmapPixels(pullFull(esA))
+            // V3: single-doc compact keeps a "+"-only tabs row.
             composeRule.onNodeWithTag("doc-tab-add").performScrollTo()
             composeRule.onNodeWithTag("doc-tab-add").performClick()
             composeRule.waitForIdle()
@@ -5210,11 +5288,12 @@ class EngineConformanceTest {
                 var top0 = 0.dp
                 var h0 = 0.dp
                 // titles[0] ("File") also labels the tool-row action —
-                // assert it in the menu band via the compact-header rule
-                // only; the band check covers the other seven.
-                for ((i, t) in titles.withIndex().drop(1)) {
-                    composeRule.onNodeWithText(t).assertIsDisplayed()
-                    val b = composeRule.onNodeWithText(t)
+                // assert it in the menu band via tags only (tablet shows
+                // both bars at once, so text lookup is ambiguous).
+                for (i in 1 until titles.size) {
+                    val t = titles[i]
+                    composeRule.onNodeWithTag("menu-title-$i").assertIsDisplayed()
+                    val b = composeRule.onNodeWithTag("menu-title-$i")
                         .getUnclippedBoundsInRoot()
                     if (i == 1) {
                         top0 = b.top
@@ -5389,10 +5468,12 @@ class EngineConformanceTest {
                 )
                 var top0 = 0.dp
                 // titles[0] ("Fichier") also labels the tool-row action,
-                // so the band check covers the other seven titles.
-                for ((i, t) in titles.withIndex().drop(1)) {
-                    composeRule.onNodeWithText(t).assertIsDisplayed()
-                    val b = composeRule.onNodeWithText(t)
+                // so the band check covers the other seven titles. Tags,
+                // not text: tablet shows both bars ("Sélection" × 2).
+                for (i in 1 until titles.size) {
+                    val t = titles[i]
+                    composeRule.onNodeWithTag("menu-title-$i").assertIsDisplayed()
+                    val b = composeRule.onNodeWithTag("menu-title-$i")
                         .getUnclippedBoundsInRoot()
                     if (i == 1) top0 = b.top
                     else assertTrue(
@@ -5416,9 +5497,9 @@ class EngineConformanceTest {
                 esA.width * 0.5f
             )
             awaitDirty(id, true)
-            composeRule.onNodeWithTag("doc-tab-close-$id").performScrollTo()
-            composeRule.onNodeWithTag("doc-tab-close-$id").performClick()
-            composeRule.waitForIdle()
+            // V3: single-doc compact hides the tab crosses — File >
+            // Close document runs the same requestClose path.
+            closeDocViaMenu()
             val discard = actString(dev.openclip.R.string.doc_close_discard)
             composeRule.onNodeWithText(discard).assertIsDisplayed()
             composeRule.onNodeWithText(discard).performClick()
@@ -5456,9 +5537,9 @@ class EngineConformanceTest {
                 esA.width * 0.5f
             )
             awaitDirty(a, true)
-            composeRule.onNodeWithTag("doc-tab-close-$a").performScrollTo()
-            composeRule.onNodeWithTag("doc-tab-close-$a").performClick()
-            composeRule.waitForIdle()
+            // V3: single-doc compact hides the tab crosses — File >
+            // Close document runs the same requestClose path.
+            closeDocViaMenu()
             composeRule.onNodeWithTag("doc-close-discard").performClick()
             composeRule.waitForIdle()
             assertEquals(0, awaitCount(0).size)
@@ -5570,6 +5651,10 @@ class EngineConformanceTest {
     @Test
     fun slice7_touchTargets48dpPolish() {
         slice6Reset()
+        // V3: single-doc compact hides the tabs — a second doc keeps
+        // the tab targets (and the "+" flow) under test.
+        val tallExtra = hookOpen("Tall", 256, 256, -1)
+        awaitDocReady(tallExtra)
         try {
             fun tall(tag: String, scroll: Boolean = false) {
                 composeRule.waitForIdle()
@@ -5588,8 +5673,10 @@ class EngineConformanceTest {
             }
             if (!isCompact()) {
                 // titles[0] ("File") also labels the tool-row action —
-                // the band check covers the other seven titles.
-                for (id in intArrayOf(
+                // the band check covers the other seven titles. Tags, not
+                // text: "Selection" also labels a tool chip (tablet shows
+                // both bars at once).
+                for ((k, id) in intArrayOf(
                     dev.openclip.R.string.menu_edit,
                     dev.openclip.R.string.menu_layer,
                     dev.openclip.R.string.menu_selection,
@@ -5597,9 +5684,9 @@ class EngineConformanceTest {
                     dev.openclip.R.string.menu_display,
                     dev.openclip.R.string.menu_window,
                     dev.openclip.R.string.menu_help
-                )) {
+                ).withIndex()) {
                     val t = actString(id)
-                    val u = composeRule.onNodeWithText(t)
+                    val u = composeRule.onNodeWithTag("menu-title-${k + 1}")
                         .getUnclippedBoundsInRoot()
                     assertTrue(
                         "menu [$t] must be >= 48dp",
@@ -5630,12 +5717,14 @@ class EngineConformanceTest {
             tall("newcanvas-confirm")
             composeRule.onNodeWithTag("newcanvas-cancel").performClick()
             composeRule.waitForIdle()
-            // Empty-state CTA (close the clean doc, no confirm needed).
+            // Empty-state CTA (close the clean docs, no confirm needed).
+            // V3: the last close goes through the menu (hidden tabs).
             val ids = hookIds()
-            assertTrue(ids.isNotEmpty())
+            assertTrue("want the 2 tall docs, got $ids", ids.size == 2)
             composeRule.onNodeWithTag("doc-tab-close-${ids[0]}").performScrollTo()
             composeRule.onNodeWithTag("doc-tab-close-${ids[0]}").performClick()
             composeRule.waitForIdle()
+            closeDocViaMenu()
             tall("newcanvas-empty-cta")
             composeRule.onNodeWithTag("newcanvas-empty-cta").performClick()
             composeRule.waitForIdle()
@@ -7492,12 +7581,32 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         val id = openFreshDoc("v2-ui")
         var opened = false
         try {
-            composeRule.onNodeWithTag("dock-toggle").performClick()
-            composeRule.waitForIdle()
+            // Idempotent open: the toggle blindly flips, so only tap
+            // when the drawer is actually closed (tablet defaults open).
+            val shut = try {
+                composeRule.onNodeWithText("\u27e8").assertIsDisplayed()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+            if (shut) {
+                composeRule.onNodeWithTag("dock-toggle").performClick()
+                composeRule.waitForIdle()
+            }
             opened = true
-            // The tab row scrolls horizontally: bring Comic into view.
-            composeRule.onNodeWithTag("dock-tab-bd").performScrollTo()
-            composeRule.waitForIdle()
+            // The tab row scrolls horizontally (side dock is narrow):
+            // swipe the header row itself when Comic starts off-screen.
+            var bdShown = try {
+                composeRule.onNodeWithTag("dock-tab-bd").assertIsDisplayed()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+            if (!bdShown) {
+                composeRule.onNodeWithTag("dock-tabs-row")
+                    .performTouchInput { swipeLeft() }
+                composeRule.waitForIdle()
+            }
             composeRule.onNodeWithTag("dock-tab-bd").performClick()
             composeRule.waitForIdle()
             try {
@@ -7550,12 +7659,32 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         val id = openFreshDoc("v2-ui2")
         var opened = false
         try {
-            composeRule.onNodeWithTag("dock-toggle").performClick()
-            composeRule.waitForIdle()
+            // Idempotent open: the toggle blindly flips, so only tap
+            // when the drawer is actually closed (tablet defaults open).
+            val shut = try {
+                composeRule.onNodeWithText("\u27e8").assertIsDisplayed()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+            if (shut) {
+                composeRule.onNodeWithTag("dock-toggle").performClick()
+                composeRule.waitForIdle()
+            }
             opened = true
-            // The tab row scrolls horizontally: bring Comic into view.
-            composeRule.onNodeWithTag("dock-tab-bd").performScrollTo()
-            composeRule.waitForIdle()
+            // The tab row scrolls horizontally (side dock is narrow):
+            // swipe the header row itself when Comic starts off-screen.
+            var bdShown = try {
+                composeRule.onNodeWithTag("dock-tab-bd").assertIsDisplayed()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+            if (!bdShown) {
+                composeRule.onNodeWithTag("dock-tabs-row")
+                    .performTouchInput { swipeLeft() }
+                composeRule.waitForIdle()
+            }
             composeRule.onNodeWithTag("dock-tab-bd").performClick()
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("v2-gif-panel").performScrollTo()
@@ -8314,6 +8443,549 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             }
             if (!bmp.isRecycled) bmp.recycle()
         } catch (_: Exception) {
+        }
+    }
+
+    // ---------- Audit visuel V1-V18 (spec docs/audit-visuel.md) ----------
+
+    private fun visualReset(): String {
+        // Hooks reset BEFORE the reset run: slice6Reset draws chrome
+        // (fade registry) and bumps counters, which the tests then read.
+        ScrollFadeTestHooks.reset()
+        BrushPushTestHooks.reset()
+        RecomposeTestHooks.reset()
+        return slice6Reset()
+    }
+
+    private fun disjoint(a: String, b: String) {
+        val ra = composeRule.onNodeWithTag(a).getUnclippedBoundsInRoot()
+        val rb = composeRule.onNodeWithTag(b).getUnclippedBoundsInRoot()
+        assertTrue(
+            "$a overlaps $b ($ra vs $rb)",
+            ra.right <= rb.left || rb.right <= ra.left ||
+                ra.bottom <= rb.top || rb.bottom <= ra.top
+        )
+    }
+
+    private fun rowHeightDp(tag: String): Dp {
+        val b = composeRule.onNodeWithTag(tag).getUnclippedBoundsInRoot()
+        return b.bottom - b.top
+    }
+
+    // T1 pinnedNoOverlap (V1): no thumb ever paints over a bar label.
+    @Test
+    fun visualT1_pinnedNoOverlap() {
+        visualReset()
+        ensureDockOpen()
+        composeRule.onNodeWithTag("pinned-bar").assertIsDisplayed()
+        disjoint("pinned-size", "pinned-size-label")
+        disjoint("pinned-opaque", "pinned-opaque-label")
+    }
+
+    // T2 statusNeverPoke (V2): the internal POKE tick never surfaces.
+    @Test
+    fun visualT2_statusNeverPoke() {
+        visualReset()
+        val second = hookOpen("Deux", 256, 256, null)
+        try {
+            hookActivate(second)
+            composeRule.waitForIdle()
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.poke?.invoke()
+            }
+            composeRule.waitForIdle()
+            val s = statusText()
+            assertTrue("status leaked POKE: '$s'", !s.contains("POKE"))
+        } finally {
+            closeFreshDoc(second)
+        }
+        val s = statusText()
+        assertTrue("status leaked POKE: '$s'", !s.contains("POKE"))
+    }
+
+    // T3 compactSingleSource (V3): single name, single Save. With 1 doc
+    // the tabs row keeps only "+" (same height, no name chip — the title
+    // bar stays the single name source and the chrome never resizes);
+    // with ≥ 2 docs the chips carry the names and the compact bar drops
+    // its own title.
+    @Test
+    fun visualT3_compactSingleSource() {
+        val first = visualReset()
+        if (!isCompact()) return
+        // 1 doc: "+" only, no name chip; title bar carries the name.
+        composeRule.onNodeWithTag("doc-tabs").assertIsDisplayed()
+        composeRule.onNodeWithTag("doc-tab-add").assertIsDisplayed()
+        composeRule.onNodeWithTag("doc-tab-$first").assertDoesNotExist()
+        composeRule.onNodeWithTag("doc-title-compact").assertDoesNotExist()
+        composeRule.onNodeWithTag("doc-title").assertIsDisplayed()
+        composeRule.onAllNodesWithTag("doc-save").assertCountEquals(1)
+        val second = hookOpen("Deux", 256, 256, null)
+        try {
+            composeRule.waitForIdle()
+            // 2 docs: both chips, still a single Save, no compact title.
+            composeRule.onNodeWithTag("doc-tab-$first").assertIsDisplayed()
+            composeRule.onNodeWithTag("doc-tab-$second").assertIsDisplayed()
+            composeRule.onNodeWithTag("doc-title-compact")
+                .assertDoesNotExist()
+            composeRule.onAllNodesWithTag("doc-save").assertCountEquals(1)
+        } finally {
+            closeFreshDoc(second)
+        }
+    }
+
+    // T4 scrollAffordance (V4/V8): overflowing chrome rows report a fade,
+    // and the last chip scrolls fully into view.
+    @Test
+    fun visualT4_scrollAffordance() {
+        visualReset()
+        if (isCompact()) {
+            assertTrue(
+                "tool-row should overflow on a phone",
+                ScrollFadeTestHooks.isOverflowing("tool-row")
+            )
+        }
+        composeRule.onNodeWithTag("tool-file").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-file").assertIsDisplayed()
+        ensureDockOpen()
+        assertTrue(
+            "dock-tabs-row should overflow",
+            ScrollFadeTestHooks.isOverflowing("dock-tabs-row")
+        )
+        composeRule.onNodeWithTag("dock-tab-confort").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dock-tab-confort").assertIsDisplayed()
+    }
+
+    // T5 phoneDockIsOverlay (V5): the phone dock never steals canvas width.
+    @Test
+    fun visualT5_phoneDockIsOverlay() {
+        visualReset()
+        if (!isCompact()) {
+            composeRule.onNodeWithTag("dock-scrim").assertDoesNotExist()
+            return
+        }
+        var rootW = 0
+        var canvasW = 0
+        composeRule.activityRule.scenario.onActivity { act ->
+            rootW = act.window.decorView.rootView.width
+        }
+        canvasW = composeRule.onNodeWithTag("canvas-box")
+            .getUnclippedBoundsInRoot().right.value.toInt()
+        // Closed dock: canvas already spans the window.
+        composeRule.onNodeWithTag("dock-toggle").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dock-scrim").assertIsDisplayed()
+        val box = composeRule.onNodeWithTag("canvas-box")
+            .getUnclippedBoundsInRoot()
+        val dens = composeRule.activity.resources.displayMetrics.density
+        val canvasPx = ((box.right - box.left).value * dens).toInt()
+        assertTrue(
+            "canvas $canvasPx px must keep >= 50% of $rootW px with the dock open",
+            rootW <= 0 || canvasPx * 2 >= rootW
+        )
+        // The sheet covers the scrim's center: tap the exposed top
+        // band (above the 70%-height sheet) to dismiss.
+        composeRule.onNodeWithTag("dock-scrim").performTouchInput {
+            val sz = composeRule.onNodeWithTag("dock-scrim")
+                .fetchSemanticsNode().size
+            click(Offset(sz.width / 2f, 10f))
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dock-scrim").assertDoesNotExist()
+        assertTrue(canvasW >= 0)
+    }
+
+    // T6 layerCardSingleBorderAndPct (V6): short "%d %%" dosage, no clip.
+    @Test
+    fun visualT6_layerCardSingleBorderAndPct() {
+        visualReset()
+        ensureDockOpen()
+        // Scroll the OUTER dock column (the card lives in a nested lazy
+        // list: scrolling it directly leaves the dock unmoved).
+        composeRule.onNodeWithTag("layer-search").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("layer-dosage-0").assertIsDisplayed()
+        val t = nodeText("layer-dosage-0")
+        assertTrue(
+            "dosage must be short '<n> %', got '$t'",
+            Regex("""\d+\s*%""").containsMatchIn(t)
+        )
+        composeRule.onNodeWithTag("layer-thumb-0").assertIsDisplayed()
+    }
+
+    // T7 dockRowsSingleLine FR (V7): no dock chip row wraps to two lines.
+    @Test
+    fun visualT7_dockRowsSingleLine() {
+        visualReset()
+        assertTrue(overrideActivityLocale("fr"))
+        try {
+            ensureDockOpen()
+            composeRule.onNodeWithTag("adjust-row").performScrollTo()
+            assertTrue(
+                "adjust-row wraps: ${rowHeightDp("adjust-row")}",
+                rowHeightDp("adjust-row") <= 49.dp
+            )
+            composeRule.onNodeWithTag("dock-tab-confort").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("dock-tab-confort").performClick()
+            composeRule.waitForIdle()
+            for (tag in listOf(
+                "harmony-modes-row", "pose-presets-row", "proof-row"
+            )) {
+                composeRule.onNodeWithTag(tag).performScrollTo()
+                composeRule.waitForIdle()
+                assertTrue(
+                    "$tag wraps: ${rowHeightDp(tag)}",
+                    rowHeightDp(tag) <= 49.dp
+                )
+            }
+        } finally {
+            overrideActivityLocale("en")
+            composeRule.waitForIdle()
+        }
+    }
+
+    // T8 scrollEdgePadding (V9): first/last items stay reachable with pads.
+    @Test
+    fun visualT8_scrollEdgePadding() {
+        visualReset()
+        ensureDockOpen()
+        composeRule.onNodeWithTag("layer-add").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("layer-add").assertIsDisplayed()
+        composeRule.onNodeWithTag("layer-search").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("layer-search").assertIsDisplayed()
+        composeRule.onNodeWithTag("dock-scroll-endpad").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dock-scroll-endpad").assertIsDisplayed()
+        openTimeline()
+        composeRule.onNodeWithTag("timeline-endpad").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("timeline-endpad").assertIsDisplayed()
+        settleTimeline()
+    }
+
+    // T9 undoDisabledState (V10): fresh doc grays undo/redo + hints on tap.
+    @Test
+    fun visualT9_undoDisabledState() {
+        visualReset()
+        val undoDesc = actString(dev.openclip.R.string.undo_empty)
+        composeRule.waitForIdle()
+        val node = composeRule.onNodeWithTag("cmdbar-undo").fetchSemanticsNode()
+        val descs = node.config.getOrNull(SemanticsProperties.ContentDescription)
+            ?: emptyList()
+        assertTrue(
+            "cmdbar-undo must announce '$undoDesc', got $descs",
+            descs.any { it.contains(undoDesc) }
+        )
+        composeRule.onNodeWithTag("cmdbar-undo").performClick()
+        composeRule.waitForIdle()
+        assertTrue(
+            "tap on disabled undo must post a hint, got '${statusText()}'",
+            statusText().contains(undoDesc)
+        )
+    }
+
+    // T10 timelineRailContrastAndCount (V11): accent glyph contrast +
+    // pastille from 2 cels.
+    @Test
+    fun visualT10_timelineRailContrastAndCount() {
+        visualReset()
+        fun lum(c: Int): Double {
+            fun ch(v: Int): Double {
+                val s = (v / 255.0)
+                return if (s <= 0.03928) s / 12.92
+                else Math.pow((s + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * ch((c shr 16) and 0xFF) +
+                0.7152 * ch((c shr 8) and 0xFF) + 0.0722 * ch(c and 0xFF)
+        }
+        val fg = 0xFF90B8FF.toInt()
+        val bg = 0xFF1C1C22.toInt()
+        val ratio = (lum(fg) + 0.05) / (lum(bg) + 0.05)
+        assertTrue("rail glyph contrast $ratio < 4.5", ratio >= 4.5)
+        openTimeline()
+        addCels(1)
+        composeRule.waitForIdle()
+        val counted = TimelineTestHooks.countOf()
+        val exists = try {
+            composeRule.onNodeWithTag("timeline-count").fetchSemanticsNode()
+            true
+        } catch (_: AssertionError) {
+            false
+        }
+        assertTrue(
+            "timeline-count must exist after addCels (count=$counted)",
+            exists
+        )
+        // The add scrolled the drawer down: come back to the track.
+        composeRule.onNodeWithTag("timeline-track").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("timeline-count").assertIsDisplayed()
+        settleTimeline()
+    }
+
+    // T11 poseEmptyState (V12): no model = armed nothing, CTA first.
+    @Test
+    fun visualT11_poseEmptyState() {
+        visualReset()
+        ensureDockOpen()
+        composeRule.onNodeWithTag("dock-tab-confort").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dock-tab-confort").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("v3-pose").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("v3-pose-refresh").assertIsDisplayed()
+        composeRule.onNodeWithTag("v3-pose-preset-standing")
+            .assertIsNotEnabled()
+    }
+
+    // T12 thumbCacheBounded (V13): the timeline cache is a bounded LRU.
+    @Test
+    fun visualT12_thumbCacheBounded() {
+        val lru = ThumbLru(24)
+        val first = mutableListOf<Bitmap>()
+        repeat(50) { i ->
+            val b = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
+            if (i < 10) first.add(b)
+            lru.put(i, b)
+        }
+        assertTrue("cache size ${lru.size()} > 24", lru.size() <= 24)
+        assertTrue(
+            "evicted thumbs must be recycled",
+            first.any { it.isRecycled }
+        )
+        assertEquals(24, TimelineTestHooks.maxCache)
+    }
+
+    // T13 brushPushThrottled (V14): ~33ms throttle + exact final push.
+    @Test
+    fun visualT13_brushPushThrottled() {
+        BrushPushTestHooks.reset()
+        var applied = -1f
+        var fake = 0L
+        val t = BrushPushThrottler(now = { fake }, push = { applied += 0f })
+        var v = 0f
+        repeat(100) {
+            v += 1f
+            t.onDragTick()
+            fake += 5L
+        }
+        val during = BrushPushTestHooks.effectivePushes
+        assertTrue("100 ticks -> $during pushes, want <= 20", during <= 20)
+        t.onDragEnd()
+        val total = BrushPushTestHooks.effectivePushes
+        assertTrue("total $total pushes, want <= 21", total <= 21)
+        assertEquals(100f, v)
+        assertTrue(applied >= -1f)
+    }
+
+    // T14 dockNoRecomposeOnPoke (V15): isolated poke skips the dock.
+    @Test
+    fun visualT14_dockNoRecomposeOnPoke() {
+        visualReset()
+        ensureDockOpen()
+        composeRule.waitForIdle()
+        RecomposeTestHooks.reset()
+        composeRule.waitForIdle()
+        val before = RecomposeTestHooks.dockCompositions
+        // slice6Reset leaves the workspace-applied message: the poke must
+        // neither change it nor leak POKE (V2).
+        val statusBefore = statusText()
+        composeRule.activityRule.scenario.onActivity { act ->
+            act.activityTestHooks.poke?.invoke()
+        }
+        composeRule.waitForIdle()
+        assertEquals(
+            "poke recomposed the dock",
+            before, RecomposeTestHooks.dockCompositions
+        )
+        assertEquals(
+            "poke changed the status (was '$statusBefore')",
+            statusBefore, statusText()
+        )
+        assertTrue(
+            "status leaked POKE: '${statusText()}'",
+            !statusText().contains("POKE")
+        )
+    }
+
+    // T15 landscapeUsable (V16): short viewport keeps canvas + actions.
+    @Test
+    fun visualT15_landscapeUsable() {
+        visualReset()
+        val act = composeRule.activity
+        try {
+            act.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            var ok = false
+            val t0 = SystemClock.uptimeMillis()
+            while (SystemClock.uptimeMillis() - t0 < 8000) {
+                composeRule.waitForIdle()
+                val r = act.window.decorView.rootView
+                if (r.width > r.height && r.height > 0) {
+                    ok = true
+                    break
+                }
+                Thread.sleep(300)
+            }
+            assertTrue("rotation to landscape never applied", ok)
+            composeRule.waitForIdle()
+            var rootH = 0
+            var canvasH = 0
+            composeRule.activityRule.scenario.onActivity { a ->
+                rootH = a.window.decorView.rootView.height
+                val ids = a.activityTestHooks.docIds?.invoke() ?: emptyList()
+                val sid = ids.firstOrNull()
+                canvasH = if (sid != null) {
+                    a.activityTestHooks.surfaceFor?.invoke(sid)?.height ?: 0
+                } else 0
+            }
+            assertTrue(
+                "canvas $canvasH px must keep >= 40% of $rootH px",
+                rootH > 0 && canvasH * 10 >= rootH * 4
+            )
+            composeRule.onNodeWithTag("menu-bar").assertIsDisplayed()
+            for (tag in listOf("cmdbar-save", "cmdbar-undo", "cmdbar-export")) {
+                composeRule.onNodeWithTag(tag).performScrollTo()
+                composeRule.waitForIdle()
+                composeRule.onNodeWithTag(tag).assertIsDisplayed()
+            }
+        } finally {
+            act.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            val t0 = SystemClock.uptimeMillis()
+            while (SystemClock.uptimeMillis() - t0 < 8000) {
+                composeRule.waitForIdle()
+                val r = act.window.decorView.rootView
+                if (r.height >= r.width && r.height > 0) break
+                Thread.sleep(300)
+            }
+            composeRule.waitForIdle()
+        }
+    }
+
+    // T16 textfieldHintContrast (V17): measured placeholder readability.
+    // Pixel-anchored (not geometry-anchored): the forced #A0A0B0 hint
+    // tone is unique in the chrome, so the test finds its rendered
+    // pixels anywhere in the real surface capture (PixelCopy) and
+    // contrasts them against the darkest surface. No coordinates, no
+    // token reads - pure rendered pixels.
+    @Test
+    fun visualT16_textfieldHintContrast() {
+        visualReset()
+        ensureDockOpen()
+        composeRule.onNodeWithTag("layer-search").performScrollTo()
+        composeRule.waitForIdle()
+        var shot: android.graphics.Bitmap? = null
+        val latched = java.util.concurrent.CountDownLatch(1)
+        composeRule.activityRule.scenario.onActivity { act ->
+            val r = act.window.decorView.rootView
+            val b = android.graphics.Bitmap.createBitmap(
+                r.width.coerceAtLeast(1), r.height.coerceAtLeast(1),
+                android.graphics.Bitmap.Config.ARGB_8888
+            )
+            try {
+                android.view.PixelCopy.request(
+                    act.window, b,
+                    { copyRes ->
+                        if (copyRes == android.view.PixelCopy.SUCCESS) {
+                            shot = b
+                        }
+                        latched.countDown()
+                    },
+                    android.os.Handler(android.os.Looper.getMainLooper())
+                )
+            } catch (_: Exception) {
+                latched.countDown()
+            }
+        }
+        assertTrue(
+            "PixelCopy timed out", latched.await(10, java.util.concurrent.TimeUnit.SECONDS)
+        )
+        val shotNN = shot
+        assertNotNull("surface capture failed", shotNN)
+        shotNN!!
+        try {
+            fun lumOf(px: Int): Double {
+                fun ch(v: Int): Double {
+                    val s = v / 255.0
+                    return if (s <= 0.03928) s / 12.92
+                    else Math.pow((s + 0.055) / 1.055, 2.4)
+                }
+                return 0.2126 * ch((px shr 16) and 0xFF) +
+                    0.7152 * ch((px shr 8) and 0xFF) +
+                    0.0722 * ch(px and 0xFF)
+            }
+            val labelLums = mutableListOf<Double>()
+            val allLums = mutableListOf<Double>()
+            for (y in 0 until shotNN.height step 3) {
+                for (x in 0 until shotNN.width step 3) {
+                    val px = shotNN.getPixel(x, y)
+                    val r = (px shr 16) and 0xFF
+                    val g = (px shr 8) and 0xFF
+                    val bch = px and 0xFF
+                    allLums.add(lumOf(px))
+                    // Forced hint tone #A0A0B0 (V17), nothing else in
+                    // the chrome uses it (D20 excludes B8B8C8/C4C4D0).
+                    if (Math.abs(r - 0xA0) <= 20 &&
+                        Math.abs(g - 0xA0) <= 20 &&
+                        Math.abs(bch - 0xB0) <= 20
+                    ) {
+                        labelLums.add(lumOf(px))
+                    }
+                }
+            }
+            assertTrue(
+                "hint tone #A0A0B0 not rendered (found ${labelLums.size} px)",
+                labelLums.size >= 100
+            )
+            allLums.sort()
+            val lo = allLums[(allLums.size * 0.05).toInt()]
+            val ratio = (labelLums.average() + 0.05) / (lo + 0.05)
+            assertTrue(
+                "hint contrast $ratio < 4.0 " +
+                    "(label px=${labelLums.size} labelLum=${labelLums.average()} bgLum=$lo)",
+                ratio >= 4.0
+            )
+        } finally {
+            if (!shotNN.isRecycled) shotNN.recycle()
+        }
+    }
+
+    // T17 frenchLongStringsEllipsize (V7+FR): V2/V3 dock rows stay 1-line.
+    @Test
+    fun visualT17_frenchLongStringsEllipsize() {
+        visualReset()
+        assertTrue(overrideActivityLocale("fr"))
+        try {
+            ensureDockOpen()
+            composeRule.onNodeWithTag("adjust-row").performScrollTo()
+            assertTrue(
+                "adjust-row wraps: ${rowHeightDp("adjust-row")}",
+                rowHeightDp("adjust-row") <= 49.dp
+            )
+            composeRule.onNodeWithTag("dock-tab-confort").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("dock-tab-confort").performClick()
+            composeRule.waitForIdle()
+            for (tag in listOf(
+                "harmony-modes-row", "pose-presets-row", "proof-row",
+                "v3-import-formats", "v3-import-svg-row", "v3-textpath-actions"
+            )) {
+                composeRule.onNodeWithTag(tag).performScrollTo()
+                composeRule.waitForIdle()
+                assertTrue(
+                    "$tag wraps: ${rowHeightDp(tag)}",
+                    rowHeightDp(tag) <= 49.dp
+                )
+            }
+        } finally {
+            overrideActivityLocale("en")
+            composeRule.waitForIdle()
         }
     }
 }

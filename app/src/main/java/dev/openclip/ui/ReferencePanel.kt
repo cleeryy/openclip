@@ -7,10 +7,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package dev.openclip.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -23,6 +26,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
@@ -54,14 +59,25 @@ fun ReferencePanel(
         )
     }
 
-    Column(modifier = modifier) {
+    Column(modifier = modifier.fillMaxWidth().testTag("v3-reference")) {
         Text(
             stringResource(R.string.reference),
             style = MaterialTheme.typography.titleSmall
         )
         if (modelName == null) {
-            TextButton(onClick = onImportGlb) {
-                Text(stringResource(R.string.reference_import))
+            // V12: the empty state leads with the import CTA (48dp).
+            Button(
+                onClick = onImportGlb,
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("ref-import")
+            ) {
+                Text(
+                    stringResource(R.string.reference_import),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -76,9 +92,23 @@ fun ReferencePanel(
                 }
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // V12: 48dp touch row; without a model the overlay toggle and
+        // the pose sliders stay disabled (hint-toned) — nothing armed
+        // on nothing.
+        val hasModel = modelName != null
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .height(48.dp)
+                .clickable(enabled = hasModel) {
+                    visible = !visible
+                    surface.setRefVisible(visible)
+                }
+                .testTag("ref-show-row")
+        ) {
             Checkbox(
                 checked = visible,
+                enabled = hasModel,
                 onCheckedChange = {
                     visible = it
                     surface.setRefVisible(it)
@@ -86,7 +116,11 @@ fun ReferencePanel(
             )
             Text(
                 stringResource(R.string.reference_show),
-                style = MaterialTheme.typography.labelSmall
+                style = MaterialTheme.typography.labelSmall,
+                color = if (hasModel) Color(0xFFECECF1) else Color(0xFF787888),
+                maxLines = 1,
+                softWrap = false,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
             )
         }
         @Composable
@@ -101,10 +135,15 @@ fun ReferencePanel(
                 Text(
                     label,
                     style = MaterialTheme.typography.labelSmall,
+                    color = if (hasModel) Color(0xFFECECF1) else Color(0xFF787888),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     modifier = Modifier.padding(end = 8.dp)
                 )
                 Slider(
                     value = local,
+                    enabled = hasModel,
                     onValueChange = { local = it },
                     onValueChangeFinished = { onDone(local) },
                     valueRange = range,

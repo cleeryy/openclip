@@ -8,6 +8,7 @@ package dev.openclip.ui
 import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -38,6 +40,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.Image
@@ -70,7 +73,16 @@ fun HarmonyPanel(
             stringResource(R.string.harmony_title),
             style = MaterialTheme.typography.titleSmall
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        // V7: single-line chip labels + scroll (FR "Saturation" etc.
+        // must never wrap the row to two lines).
+        val modesScroll = rememberScrollState()
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .horizontalScroll(modesScroll)
+                .scrollFade("harmony-modes-row", modesScroll)
+                .testTag("harmony-modes-row")
+        ) {
             Harmony.MODES.forEach { m ->
                 FilterChip(
                     selected = mode == m,
@@ -84,7 +96,10 @@ fun HarmonyPanel(
                                     "triadic" -> R.string.harmony_triadic
                                     else -> R.string.harmony_square
                                 }
-                            )
+                            ),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     modifier = Modifier.testTag("v3-harmony-mode-$m")
@@ -191,14 +206,21 @@ fun ChannelsPanel(
         }
         names.forEach { name ->
             Column(modifier = Modifier.testTag("v3-channel-row-$name")) {
+                val opsScroll = rememberScrollState()
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .horizontalScroll(opsScroll)
+                        .scrollFade("v3-channel-ops", opsScroll)
+                        .testTag("v3-channel-ops")
                 ) {
                     Text(
                         name,
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f)
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                     ChannelOp.entries.forEach { op ->
                         TextButton(
@@ -239,7 +261,10 @@ fun ChannelsPanel(
                                         ChannelOp.SUBTRACT -> R.string.channel_op_subtract
                                         ChannelOp.INTERSECT -> R.string.channel_op_intersect
                                     }
-                                )
+                                ),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -350,12 +375,27 @@ fun PosePanel(
                 style = MaterialTheme.typography.bodySmall
             )
         } else {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            // V7: joints scroll with fade; labels never wrap.
+            val jointsScroll = rememberScrollState()
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .horizontalScroll(jointsScroll)
+                    .scrollFade("pose-joints-row", jointsScroll)
+                    .testTag("pose-joints-row")
+            ) {
                 joints.forEach { j ->
                     FilterChip(
                         selected = selected == j.name,
                         onClick = { selected = j.name },
-                        label = { Text(j.name) },
+                        label = {
+                            Text(
+                                j.name,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
                         modifier = Modifier.testTag("v3-pose-joint-${j.name}")
                     )
                 }
@@ -391,10 +431,20 @@ fun PosePanel(
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        // V12: without a model the presets are armed on nothing —
+        // disabled (hint-toned) until joints exist.
+        val presetsScroll = rememberScrollState()
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .horizontalScroll(presetsScroll)
+                .scrollFade("pose-presets-row", presetsScroll)
+                .testTag("pose-presets-row")
+        ) {
             PoseStore.PRESETS.keys.forEach { p ->
                 FilterChip(
                     selected = preset == p,
+                    enabled = joints.isNotEmpty(),
                     onClick = {
                         preset = p
                         v2RunBg {
@@ -411,7 +461,10 @@ fun PosePanel(
                                     "running" -> R.string.pose_running
                                     else -> R.string.pose_standing
                                 }
-                            )
+                            ),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     modifier = Modifier.testTag("v3-pose-preset-$p")
@@ -460,7 +513,14 @@ fun TextPathPanel(
             singleLine = true,
             modifier = Modifier.fillMaxWidth().testTag("v3-textpath-text")
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val textPathActionsScroll = rememberScrollState()
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .horizontalScroll(textPathActionsScroll)
+                .scrollFade("v3-textpath-actions", textPathActionsScroll)
+                .testTag("v3-textpath-actions")
+        ) {
             OutlinedButton(
                 onClick = {
                     v2RunBg {
@@ -578,22 +638,52 @@ fun ProofPanel(
             stringResource(R.string.proof_title),
             style = MaterialTheme.typography.titleSmall
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // V7: the three proof chips scroll with fade ("Gamut warning"
+        // must never stack to two lines).
+        val proofScroll = rememberScrollState()
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .horizontalScroll(proofScroll)
+                .scrollFade("proof-row", proofScroll)
+                .testTag("proof-row")
+        ) {
             FilterChip(
                 selected = enabled,
                 onClick = { enabled = !enabled },
-                label = { Text(stringResource(R.string.proof_enable)) },
+                label = {
+                    Text(
+                        stringResource(R.string.proof_enable),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 modifier = Modifier.testTag("v3-proof-toggle")
             )
             FilterChip(
                 selected = cmyk,
                 onClick = { cmyk = true },
-                label = { Text(stringResource(R.string.proof_cmyk)) }
+                label = {
+                    Text(
+                        stringResource(R.string.proof_cmyk),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             )
             FilterChip(
                 selected = gamut,
                 onClick = { gamut = !gamut },
-                label = { Text(stringResource(R.string.proof_gamut)) },
+                label = {
+                    Text(
+                        stringResource(R.string.proof_gamut),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 modifier = Modifier.testTag("v3-proof-gamut")
             )
         }
@@ -676,15 +766,37 @@ fun ImportPanel(
             stringResource(R.string.import_title),
             style = MaterialTheme.typography.titleSmall
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // V7: format buttons scroll with fade, single-line labels.
+        val importFormatsScroll = rememberScrollState()
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .horizontalScroll(importFormatsScroll)
+                .scrollFade("v3-import-formats", importFormatsScroll)
+                .testTag("v3-import-formats")
+        ) {
             OutlinedButton(
                 onClick = onPickTiff,
                 modifier = Modifier.testTag("v3-import-tiff")
-            ) { Text(stringResource(R.string.import_tiff)) }
+            ) {
+                Text(
+                    stringResource(R.string.import_tiff),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             OutlinedButton(
                 onClick = onPickPdf,
                 modifier = Modifier.testTag("v3-import-pdf")
-            ) { Text(stringResource(R.string.import_pdf)) }
+            ) {
+                Text(
+                    stringResource(R.string.import_pdf),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
         OutlinedTextField(
             value = svgText,
@@ -692,7 +804,14 @@ fun ImportPanel(
             label = { Text(stringResource(R.string.import_svg_hint)) },
             modifier = Modifier.fillMaxWidth().testTag("v3-import-svg-text")
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val importSvgScroll = rememberScrollState()
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .horizontalScroll(importSvgScroll)
+                .scrollFade("v3-import-svg-row", importSvgScroll)
+                .testTag("v3-import-svg-row")
+        ) {
             Button(
                 onClick = {
                     v2RunBg {

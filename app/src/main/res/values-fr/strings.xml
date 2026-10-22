@@ -173,7 +173,7 @@
     <string name="layer_rename_hint2">Double-toucher : renommer</string>
     <string name="layer_longpress">Maintenir : plus</string>
     <string name="layer_opacity_brush">Pinceau %1$d %%</string>
-    <string name="layer_opacity_layer">Calque %1$d %%</string>
+    <string name="layer_opacity_layer">%1$d %%</string>
     <string name="layer_clipped_on">Écrêté au-dessous</string>
     <string name="layer_mask_editing">Masque en cours</string>
     <string name="layer_fx_present">Réglage actif</string>
@@ -199,6 +199,7 @@
     <string name="doc_save">Enregistrer</string>
     <string name="save_ok">Enregistré</string>
     <string name="save_failed">Échec enregistrement</string>
+    <string name="doc_close">Fermer le document</string>
     <string name="doc_close_save">Enregistrer</string>
     <string name="doc_close_discard">Fermer sans enregistrer</string>
     <string name="doc_close_cancel">Annuler</string>
@@ -214,6 +215,8 @@
     <string name="newcanvas_bg_ink">Teinte encre</string>
     <string name="newcanvas_empty_cta">Nouveau canvas…</string>
     <string name="cmdbar_edit">Ranger les actions…</string>
+    <string name="undo_empty">Rien à annuler</string>
+    <string name="redo_empty">Rien à rétablir</string>
     <string name="cmdbar_fullscreen">Plein écran</string>
     <string name="cmdbar_exit_fullscreen">Quitter</string>
     <string name="workspace_draw">Dessin</string>

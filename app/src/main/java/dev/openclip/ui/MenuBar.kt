@@ -78,7 +78,9 @@ fun MenuBar(
                     onClick = {
                         expanded.value = if (expanded.value == index) -1 else index
                     },
-                    modifier = Modifier.height(48.dp)
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("menu-title-$index")
                 ) {
                     Text(
                         menu.title,
@@ -127,6 +129,9 @@ fun CompactMenuBar(
     docTitle: String?,
     docDirty: Boolean,
     onSave: (() -> Unit)?,
+    // V3: with ≥ 2 docs the tabs carry the names — the compact bar
+    // drops its own title (single name source per state).
+    showTitle: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val open = remember { mutableStateOf(false) }
@@ -155,7 +160,7 @@ fun CompactMenuBar(
                 maxLines = 1
             )
         }
-        if (docTitle != null) {
+        if (docTitle != null && showTitle) {
             val shown = if (docTitle.length > 12) docTitle.take(12) + "…" else docTitle
             Text(
                 (if (docDirty) "• " else "") + shown,
@@ -247,6 +252,7 @@ fun ChromeMenuBar(
     docTitle: String?,
     docDirty: Boolean,
     onSave: (() -> Unit)?,
+    showTitle: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     if (compact) {
@@ -255,6 +261,7 @@ fun ChromeMenuBar(
             docTitle = docTitle,
             docDirty = docDirty,
             onSave = onSave,
+            showTitle = showTitle,
             modifier = modifier
         )
     } else {
