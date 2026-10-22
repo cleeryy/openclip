@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -1580,6 +1581,11 @@ fun SvgPanel(
             ) { Text(stringResource(R.string.v2_refresh)) }
             Button(
                 enabled = layer >= 0,
+                // Rebrand : cinabre réservé au CTA premier (export SVG).
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = BrandCinnabar,
+                    contentColor = BrandInk
+                ),
                 onClick = {
                     v2RunBg {
                         val paths = V2Bezier.read(surface, layer)

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">OpenClip</string>
+    <string name="app_name">Calque</string>
     <string name="brush">Pinceau</string>
     <string name="eraser">Gomme</string>
     <string name="opacity">Opacité %1$d%%</string>

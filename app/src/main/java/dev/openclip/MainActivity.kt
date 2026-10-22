@@ -51,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -63,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -212,7 +214,28 @@ class MainActivity : ComponentActivity() {
         val dpi = resources.displayMetrics.density * 160f
 
         setContent {
-            MaterialTheme(colorScheme = StudioColorScheme) {
+            // Rebrand : fonte display maison (Space Grotesk OFL, assets/fonts)
+            // pour titleSmall/titleMedium (chrome + nom du doc) ; corps =
+            // système. Titres en casse phrase, jamais de capitales forcées.
+            val appCtx = LocalContext.current.applicationContext
+            val displayTypography = remember {
+                val medium = FontFamily(
+                    android.graphics.Typeface.createFromAsset(
+                        appCtx.assets, "fonts/space_grotesk_medium.ttf"
+                    )
+                )
+                val bold = FontFamily(
+                    android.graphics.Typeface.createFromAsset(
+                        appCtx.assets, "fonts/space_grotesk_bold.ttf"
+                    )
+                )
+                val base = Typography()
+                base.copy(
+                    titleSmall = base.titleSmall.copy(fontFamily = medium),
+                    titleMedium = base.titleMedium.copy(fontFamily = bold)
+                )
+            }
+            MaterialTheme(colorScheme = StudioColorScheme, typography = displayTypography) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -796,7 +819,7 @@ class MainActivity : ComponentActivity() {
                 exporting.value = true
                 val count = surface.frameCount()
                 val dst = java.io.File(
-                    ctx.cacheDir, "openclip-${System.currentTimeMillis()}.webm"
+                    ctx.cacheDir, "calque-${System.currentTimeMillis()}.webm"
                 )
                 exportClipFrames(surface, count, clipFps.value, dst) { ok ->
                     if (ok) {
@@ -845,7 +868,7 @@ class MainActivity : ComponentActivity() {
         fun offerExportFile(f: java.io.File, mime: String) {
             pendingExportMime.value = mime
             pendingExportFile.value = f
-            createExportFile.launch("openclip-${System.currentTimeMillis()}")
+            createExportFile.launch("calque-${System.currentTimeMillis()}")
         }
 
         // V+2 autosave (opt-in, local only, never mid-stroke).
@@ -1652,7 +1675,7 @@ class MainActivity : ComponentActivity() {
                                     label = stringResource(R.string.export_webm),
                                     onClick = {
                                         createWebm.launch(
-                                            "openclip-${System.currentTimeMillis()}.webm"
+                                            "calque-${System.currentTimeMillis()}.webm"
                                         )
                                     }
                                 ),
@@ -2599,7 +2622,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onExportWebm = {
                                 createWebm.launch(
-                                    "openclip-${System.currentTimeMillis()}.webm"
+                                    "calque-${System.currentTimeMillis()}.webm"
                                 )
                             },
                             onAiUpscale = { frameIdx ->
@@ -2793,7 +2816,7 @@ class MainActivity : ComponentActivity() {
                             exportFormat.value = fmt
                             showExport.value = false
                             createDoc.launch(
-                                "openclip-${System.currentTimeMillis()}"
+                                "calque-${System.currentTimeMillis()}"
                             )
                         },
                         resultLine = status.value

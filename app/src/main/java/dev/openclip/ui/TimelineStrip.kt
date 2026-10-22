@@ -371,6 +371,8 @@ fun TimelineStrip(
                 Text(
                     stringResource(R.string.cel_count, cur + 1, count),
                     style = MaterialTheme.typography.labelSmall,
+                    // Rebrand : pastille i/N en cinabre.
+                    color = BrandCinnabar,
                     maxLines = 1,
                     modifier = Modifier
                         .align(Alignment.TopEnd)

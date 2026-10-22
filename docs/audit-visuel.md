@@ -290,6 +290,10 @@
   pas de `mipmap-*`, pas de monochrome Android 13+).
 - **Effet** : tuile générique, confusable, pas de variante thématique.
   Traité par `docs/rebrand.md` (nouvelle icône adaptive).
+- ✅ **Traité par le rebrand Calque** : `mipmap-anydpi-v26` adaptatif
+  (fond `#141419`, trois feuillets maison), `monochrome` 100/60/30 %,
+  `app_name` → `Calque`, accent cinabre `#E0573A` (CTA premier,
+  pastilles dirty/i-N), fonte display Space Grotesk (OFL).
 
 ## Top 5 (ordre d'attaque)
 

@@ -1,5 +1,9 @@
 # Roadmap — plan de parité (le plus large d'abord, tailles honnêtes)
 
+> Marque : **Calque** (rebrand : nom launcher, icône, accent cinabre,
+> fonte display — package `dev.openclip`, moteur et docs inchangés,
+> voir `docs/rebrand.md`).
+
 Goal: widest possible feature parity with a professional painting app
 (reference scope: pro 2D drawing + animation tool, v5 extended edition —
 see csp-analysis.md) via clean-room reimplementation. Each milestone ships

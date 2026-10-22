@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -813,6 +814,11 @@ fun ImportPanel(
                 .testTag("v3-import-svg-row")
         ) {
             Button(
+                // Rebrand : cinabre réservé au CTA premier (Import SVG).
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = BrandCinnabar,
+                    contentColor = BrandInk
+                ),
                 onClick = {
                     v2RunBg {
                         val res = SvgImport.parse(svgText)

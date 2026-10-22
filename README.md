@@ -1,10 +1,14 @@
-# OpenClip
+# Calque (ex-OpenClip)
 
 Free and open-source painting app for Android tablets — a clean-room
 reimplementation of the workflow conventions users expect from a
 professional illustration tool (pressure brushes, layers, filters,
 animation, comics pages). No proprietary code, assets or formats:
 everything is written from scratch and released under GPL-3.0-or-later.
+
+> Brand note: the launcher/display name is **Calque**; the Android
+> `applicationId` stays **`dev.openclip`** (frozen — updates, saved
+> data and persisted storage are keyed on it).
 
 ## Preview
 

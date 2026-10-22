@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- OpenClip launcher monochrome (Android 13+ themed icons): single
-     white glyph on transparent (clean-room). -->
+<!-- Calque launcher monochrome (Android 13+ themed icons) : les trois
+     feuillets en aplats du ton système, seule l'opacité distingue
+     dos 30 % / milieu 60 % / devant 100 % (clean-room). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -8,9 +9,13 @@
     android:viewportHeight="108">
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,22a32,32 0 1,0 0.01,0z" />
+        android:fillAlpha="0.3"
+        android:pathData="M30,38 H62 Q70,38 70,46 V78 Q70,86 62,86 H30 Q22,86 22,78 V46 Q22,38 30,38 Z" />
     <path
         android:fillColor="#FFFFFF"
-        android:fillAlpha="0.55"
-        android:pathData="M40,64c8,-18 14,-26 28,-32c-4,14 -10,26 -22,32z" />
+        android:fillAlpha="0.6"
+        android:pathData="M38,30 H70 Q78,30 78,38 V70 Q78,78 70,78 H38 Q30,78 30,70 V38 Q30,30 38,30 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,22 H78 Q86,22 86,30 V62 Q86,70 78,70 H46 Q38,70 38,62 V30 Q38,22 46,22 Z" />
 </vector>
