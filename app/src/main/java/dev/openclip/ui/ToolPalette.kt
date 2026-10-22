@@ -85,6 +85,7 @@ fun ToolPalette(
     // fallback (same behavior as before for standalone previews).
     val avail = undoAvail ?: remember { UndoAvailability() }
     var showFilters by remember { mutableStateOf(false) }
+    var showT1 by remember { mutableStateOf(false) }
     var showAdvanced by remember { mutableStateOf(false) }
     var symX by remember { mutableStateOf(false) }
     var symY by remember { mutableStateOf(false) }
@@ -232,6 +233,7 @@ fun ToolPalette(
                 onClick = {
                     if (surface.selectionTool == null) {
                         surface.textArmed = false
+                        surface.paintTool = null
                         surface.selectionTool = SelectionTool.RECT
                     } else {
                         surface.selectionTool = null
@@ -256,6 +258,7 @@ fun ToolPalette(
                 onClick = {
                     if (!surface.textArmed) {
                         surface.selectionTool = null
+                        surface.paintTool = null
                         surface.textArmed = true
                         onStatus(ctx.getString(R.string.text_hint))
                     } else {
@@ -274,6 +277,29 @@ fun ToolPalette(
                 modifier = Modifier
                     .height(48.dp)
                     .testTag("tool-text")
+            )
+            FilterChip(
+                selected = showT1 || surface.paintTool != null,
+                onClick = {
+                    if (surface.paintTool != null) {
+                        surface.paintTool = null
+                        showT1 = false
+                    } else {
+                        showT1 = !showT1
+                    }
+                    toolTick++
+                },
+                label = {
+                    Text(
+                        stringResource(R.string.t1_tools),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                },
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-t1-toggle")
             )
 
             // Compact inline size slider (active tool memory).
@@ -429,9 +455,66 @@ fun ToolPalette(
             }
         }
 
+        // T1 : rangee dediee aux fondations dessin (seau/degrade/figure/
+        // baguette, spec docs/t1-fill.md). Repliable (toggle ci-dessus,
+        // comme la rangee avancee) : fermee par defaut pour ne pas
+        // grever le budget chrome (slice7_chromeBudgetAndCollapse) ;
+        // la rangee principale garde tool-file visible sans scroll sur
+        // tablette (slice7_toolRowNeverClipsWithoutScroll). Armement
+        // exclusif (desarme selection/texte et reciproquement).
+        if (showT1 || surface.paintTool != null) run {
+            val t1Scroll = rememberScrollState()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(t1Scroll)
+                    .scrollFade("tool-t1-row", t1Scroll)
+                    .padding(top = 2.dp)
+                    .testTag("tool-t1-row"),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf(
+                    PaintTool.BUCKET to R.string.t1_bucket,
+                    PaintTool.GRADIENT to R.string.t1_gradient,
+                    PaintTool.SHAPE to R.string.t1_shape,
+                    PaintTool.WAND to R.string.t1_wand
+                ).forEach { (tool, label) ->
+                    FilterChip(
+                        selected = surface.paintTool == tool,
+                        onClick = {
+                            if (surface.paintTool == tool) {
+                                surface.paintTool = null
+                            } else {
+                                surface.selectionTool = null
+                                surface.textArmed = false
+                                surface.paintTool = tool
+                                onStatus(ctx.getString(label))
+                            }
+                            toolTick++
+                        },
+                        label = {
+                            Text(
+                                stringResource(label),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                        },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("tool-t1-" + tool.name.lowercase())
+                    )
+                }
+            }
+        }
+
         // V+1: selection mode selector (shown while armed) + the
         // session-only note (no persistence — closing the doc drops it).
-        if (selArmed) {
+        // T1: extended with quick mask, feather radius and mask undo.
+        var showFeather by remember { mutableStateOf(false) }
+        val quickMask = surface.quickMask
+        if (selArmed || quickMask || surface.paintTool == PaintTool.WAND) {
             val selScroll = rememberScrollState()
             Row(
                 modifier = Modifier
@@ -474,7 +557,105 @@ fun ToolPalette(
                     maxLines = 2,
                     modifier = Modifier.padding(start = 4.dp)
                 )
+                // T1 §5: quick mask toggle + feather radius + mask undo.
+                FilterChip(
+                    selected = quickMask,
+                    onClick = {
+                        surface.quickMask = !surface.quickMask
+                        if (surface.quickMask) {
+                            surface.paintTool = null
+                            surface.selectionTool = null
+                            onStatus(ctx.getString(R.string.t1_quickmask_hint))
+                        }
+                        toolTick++
+                    },
+                    label = {
+                        Text(
+                            stringResource(R.string.t1_quickmask),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    },
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("t1-quickmask-toggle")
+                )
+                if (quickMask) {
+                    FilterChip(
+                        selected = surface.maskStrokeAdd,
+                        onClick = {
+                            surface.maskStrokeAdd = true
+                            toolTick++
+                        },
+                        label = { Text(stringResource(R.string.t1_quickmask_add)) },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("t1-quickmask-add")
+                    )
+                    FilterChip(
+                        selected = !surface.maskStrokeAdd,
+                        onClick = {
+                            surface.maskStrokeAdd = false
+                            toolTick++
+                        },
+                        label = { Text(stringResource(R.string.t1_quickmask_sub)) },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("t1-quickmask-sub")
+                    )
+                }
+                OutlinedButton(
+                    onClick = { showFeather = true },
+                    contentPadding = compactPad,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("t1-feather-open")
+                ) {
+                    Text(
+                        stringResource(R.string.t1_contour),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        if (!surface.undoSelection()) {
+                            onStatus(ctx.getString(R.string.v2_no_selection))
+                        }
+                        toolTick++
+                    },
+                    contentPadding = compactPad,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("t1-selection-undo")
+                ) {
+                    Text(
+                        stringResource(R.string.t1_selection_undo),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                }
             }
+        }
+
+        if (showFeather) {
+            FeatherDialog(surface = surface, onDismiss = { showFeather = false })
+        }
+
+        // T1: panels of the armed paint tool (bucket/gradient/shape/wand).
+        @Suppress("UNUSED_EXPRESSION")
+        toolTick
+        if (surface.paintTool != null) {
+            T1PanelHost(
+                surface = surface,
+                inkColor = inkColor,
+                onStatus = onStatus
+            )
         }
 
         if (showAdvanced) {

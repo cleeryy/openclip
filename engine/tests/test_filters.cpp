@@ -63,10 +63,13 @@ TEST(filters_registry_known) {
     CHECK(canApply("mosaic"));
     CHECK(canApply("gradientMap"));
     CHECK(canApply("denoise"));  // V+3 classic
+    CHECK(canApply("unsharp"));  // T1
+    CHECK(canApply("colorBalance"));  // T1
+    CHECK(canApply("threshold"));  // T1
     CHECK(!canApply("nope"));
     CHECK(!canApply("GaussianBlur"));
     CHECK(!canApply(""));
-    CHECK_EQ(openclip::filterNames().size(), (std::size_t)11);
+    CHECK_EQ(openclip::filterNames().size(), (std::size_t)14);
 }
 
 TEST(filters_unknown_no_side_effects) {
@@ -330,4 +333,189 @@ TEST(filters_denoise_zero_identity_bad_params_refused) {
     CHECK(!openclip::applyFilter(
         s, "denoise", "{\"strength\":0.5,\"mode\":\"wavelet\"}", err));
     CHECK(s.bytes() == ref);
+}
+
+// --- T1 additions (ARCHITECTURE.md "T1 additions") ---
+
+TEST(filters_unsharp_identity_at_zero) {
+    Surface s = solid(24, 24, 90, 140, 200, 255);
+    s.set(5, 5, Pixel{255, 0, 0, 255});
+    s.set(18, 18, Pixel{0, 0, 0, 255});
+    const auto ref = s.bytes();
+    std::string err;
+    CHECK(openclip::applyFilter(
+        s, "unsharp",
+        "{\"radius\":2,\"amount\":0,\"threshold\":0}", err));
+    CHECK(s.bytes() == ref);  // amount 0 = byte-identical no-op
+    CHECK(openclip::canApply("unsharp"));
+}
+
+TEST(filters_unsharp_sharpens_edge) {
+    // Vertical step edge: blur radius 2 mixes across it; unsharp must
+    // push the two sides apart (local contrast up) without touching
+    // alpha.
+    Surface s(32, 16);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 32; ++x)
+            s.set(x, y, x < 16 ? Pixel{60, 60, 60, 255}
+                               : Pixel{180, 180, 180, 255});
+    const auto dark0 = s.get(14, 8).r, lite0 = s.get(17, 8).r;
+    std::string err;
+    CHECK(openclip::applyFilter(
+        s, "unsharp",
+        "{\"radius\":2,\"amount\":1,\"threshold\":0}", err));
+    const auto dark1 = s.get(14, 8).r, lite1 = s.get(17, 8).r;
+    CHECK(lite1 - dark1 > lite0 - dark0);  // edge contrast grew
+    CHECK(alphaColEq(s, solid(32, 16, 0, 0, 0, 255)));
+    // Bad radius is refused, surface untouched.
+    const auto ref = s.bytes();
+    CHECK(!openclip::applyFilter(
+        s, "unsharp", "{\"radius\":0,\"amount\":1}", err));
+    CHECK(!err.empty());
+    CHECK(s.bytes() == ref);
+}
+
+TEST(filters_unsharp_threshold_calms_flat) {
+    // Flat field + one hot pixel: a high threshold must leave the
+    // surface quasi-intact (the impulse is below the threshold vs its
+    // blurred neighborhood... here we assert the flat area is exact).
+    Surface s = solid(24, 24, 128, 128, 128, 255);
+    const auto ref = s.bytes();
+    std::string err;
+    CHECK(openclip::applyFilter(
+        s, "unsharp",
+        "{\"radius\":2,\"amount\":2,\"threshold\":32}", err));
+    CHECK(s.bytes() == ref);  // flat + strong threshold = intact
+}
+
+TEST(filters_balance_neutral_identity) {
+    Surface s = solid(20, 20, 11, 199, 88, 255);
+    s.set(3, 3, Pixel{10, 10, 10, 255});
+    s.set(16, 16, Pixel{250, 250, 250, 255});
+    const auto ref = s.bytes();
+    std::string err;
+    CHECK(openclip::applyFilter(
+        s, "colorBalance",
+        "{\"shadows\":\"0,0,0\",\"midtones\":\"0,0,0\","
+        "\"highlights\":\"0,0,0\"}",
+        err));
+    CHECK(s.bytes() == ref);  // neutral = byte-identical
+    CHECK(openclip::canApply("colorBalance"));
+}
+
+TEST(filters_balance_shadows_only_dark) {
+    // Strong red push in shadows only: dark pixels move, bright
+    // pixels stay within +/-1 (zone weights ~0 at luma 1).
+    Surface s(16, 16);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x)
+            s.set(x, y, x < 8 ? Pixel{20, 20, 20, 255}
+                              : Pixel{250, 250, 250, 255});
+    std::string err;
+    CHECK(openclip::applyFilter(
+        s, "colorBalance",
+        "{\"shadows\":\"100,0,0\",\"midtones\":\"0,0,0\","
+        "\"highlights\":\"0,0,0\"}",
+        err));
+    CHECK(s.get(2, 2).r > 20 + 40);  // dark red pushed hard
+    const auto b = s.get(13, 13);
+    CHECK(std::abs((int)b.r - 250) <= 1);
+    CHECK(std::abs((int)b.g - 250) <= 1);
+    CHECK(std::abs((int)b.b - 250) <= 1);
+    CHECK(alphaColEq(s, solid(16, 16, 0, 0, 0, 255)));
+}
+
+TEST(filters_balance_clamp_no_overflow) {
+    // Extreme pushes on white must clamp, never overflow: rgb <=
+    // alpha everywhere, alpha bytes untouched.
+    Surface s = solid(12, 12, 250, 250, 250, 255);
+    std::string err;
+    CHECK(openclip::applyFilter(
+        s, "colorBalance",
+        "{\"shadows\":\"100,100,100\",\"midtones\":\"100,100,100\","
+        "\"highlights\":\"100,100,100\"}",
+        err));
+    for (int y = 0; y < 12; ++y)
+        for (int x = 0; x < 12; ++x) {
+            const auto p = s.get(x, y);
+            CHECK(p.r <= p.a);
+            CHECK(p.g <= p.a);
+            CHECK(p.b <= p.a);
+            CHECK_EQ(p.a, 255);
+        }
+    // Malformed triplet = error + untouched.
+    Surface t = solid(8, 8, 100, 100, 100, 255);
+    const auto ref = t.bytes();
+    CHECK(!openclip::applyFilter(
+        t, "colorBalance", "{\"shadows\":\"hot,pink,now\"}", err));
+    CHECK(!err.empty());
+    CHECK(t.bytes() == ref);
+    CHECK(!openclip::applyFilter(
+        t, "colorBalance", "{\"shadows\":\"0,0,500\"}", err));
+    CHECK(t.bytes() == ref);
+}
+
+TEST(filters_threshold_binary) {
+    // Only 0/255 outputs; alpha untouched (semi-transparent keeps
+    // its alpha, rgb clamped by the registry to [0,alpha]).
+    Surface s(16, 8);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 16; ++x)
+            s.set(x, y, Pixel{(std::uint8_t)(x * 16),
+                              (std::uint8_t)(x * 16),
+                              (std::uint8_t)(x * 16), 200});
+    std::string err;
+    CHECK(openclip::applyFilter(s, "threshold", "{\"level\":128}", err));
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 16; ++x) {
+            const auto p = s.get(x, y);
+            CHECK(p.r == 0 || p.r == 200);  // clamped to alpha
+            CHECK(p.g == 0 || p.g == 200);
+            CHECK(p.b == 0 || p.b == 200);
+            CHECK_EQ(p.a, 200);
+            CHECK_EQ(p.r, p.g);
+            CHECK_EQ(p.g, p.b);
+        }
+    CHECK(openclip::canApply("threshold"));
+}
+
+TEST(filters_threshold_level_orders) {
+    Surface w = solid(8, 8, 200, 200, 200, 255);
+    Surface b = solid(8, 8, 10, 10, 10, 255);
+    std::string err;
+    // Level 0: everything >= 0 luma goes white...
+    CHECK(openclip::applyFilter(w, "threshold", "{\"level\":0}", err));
+    CHECK(openclip::applyFilter(b, "threshold", "{\"level\":0}", err));
+    CHECK_EQ(w.get(0, 0).r, 255);
+    CHECK_EQ(b.get(0, 0).r, 255);
+    // ...level 255: only pure-white luma survives.
+    Surface w2 = solid(8, 8, 200, 200, 200, 255);
+    Surface pure = solid(8, 8, 255, 255, 255, 255);
+    CHECK(openclip::applyFilter(w2, "threshold", "{\"level\":255}", err));
+    CHECK(openclip::applyFilter(pure, "threshold", "{\"level\":255}", err));
+    CHECK_EQ(w2.get(0, 0).r, 0);
+    CHECK_EQ(pure.get(0, 0).r, 255);
+}
+
+TEST(filters_threshold_dither_bounded) {
+    // Mid-gray field at the exact level: dither must produce a mixed
+    // black/white pattern whose local mean stays near the level
+    // (within +/-10% of the 255 range).
+    Surface s = solid(32, 32, 128, 128, 128, 255);
+    std::string err;
+    CHECK(openclip::applyFilter(
+        s, "threshold", "{\"level\":128,\"dither\":1}", err));
+    long sum = 0;
+    bool seenBlack = false, seenWhite = false;
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) {
+            const auto v = s.get(x, y).r;
+            CHECK(v == 0 || v == 255);
+            sum += v;
+            if (v == 0) seenBlack = true;
+            if (v == 255) seenWhite = true;
+        }
+    CHECK(seenBlack && seenWhite);  // dither actually mixed
+    const double mean = sum / 1024.0;
+    CHECK(std::fabs(mean - 128.0) <= 25.5);  // +/-10%
 }

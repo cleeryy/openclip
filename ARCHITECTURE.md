@@ -289,6 +289,139 @@ Engine owns document truth; the app never caches swapped pixels.
 Layers, filters, selection, vector, animation extend the same pattern
 with explicit additions to `include/openclip/` only.
 
+T1 additions (decided 2026-10-22, fondations dessin round —
+spec docs/t1-fill.md; §6 is 0-JNI registry growth, §1–§4 add exactly
+FOUR symbols, §5 is 0-JNI app-side nominal):
+
+- Filter registry growth (0 symbol, `filters.h` + `filters.cpp`):
+  `nApplyFilter` routes three new names with the M3 params rule
+  (unknown keys ignored, missing keys = documented defaults, alpha
+  never touched, rgb clamped to [0,alpha], false + byte-identical
+  surface on invalid params):
+  - `unsharp` `{"radius":2.0, "amount":0.6, "threshold":2}` — true
+    unsharp mask with a parameterizable radius: out = c +
+    amount*(c - gauss(c,radius)) per channel when |c-blur| >
+    threshold, else c. radius must be in (0,64] (same bound as
+    gaussianBlur), amount >= 0 (0 = byte-identical no-op), threshold
+    0..255. (The M3 `sharpen` stays: amount-only against sigma=1.0.)
+  - `colorBalance` `{"shadows":"0,0,0","midtones":"0,0,0",
+    "highlights":"0,0,0"}` — three triplets "cr,mv,jb" each
+    -100..+100 (cyan-red / magenta-green / yellow-blue per
+    adversary channel, clamped). Zone weights are soft luma ramps:
+    shadows = 1-luma01 clamped, highlights = luma01, midtones =
+    1-|2*luma01-1| (peak at mid gray); out-of-range or malformed
+    triplets are an error (false + untouched). All-zero triplets =
+    byte-identical no-op.
+  - `threshold` `{"level":128, "dither":0}` — Rec.601 luma >= level ?
+    white : black (level clamped 0..255; level 0 = all white on any
+    non-empty surface, 255 = all black except pure-white luma).
+    dither != 0 = ordered Bayer-8 (same matrix as the V+2 GIF
+    writer) deciding the binary output. Output is strictly 0/255
+    per channel (alpha untouched, so rgb <= alpha holds).
+  `canApply`/`filterNames` grow by exactly these three names.
+- `nFloodFill(handle, x, y, colorHex, json): Boolean` — bucket fill
+  on the ACTIVE raster layer (`openclip/fill.h::floodFill`, clean-room
+  scanline flood, iterative span queue — never recursive; visited =
+  W*H bitset, OOM = false + untouched). json
+  `{tolerance:0..1 (default 0.12), antialias:bool (default true),
+  expandPx:0..2 (default 0), sampleMerged:bool (default false)}`
+  (unknown keys ignored, missing = defaults, M3 rule). Semantics:
+  seed = pixel (x,y) (sampled on the composite when sampleMerged —
+  the shim composites first and passes the seed color, the kernel
+  stays composite-free); region = 4-connected pixels with
+  |lum(px)-lum(seed)| <= tol*255 (Rec.601 luma, same weights as
+  gradientMap); paint = session ink straight rgb source-over;
+  expandPx dilates the painted region outward (anti-halo under the
+  stroke); antialias paints the 1px frontier row at half coverage
+  (documented approximation, premultiplied-safe, rgb <= alpha). The engine selection mask
+  (V+2, when set via nSetSelectionMask) constrains the fill; when
+  unset the app-side V+1 guard (tap outside the selection refused
+  before the call) applies — never both sources at once. Undoable
+  via full-layer tile snapshots (filter pattern: touchTile all,
+  endStroke on success, cancelStroke on failure). False + layer
+  untouched on: bad handle, seed outside the canvas, non-raster
+  layer, invalid params.
+- `nMagicWand(handle, x, y, json): Boolean` — SAME flood kernel in
+  mask-output mode (`openclip/fill.h::magicWand`, no second
+  implementation: 2 envelopes, 1 algorithm). json
+  `{tolerance:0..1 (default 0.15), source:"layer"|"merged"
+  (default "layer"), combine:"set"|"add"|"sub" (default "set")}`.
+  source="layer" reads the ACTIVE raster layer; "merged" reads the
+  shim-side composite pull (one pull, then the kernel — never a
+  pull loop). Writes the engine selection mask V+2 (full-resolution
+  0/255 bytes, session-global like nSetSelectionMask: cleared on
+  frame structural ops and loads). combine merges with the live
+  mask (set = replace, add = OR, sub = AND-NOT). The app mirrors
+  the mask app-side for the marching-ants overlay (same dual path
+  as nSetSelectionMask). Selection is metadata: NOT in engine undo
+  (V+1 contract, session-only). False when: bad handle, seed
+  outside, non-raster layer, unknown source/combine. Minimum-area
+  rule (spec §4.2: regions < 4x4px are rejected with a hint) is
+  enforced APP-SIDE BEFORE any engine call: the Kotlin mirror is
+  computed first and below the threshold nothing is written on
+  either side (neither engine nor app) — keeps the kernel honest
+  and testable, no state to roll back.
+  Tranche decision (§4.4 prototype measurement, 2026-10-22, KVM
+  emulator x86_64): the Kotlin mirror floods ~1 Mpx in 211 ms
+  (wandKotlinMirrorTiming1024, near-full-canvas worst case). The
+  0-JNI repli is DECLINED: the mirror runs either way (overlay +
+  stroke gate need local bytes), while the engine writer stays
+  exact for translucent content (premultiplied metric) and avoids
+  a full-res PNG encode/decode round trip per tap, which costs at
+  least as much. Single authoritative writer per side: app mask
+  for overlay/strokes, engine mask for blit/paint constraints —
+  both derived from the same metric and source bytes.
+- `nPaintGradient(handle, json): Boolean` — paints a gradient on the
+  ACTIVE raster layer (`openclip/gradient.h::paintGradient`,
+  clean-room, source-over, opaque stops). json `{kind:"linear"|
+  "radial"|"free", x0,y0,x1,y1, stops:["#RRGGBB:pos",...] (2..8,
+  sorted by pos inside the engine), pts:[[x,y]...]? (free mode:
+  one anchor per stop), dither:bool (default true)}` (same stops
+  encoding as gradientMap; unknown keys ignored, M3 rule).
+  linear: projection of each pixel onto p0->p1; radial: distance
+  from (x0,y0) over |(x1,y1)-(x0,y0)| (zero radius = error);
+  free: normalized inverse-distance weights w_i = 1/(d_i^2+eps)
+  over the stop anchors (bounded, <= 8 stops). Dithering =
+  deterministic LCG ±1 LSB (same fixed seed as addNoise:
+  reproducible call to call, |delta| <= 1 per channel vs
+  dither=false). Engine selection mask constrains when set,
+  app-side V+1 guard otherwise (same rule as nFloodFill). Undoable
+  via full-layer tile snapshots (filter pattern). False + layer
+  untouched on: bad handle, non-raster layer, < 2 stops, stops
+  with unparseable color/pos, free mode with mismatched pts/stops
+  sizes, degenerate geometry (zero-length linear segment, zero
+  radial radius). Alpha-gradient stops are refused (opaque stops
+  only — complex alpha gradients are FUTURE, §T1 spec).
+- `nStampShape(handle, json): Boolean` — rasterizes ONE shape on the
+  ACTIVE raster layer (`openclip/shapes.h::stampShape`, clean-room,
+  coverage 4x4 supersampling = antialiased, source-over, stroke
+  centered on the edge with half outside). json = ShapeSpec
+  serialized `{kind:"rect"|"ellipse"|"polygon", x0,y0,x1,y1
+  (frame, normalized shim-side), sides:3..12 (polygon, default 4),
+  rotation:degrees (polygon only), corner:radius (rect only),
+  fillOn:bool + fill:"#RRGGBB", strokeOn:bool + stroke:"#RRGGBB"
+  + strokeW:1..64}` (unknown keys ignored, missing = code
+  defaults, M3 rule). No editable vector paths (M6 is untouched):
+  pixels are committed in 1 undo step. Engine selection mask
+  constrains when set, app-side V+1 guard otherwise. False + layer
+  untouched on: bad handle, non-raster layer, degenerate frame
+  (zero area), sides outside 3..12, both fill and stroke off.
+- §5 (feather/blur + quick mask) is 0-JNI BY CONSTRUCTION
+  (nominal path, spec §5.3): the mask stays the app-side
+  `SelectionMask` ByteArray (now soft 0..255 alpha, binary
+  setters unchanged); feather = separable gaussian blur in Kotlin
+  (radius 0..32 dialog slider, radius 0 = byte-identical); quick
+  mask = session toggle rendering the mask as a 50% red veil with
+  brush-radius disc stamping (white = add, black = remove);
+  app-side undo stack (depth 20, session-only). The conditional
+  `nFeatherSelection` symbol is NOT added (prototype measurement
+  on the 2048px canvas decides; if a later slice measures > 300 ms
+  on the target tablet it is documented here BEFORE code, per the
+  frozen-JNI rule).
+- No single `nPaintOp` generic symbol: the four ops keep their own
+  names (the spec's review alternative is declined — explicit
+  names keep `check_jni_symbols.sh` and per-op tests readable).
+
 ## Threading
 
 App: input on UI thread → collection into a lock-free stroke queue →

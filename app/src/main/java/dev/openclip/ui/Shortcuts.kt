@@ -20,6 +20,8 @@ enum class ShortcutAction {
     PLAY_TOGGLE,
     FULLSCREEN,
     HELP,
+    // T1 §5: bascule du masque rapide (lettre libre, pas de conflit).
+    QUICK_MASK,
 }
 
 data class ShortcutBinding(
@@ -51,6 +53,7 @@ object ShortcutMap {
         ShortcutBinding(KeyEvent.KEYCODE_SPACE, action = ShortcutAction.PLAY_TOGGLE, labelEn = "Play/pause", labelFr = "Lecture/pause"),
         ShortcutBinding(KeyEvent.KEYCODE_F, action = ShortcutAction.FULLSCREEN, labelEn = "Fullscreen", labelFr = "Plein écran"),
         ShortcutBinding(KeyEvent.KEYCODE_SLASH, shift = true, action = ShortcutAction.HELP, labelEn = "Shortcuts (?)", labelFr = "Raccourcis (?)"),
+        ShortcutBinding(KeyEvent.KEYCODE_Q, action = ShortcutAction.QUICK_MASK, labelEn = "Quick mask", labelFr = "Masque rapide"),
     )
 
     /** Pure dispatch: exact (keyCode, ctrl, shift) match wins. */

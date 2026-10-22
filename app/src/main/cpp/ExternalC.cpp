@@ -42,10 +42,13 @@
 #include "openclip/canvas.h"
 #include "openclip/cels.h"
 #include "openclip/filters.h"
+#include "openclip/fill.h"
 #include "openclip/gif.h"
+#include "openclip/gradient.h"
 #include "openclip/guides.h"
 #include "openclip/ora.h"
 #include "openclip/ref.h"
+#include "openclip/shapes.h"
 #include "openclip/stroke.h"
 #include "openclip/surface.h"
 #include "openclip/transform.h"
@@ -1224,6 +1227,349 @@ Java_dev_openclip_engine_EngineHost_nApplyTone(JNIEnv* env, jclass,
         h.cancelStroke(cur(s));
     }
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---- T1 paint tools (ARCHITECTURE.md "T1 additions") ----
+//
+// Shared guards: the ACTIVE layer must be a paintable raster layer
+// (top-level, not a group, not vector, no adjustment descriptor —
+// adjustment layers carry no pixels, vector layers rasterize M6 data
+// at composite time so a surface write would be invisible). Groups,
+// vector and adjustment layers are refused (false, layer untouched);
+// visibility is left to the app guard (same as nApplyFilter). When
+// the engine selection mask (V+2) is live it constrains the paint;
+// otherwise the app-side V+1 guard (tap refused before the call)
+// applies — never both sources at once (§1.4/§2.4/§3.4).
+
+bool activePaintLayer(Session* s, std::size_t& idx) {
+    if (!s) return false;
+    const int active = cur(s).activeLayer();
+    if (active < 0 ||
+        active >= static_cast<int>(cur(s).layerCount()))
+        return false;
+    idx = static_cast<std::size_t>(active);
+    const openclip::Layer& ly = cur(s).layer(idx);
+    if (ly.isGroup || ly.isVector || !ly.adjustType.empty()) return false;
+    return true;
+}
+
+// Undoable whole-surface paint helper (filter pattern): snapshots
+// every tile of the active layer, runs `op`, ends or cancels.
+template <typename Op>
+bool paintUndoable(Session* s, std::size_t layerIdx, Op op) {
+    openclip::History& h = hist(s);
+    h.beginStroke();
+    openclip::Layer& ly = cur(s).layer(layerIdx);
+    for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
+        for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
+            h.touchTile(cur(s), layerIdx, tx, ty);
+    const bool ok = op(ly.surface);
+    if (ok) {
+        h.endStroke(cur(s));
+    } else {
+        h.cancelStroke(cur(s));
+    }
+    return ok;
+}
+
+// Selection bytes for paint ops: live engine mask, or nullptr when
+// unset (the app-side V+1 guard owns the constraint then).
+const std::uint8_t* paintMask(Session* s, int& stride) {
+    stride = 0;
+    if (!s->selMaskOn || s->selMask.empty()) return nullptr;
+    if ((int)s->selMask.size() != cur(s).width() * cur(s).height())
+        return nullptr;
+    stride = cur(s).width();
+    return s->selMask.data();
+}
+
+// Shim-side JSON bool (M3 rule: unknown keys ignored, missing =
+// default). Accepts true/false literals only.
+bool jsonBool(const std::string& json, const char* key, bool fallback) {
+    const std::string pat = std::string("\"") + key + "\"";
+    const std::size_t at = json.find(pat);
+    if (at == std::string::npos) return fallback;
+    const std::size_t colon = json.find(':', at + pat.size());
+    if (colon == std::string::npos) return fallback;
+    std::size_t p = colon + 1;
+    while (p < json.size() && (json[p] == ' ' || json[p] == '\t')) ++p;
+    if (json.compare(p, 4, "true") == 0) return true;
+    if (json.compare(p, 5, "false") == 0) return false;
+    return fallback;
+}
+
+// Parse a "#RRGGBB:pos" stops array after the "stops" key into engine
+// stops (positions parsed as float, unsorted — the engine sorts).
+// Returns false when fewer than 2 valid stops parse.
+bool parsePaintStops(const std::string& json,
+                     std::vector<openclip::GradientStop>& stops) {
+    stops.clear();
+    const std::size_t sk = json.find("\"stops\"");
+    if (sk == std::string::npos) return false;
+    const std::size_t open = json.find('[', sk + 7);
+    if (open == std::string::npos) return false;
+    std::size_t p = open + 1;
+    while (p < json.size() && stops.size() < 8) {
+        const std::size_t hash = json.find('#', p);
+        if (hash == std::string::npos) break;
+        if (hash + 7 >= json.size()) break;
+        std::uint8_t r = 0, g = 0, b = 0;
+        if (!parseColor(json.substr(hash, 7), r, g, b)) {
+            p = hash + 1;
+            continue;
+        }
+        float pos = -1.0f;
+        const std::size_t colon = json.find(':', hash + 7);
+        if (colon != std::string::npos && colon < hash + 9) {
+            char* e = nullptr;
+            const double v = std::strtod(json.c_str() + colon + 1, &e);
+            if (e != json.c_str() + colon + 1 &&
+                v >= 0.0 && v <= 1.0)
+                pos = static_cast<float>(v);
+        }
+        if (pos >= 0.0f) {
+            openclip::GradientStop st;
+            st.r = r;
+            st.g = g;
+            st.b = b;
+            st.pos = pos;
+            stops.push_back(st);
+        }
+        p = hash + 8;
+        const std::size_t close = json.find(']', p);
+        if (close != std::string::npos &&
+            json.find('#', p) == std::string::npos)
+            break;
+    }
+    return stops.size() >= 2;
+}
+
+// Parse a [[x,y],...] point array after `key` (free-gradient anchors).
+// Depth-tracked: inner ']' closes a point, the outer ']' ends the
+// array (a naive first-']'-wins scan would stop after anchor 0).
+bool parsePtsArray(const std::string& json, const char* key,
+                   std::vector<std::pair<float, float>>& pts) {
+    pts.clear();
+    const std::string pat = std::string("\"") + key + "\"";
+    const std::size_t kk = json.find(pat);
+    if (kk == std::string::npos) return false;
+    const std::size_t open = json.find('[', kk + pat.size());
+    if (open == std::string::npos) return false;
+    int depth = 0;
+    std::size_t p = open;
+    while (p < json.size() && pts.size() < 8) {
+        const char c = json[p];
+        if (c == '[') {
+            ++depth;
+            ++p;
+            continue;
+        }
+        if (c == ']') {
+            if (--depth <= 0) break;
+            ++p;
+            continue;
+        }
+        if ((c >= '0' && c <= '9') || c == '-' || c == '.') {
+            char* e1 = nullptr;
+            const double x = std::strtod(json.c_str() + p, &e1);
+            if (e1 == json.c_str() + p) {
+                ++p;
+                continue;
+            }
+            std::size_t q = static_cast<std::size_t>(e1 - json.c_str());
+            while (q < json.size() && (json[q] == ' ' || json[q] == ','))
+                ++q;
+            char* e2 = nullptr;
+            const double y = std::strtod(json.c_str() + q, &e2);
+            if (e2 == json.c_str() + q) {
+                p = q + 1;
+                continue;
+            }
+            pts.emplace_back(static_cast<float>(x), static_cast<float>(y));
+            p = static_cast<std::size_t>(e2 - json.c_str());
+            continue;
+        }
+        ++p;
+    }
+    return !pts.empty();
+}
+
+// T1 bucket: nFloodFill(handle, x, y, colorHex, json). json M3 rule:
+// {tolerance:0..1 (0.12), antialias:bool (true), expandPx:0..2 (0),
+// sampleMerged:bool (false)}. Seed = (x,y) on the active layer, or
+// the composite pull when sampleMerged (one pull, kernel stays
+// composite-free via floodFillSeeded).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nFloodFill(JNIEnv* env, jclass,
+                                               jlong handle, jint x, jint y,
+                                               jstring colorHex,
+                                               jstring paramsJson) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    std::size_t layer = 0;
+    if (!activePaintLayer(s, layer)) return JNI_FALSE;
+    std::uint8_t r = 20, g = 20, b = 20;
+    if (!parseColor(toStd(env, colorHex), r, g, b)) return JNI_FALSE;
+    const std::string j = paramsJson ? toStd(env, paramsJson) : std::string();
+    openclip::FillParams p;
+    p.tolerance =
+        static_cast<float>(jsonNum(j, "tolerance", p.tolerance));
+    p.antialias = jsonBool(j, "antialias", p.antialias);
+    p.expandPx = static_cast<int>(jsonNum(j, "expandPx", p.expandPx));
+    const bool merged = jsonBool(j, "sampleMerged", false);
+    int stride = 0;
+    const std::uint8_t* mask = paintMask(s, stride);
+    if (merged) {
+        openclip::Surface comp;
+        cur(s).composite(comp);
+        if (x < 0 || y < 0 || x >= comp.width() || y >= comp.height())
+            return JNI_FALSE;
+        const std::vector<std::uint8_t>& px = comp.bytes();
+        const std::size_t i =
+            (static_cast<std::size_t>(y) * comp.width() + x) * 4;
+        const double lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+        return paintUndoable(s, layer, [&](openclip::Surface& surf) {
+            std::string err;
+            return openclip::floodFillSeeded(surf, x, y, lum, r, g, b, p,
+                                             mask, stride, err);
+        }) ? JNI_TRUE : JNI_FALSE;
+    }
+    return paintUndoable(s, layer, [&](openclip::Surface& surf) {
+        std::string err;
+        return openclip::floodFill(surf, x, y, r, g, b, p, mask, stride, err);
+    }) ? JNI_TRUE : JNI_FALSE;
+}
+
+// T1 wand: nMagicWand(handle, x, y, json). json M3 rule:
+// {tolerance:0..1 (0.15), source:"layer"|"merged" ("layer"),
+// combine:"set"|"add"|"sub" ("set")}. Writes the engine selection
+// mask V+2 (session-global, cleared on frame structural ops/loads);
+// the app mirrors it app-side for the marching-ants overlay.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nMagicWand(JNIEnv* env, jclass,
+                                               jlong handle, jint x, jint y,
+                                               jstring paramsJson) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    std::size_t layer = 0;
+    if (!activePaintLayer(s, layer)) return JNI_FALSE;
+    const std::string j = paramsJson ? toStd(env, paramsJson) : std::string();
+    const float tol =
+        static_cast<float>(jsonNum(j, "tolerance", 0.15));
+    std::string source = jsonStr(j, "source");
+    if (source.empty()) source = "layer";
+    std::string combineS = jsonStr(j, "combine");
+    if (combineS.empty()) combineS = "set";
+    int combine = -1;
+    if (combineS == "set") combine = 0;
+    else if (combineS == "add") combine = 1;
+    else if (combineS == "sub") combine = 2;
+    if (combine < 0) return JNI_FALSE;
+    const openclip::Surface* src = nullptr;
+    openclip::Surface comp;
+    if (source == "merged") {
+        cur(s).composite(comp);
+        src = &comp;
+    } else if (source == "layer") {
+        src = &cur(s).layer(layer).surface;
+    } else {
+        return JNI_FALSE;
+    }
+    const int w = src->width(), h = src->height();
+    if (w <= 0 || h <= 0) return JNI_FALSE;
+    if (combine == 0 || (int)s->selMask.size() != w * h)
+        s->selMask.assign(static_cast<std::size_t>(w) * h, 0);
+    std::string err;
+    if (!openclip::magicWand(*src, x, y, tol, combine, s->selMask.data(),
+                             w, err))
+        return JNI_FALSE;
+    s->selMaskOn = true;
+    // Minimum-area rule (spec §4.2) is enforced APP-SIDE: the engine
+    // writes the true region; the app drops sub-4x4 selections with a
+    // hint (keeps the kernel honest and testable).
+    return JNI_TRUE;
+}
+
+// T1 gradient: nPaintGradient(handle, json). Stops use the gradientMap
+// encoding ["#RRGGBB:pos",...] (consistency); free anchors pts:[[x,y]].
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nPaintGradient(JNIEnv* env, jclass,
+                                                   jlong handle,
+                                                   jstring paramsJson) {
+    Session* s = asSession(handle);
+    if (!s || !paramsJson) return JNI_FALSE;
+    std::size_t layer = 0;
+    if (!activePaintLayer(s, layer)) return JNI_FALSE;
+    const std::string j = toStd(env, paramsJson);
+    openclip::GradientSpec spec;
+    std::string kind = jsonStr(j, "kind");
+    spec.kind = kind.empty() ? "linear" : kind;
+    spec.x0 = static_cast<float>(jsonNum(j, "x0", 0));
+    spec.y0 = static_cast<float>(jsonNum(j, "y0", 0));
+    spec.x1 = static_cast<float>(jsonNum(j, "x1", 1));
+    spec.y1 = static_cast<float>(jsonNum(j, "y1", 0));
+    if (!parsePaintStops(j, spec.stops)) return JNI_FALSE;
+    if (spec.kind == "free") {
+        if (!parsePtsArray(j, "pts", spec.pts)) return JNI_FALSE;
+    }
+    spec.dither = jsonBool(j, "dither", true);
+    int stride = 0;
+    const std::uint8_t* mask = paintMask(s, stride);
+    return paintUndoable(s, layer, [&](openclip::Surface& surf) {
+        std::string err;
+        return openclip::paintGradient(surf, spec, mask, stride, err);
+    }) ? JNI_TRUE : JNI_FALSE;
+}
+
+// T1 figure: nStampShape(handle, json). Frame normalized shim-side
+// (clamped to canvas); colors "#RRGGBB" (missing = black).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nStampShape(JNIEnv* env, jclass,
+                                                jlong handle,
+                                                jstring paramsJson) {
+    Session* s = asSession(handle);
+    if (!s || !paramsJson) return JNI_FALSE;
+    std::size_t layer = 0;
+    if (!activePaintLayer(s, layer)) return JNI_FALSE;
+    const std::string j = toStd(env, paramsJson);
+    openclip::ShapeSpec spec;
+    std::string kind = jsonStr(j, "kind");
+    spec.kind = kind.empty() ? "rect" : kind;
+    const float w = (float)cur(s).width(), h = (float)cur(s).height();
+    auto clampX = [&](double v) {
+        return (float)(v < 0 ? 0 : (v > w ? w : v));
+    };
+    auto clampY = [&](double v) {
+        return (float)(v < 0 ? 0 : (v > h ? h : v));
+    };
+    spec.x0 = clampX(jsonNum(j, "x0", 0));
+    spec.y0 = clampY(jsonNum(j, "y0", 0));
+    spec.x1 = clampX(jsonNum(j, "x1", 1));
+    spec.y1 = clampY(jsonNum(j, "y1", 1));
+    spec.sides = static_cast<int>(jsonNum(j, "sides", 4));
+    spec.rotation = static_cast<float>(jsonNum(j, "rotation", 0));
+    spec.corner = static_cast<float>(jsonNum(j, "corner", 0));
+    spec.fillOn = jsonBool(j, "fillOn", true);
+    std::uint8_t fr = 0, fg = 0, fb = 0;
+    if (parseColor(jsonStr(j, "fill"), fr, fg, fb)) {
+        spec.fillR = fr;
+        spec.fillG = fg;
+        spec.fillB = fb;
+    }
+    spec.strokeOn = jsonBool(j, "strokeOn", false);
+    spec.strokeW = static_cast<float>(jsonNum(j, "strokeW", 1));
+    std::uint8_t sr = 0, sg = 0, sb = 0;
+    if (parseColor(jsonStr(j, "stroke"), sr, sg, sb)) {
+        spec.strokeR = sr;
+        spec.strokeG = sg;
+        spec.strokeB = sb;
+    }
+    int stride = 0;
+    const std::uint8_t* mask = paintMask(s, stride);
+    return paintUndoable(s, layer, [&](openclip::Surface& surf) {
+        std::string err;
+        return openclip::stampShape(surf, spec, mask, stride, err);
+    }) ? JNI_TRUE : JNI_FALSE;
 }
 
 // M4 document I/O. Contract (ARCHITECTURE.md "M4 additions"): load

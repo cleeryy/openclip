@@ -13,7 +13,11 @@ import java.io.File
 enum class ChannelOp { REPLACE, ADD, SUBTRACT, INTERSECT }
 
 object ChannelOps {
-    /** Pure ops on 0/1 byte buffers (same size required). */
+    /**
+     * Pure ops on soft-alpha plane buffers (T1: 0..255, nonzero =
+     * selected — same convention as SelectionMask). Output is binary
+     * 255/0 (boolean result, no feather synthesis).
+     */
     fun apply(op: ChannelOp, base: ByteArray, over: ByteArray): ByteArray {
         require(base.size == over.size) { "channel size mismatch" }
         return ByteArray(base.size) { i ->
@@ -25,16 +29,17 @@ object ChannelOps {
                 ChannelOp.SUBTRACT -> a && !b
                 ChannelOp.INTERSECT -> a && b
             }
-            if (r) 1 else 0
+            if (r) 255.toByte() else 0
         }
     }
 
-    /** Bits (0/1) → grayscale PNG bytes (0/255) for channel files. */
+    /** Soft plane (0..255, T1) → grayscale PNG bytes (value-preserving). */
     fun bitsToPng(w: Int, h: Int, bits: ByteArray): ByteArray? = try {
         require(bits.size == w * h)
         val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
         val px = IntArray(w * h) { i ->
-            if (bits[i] != 0.toByte()) -1 else -16777216
+            val g = bits[i].toInt() and 0xFF
+            -16777216 or (g * 0x10101)
         }
         bmp.setPixels(px, 0, w, 0, 0, w, h)
         val bos = java.io.ByteArrayOutputStream()
@@ -45,7 +50,7 @@ object ChannelOps {
         null
     }
 
-    /** Grayscale PNG bytes → bits, or null on size/content mismatch. */
+    /** Grayscale PNG bytes → soft plane (0..255), or null on mismatch. */
     fun pngToBits(w: Int, h: Int, png: ByteArray): ByteArray? {
         return try {
             val bmp = android.graphics.BitmapFactory.decodeByteArray(png, 0, png.size)
@@ -58,8 +63,7 @@ object ChannelOps {
             bmp.getPixels(px, 0, w, 0, 0, w, h)
             bmp.recycle()
             ByteArray(w * h) { i ->
-                val r = (px[i] shr 16) and 0xFF
-                if (r > 127) 1 else 0
+                ((px[i] shr 16) and 0xFF).toByte()
             }
         } catch (_: Exception) {
             null

@@ -14,7 +14,9 @@ class Surface;
 // Registry lookup: true when `name` is a known filter (exact match,
 // case-sensitive). Known names: "gaussianBlur", "sharpen", "motionBlur",
 // "radialBlur", "posterize", "levels", "chromaticAberration", "addNoise",
-// "mosaic", "gradientMap", "denoise" (V+3 classic, median/bilateral 3x3).
+// "mosaic", "gradientMap", "denoise" (V+3 classic, median/bilateral 3x3),
+// T1: "unsharp" (parameterizable unsharp mask), "colorBalance" (3 zones
+// x 3 adversary axes), "threshold" (binary luma + optional Bayer).
 bool canApply(const std::string& name);
 
 // Ordered registry names (same list as canApply accepts).
@@ -66,6 +68,30 @@ std::vector<std::string> filterNames();
 //                                             strength 0 = byte-identical,
 //                                             strength outside [0,1] or
 //                                             unknown mode is an error
+//   unsharp             {"radius":2.0, "amount":0.6, "threshold":2}  T1:
+//                                             out = c+amount*(c-blur(radius))
+//                                             per channel when |c-blur| >
+//                                             threshold, else c; radius in
+//                                             (0,64] (gaussianBlur bound),
+//                                             amount in [0,8], threshold
+//                                             clamped to [0,255]; amount 0
+//                                             = byte-identical no-op
+//   colorBalance        {"shadows":"0,0,0","midtones":"0,0,0",  T1:
+//                        "highlights":"0,0,0"}  triplets "cr,mv,jb" each
+//                                             in [-100,100] (malformed =
+//                                             error); soft QUADRATIC luma
+//                                             zone ramps ((1-l)^2 shadows,
+//                                             l^2 highlights, (1-|2l-1|)^2
+//                                             midtones — far zones stay
+//                                             within +/-1); adversary
+//                                             deltas cr:+r/-g-b, mv:+r-b/
+//                                             -g, jb:+r+g/-b (halved cross
+//                                             terms); all-zero = no-op
+//   threshold           {"level":128, "dither":0}  T1: Rec.601 luma >=
+//                                             level ? white : black (level
+//                                             clamped [0,255]); dither!=0 =
+//                                             ordered Bayer-8 around level
+//                                             (mean-preserving +/-31.5)
 //
 // Alpha contract (M3): alpha bytes are NEVER modified by any filter; RGB
 // outputs are clamped to [0, alpha] afterwards so premultiplied (rgb <= a)

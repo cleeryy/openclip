@@ -1,17 +1,21 @@
 // OpenClip V+1 — selection mask (app-side only, session-only).
 //
-// The mask is a 1-bit full-resolution buffer in ENGINE coordinates,
-// stored per document (the owning EngineSurface is per-tab: pause()/
-// resume() conserve it, dispose() releases it — exactly the §1.3
+// The mask is a full-resolution 0..255 alpha buffer in ENGINE
+// coordinates, stored per document (the owning EngineSurface is per-tab:
+// pause()/resume() conserve it, dispose() releases it — exactly the §1.3
 // lifecycle). No JNI symbol exists for selection (ARCHITECTURE.md
 // "V+1 additions"): strokes split at the boundary, filters/tones mix
-// under the mask, the overlay is composite-only.
+// under the mask, the overlay is composite-only. T1 keeps the same
+// contract with soft alpha (feather/gradient ops write gray levels;
+// contains() stays a binary gate: any alpha > 0 selects).
 // SPDX-License-Identifier: GPL-3.0-or-later
 package dev.openclip.ui
 
 enum class SelectionTool { RECT, ELLIPSE, LASSO }
 
 class SelectionMask(val w: Int, val h: Int) {
+    // T1: soft alpha (0..255). Binary setters write 255; feather,
+    // wand mirror and quick-mask paint write gray levels.
     private val bits = ByteArray(w * h)
 
     /** Marching-ants outline in engine coordinates (closed loop). */
@@ -26,7 +30,7 @@ class SelectionMask(val w: Int, val h: Int) {
     }
 
     fun selectAll() {
-        bits.fill(1)
+        bits.fill(255.toByte())
         outline = listOf(
             Pair(0f, 0f), Pair(w.toFloat(), 0f),
             Pair(w.toFloat(), h.toFloat()), Pair(0f, h.toFloat())
@@ -45,7 +49,7 @@ class SelectionMask(val w: Int, val h: Int) {
         val b = maxOf(ya, yb)
         for (y in t until b) {
             val base = y * w
-            for (x in l until r) bits[base + x] = 1
+            for (x in l until r) bits[base + x] = 255.toByte()
         }
         outline = listOf(
             Pair(l.toFloat(), t.toFloat()), Pair(r.toFloat(), t.toFloat()),
@@ -68,7 +72,7 @@ class SelectionMask(val w: Int, val h: Int) {
             for (x in l until r) {
                 val nx = (x + 0.5f - cx) / rx
                 val ny = (y + 0.5f - cy) / ry
-                if (nx * nx + ny * ny <= 1f) bits[y * w + x] = 1
+                if (nx * nx + ny * ny <= 1f) bits[y * w + x] = 255.toByte()
             }
         }
         // Polygon outline (32-gon) for the overlay.
@@ -105,14 +109,15 @@ class SelectionMask(val w: Int, val h: Int) {
             while (k + 1 < xs.size) {
                 val l = xs[k].toInt().coerceIn(0, w - 1)
                 val r = xs[k + 1].toInt().coerceIn(0, w - 1)
-                for (x in l..r) bits[y * w + x] = 1
+                for (x in l..r) bits[y * w + x] = 255.toByte()
                 k += 2
             }
         }
     }
 
     fun invert() {
-        for (i in bits.indices) bits[i] = if (bits[i] != 0.toByte()) 0 else 1
+        // T1 soft alpha: 255 - v (binary masks flip exactly).
+        for (i in bits.indices) bits[i] = (255 - (bits[i].toInt() and 0xFF)).toByte()
     }
 
     /** Feather +1px: dilate by one pixel (softens the edge outward). */
@@ -135,7 +140,7 @@ class SelectionMask(val w: Int, val h: Int) {
                     }
                     if (near) break
                 }
-                if (near) bits[y * w + x] = 1
+                if (near) bits[y * w + x] = 255.toByte()
             }
         }
     }
@@ -169,6 +174,86 @@ class SelectionMask(val w: Int, val h: Int) {
         val yi = y.toInt()
         if (xi !in 0 until w || yi !in 0 until h) return false
         return bits[yi * w + xi] != 0.toByte()
+    }
+
+    // ---- T1 additions (spec docs/t1-fill.md : baguette, contour,
+    // masque rapide) : alpha douce 0..255, pile undo côté EngineSurface.
+
+    /** Alpha 0..255 en (x, y) (0 hors bornes). */
+    fun alphaAt(x: Int, y: Int): Int {
+        if (x !in 0 until w || y !in 0 until h) return 0
+        return bits[y * w + x].toInt() and 0xFF
+    }
+
+    /** Nombre de pixels sélectionnés (alpha > 0). */
+    fun countSelected(): Int {
+        var n = 0
+        for (b in bits) if (b != 0.toByte()) n++
+        return n
+    }
+
+    /** Écrit un miroir flood avec cumul (baguette, §4). */
+    fun setFromCombined(src: BooleanArray, mode: Int) {
+        if (src.size != bits.size) return
+        combineMaskKotlin(bits, src, mode)
+    }
+
+    /** Disque plein (masque rapide : 255 = ajouter, 0 = retirer). */
+    fun paintDisc(cx: Float, cy: Float, radius: Float, value: Int) {
+        val v = value.coerceIn(0, 255).toByte()
+        val r = radius.coerceAtLeast(0.5f)
+        val x0 = (cx - r).toInt().coerceIn(0, w - 1)
+        val x1 = (cx + r).toInt().coerceIn(0, w - 1)
+        val y0 = (cy - r).toInt().coerceIn(0, h - 1)
+        val y1 = (cy + r).toInt().coerceIn(0, h - 1)
+        for (y in y0..y1) {
+            for (x in x0..x1) {
+                val dx = x + 0.5f - cx
+                val dy = y + 0.5f - cy
+                if (dx * dx + dy * dy <= r * r) bits[y * w + x] = v
+            }
+        }
+    }
+
+    /** Remplace le plan alpha (contour progressif, undo app-side). */
+    fun setAlphaPlane(src: ByteArray): Boolean {
+        if (src.size != bits.size) return false
+        src.copyInto(bits)
+        return true
+    }
+
+    /**
+     * Recalcule le contour des fourmis comme le rectangle englobant
+     * des pixels sélectionnés (baguette §4, masque rapide §5 : pas de
+     * tracé de frontière exact, l'enveloppe suffit aux fourmis — le
+     * voile rapide et les ops moteur utilisent le plan complet).
+     * Vide la boucle quand rien n'est sélectionné.
+     */
+    fun refreshBBoxOutline() {
+        var x0 = w
+        var y0 = h
+        var x1 = -1
+        var y1 = -1
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                if (bits[y * w + x] != 0.toByte()) {
+                    if (x < x0) x0 = x
+                    if (y < y0) y0 = y
+                    if (x > x1) x1 = x
+                    if (y > y1) y1 = y
+                }
+            }
+        }
+        outline = if (x1 < 0) {
+            emptyList()
+        } else {
+            listOf(
+                Pair(x0.toFloat(), y0.toFloat()),
+                Pair((x1 + 1).toFloat(), y0.toFloat()),
+                Pair((x1 + 1).toFloat(), (y1 + 1).toFloat()),
+                Pair(x0.toFloat(), (y1 + 1).toFloat())
+            )
+        }
     }
 
     // V+3 channels (§4): raw bit access for save/reload + boolean ops.

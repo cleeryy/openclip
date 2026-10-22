@@ -136,6 +136,32 @@ private val FILTERS = listOf(
             FilterParam.Num("strength", 0f, 1f, 0.5f),
             FilterParam.Choice("mode", listOf("median", "bilateral"), "median")
         )
+    ),
+    // T1 fondations dessin (§6): unsharp + balance couleurs + seuillage.
+    // Mêmes règles (clés ignorées si inconnues, défauts moteur, alpha
+    // intact, rgb clampé) ; pont sélection via applyFilterInSelection.
+    FilterSpec(
+        "unsharp", R.string.filter_unsharp,
+        listOf(
+            FilterParam.Num("radius", 0.5f, 10f, 2f),
+            FilterParam.Num("amount", 0f, 2f, 0.6f),
+            FilterParam.Num("threshold", 0f, 32f, 2f, int = true)
+        )
+    ),
+    FilterSpec(
+        "colorBalance", R.string.filter_color_balance,
+        listOf(
+            FilterParam.Text("shadows", "0,0,0"),
+            FilterParam.Text("midtones", "0,0,0"),
+            FilterParam.Text("highlights", "0,0,0")
+        )
+    ),
+    FilterSpec(
+        "threshold", R.string.filter_threshold,
+        listOf(
+            FilterParam.Num("level", 0f, 255f, 128f, int = true),
+            FilterParam.Toggle("dither", false)
+        )
     )
 )
 
@@ -152,6 +178,9 @@ private fun buildParamsJson(values: Map<String, String>, spec: FilterSpec): Stri
         val value = when (p) {
             is FilterParam.Text -> "\"" + raw.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
             is FilterParam.Choice -> "\"$raw\""
+            // T1: le moteur lit des nombres (jsonNum) — les booléens
+            // partent en 1/0 (avant : "true"/"false" illisibles).
+            is FilterParam.Toggle -> if (raw.toBooleanStrictOrNull() == true) "1" else "0"
             else -> raw
         }
         "\"${p.key}\":$value"

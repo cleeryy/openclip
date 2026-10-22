@@ -914,20 +914,19 @@ class EngineSurface @JvmOverloads constructor(
         if (handle != 0L) EngineHost.nVectorPaths(handle, index) else "{}"
     }
 
-    /** White-on-black PNG of the current selection (V+2 mask upload). */
+    /** White-on-black PNG of the current selection (V+2 mask upload).
+     *  T1: gray levels carry the soft alpha (feather), not just bits. */
     fun selectionToPng(path: String): Boolean {
-        val (mw, mh, bits) = synchronized(selectionLock) {
-            val m = selectionMask ?: return false
-            Triple(engineWidth, engineHeight, m)
+        val (mw, mh, m) = synchronized(selectionLock) {
+            val mm = selectionMask ?: return false
+            Triple(engineWidth, engineHeight, mm)
         }
         return try {
             val bmp = Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888)
             for (y in 0 until mh) {
                 for (x in 0 until mw) {
-                    bmp.setPixel(
-                        x, y,
-                        if (bits.contains(x.toFloat(), y.toFloat())) -1 else -16777216
-                    )
+                    val g = m.alphaAt(x, y)
+                    bmp.setPixel(x, y, -1 shl 24 or (g * 0x10101))
                 }
             }
             java.io.File(path).outputStream().use {
@@ -1360,6 +1359,18 @@ class EngineSurface @JvmOverloads constructor(
                         requestParentDisallowInterceptTouchEvent()
                         return true
                     }
+                    // T1: armed paint tools + quick-mask painting consume
+                    // the stylus the same way (never ink).
+                    if (paintTool != null) {
+                        routePaintDown(event.getX(stylusIdx), event.getY(stylusIdx))
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
+                    if (maskPaintArmed()) {
+                        routeMaskDown(event.getX(stylusIdx), event.getY(stylusIdx))
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     if (textArmed) {
                         routeTextAnchor(event.getX(stylusIdx), event.getY(stylusIdx))
                         requestParentDisallowInterceptTouchEvent()
@@ -1396,6 +1407,12 @@ class EngineSurface @JvmOverloads constructor(
                     // (no ink while a shape tool is armed).
                     if (selectionTool != null) {
                         routeSelectionMove(event.getX(stylusIdx), event.getY(stylusIdx))
+                    } else if (paintTool != null) {
+                        // T1: gradient/shape preview follows the drag.
+                        routePaintMove(event.getX(stylusIdx), event.getY(stylusIdx))
+                    } else if (maskPaintArmed()) {
+                        // T1 quick mask: the drag paints the mask.
+                        routeMaskMove(event.getX(stylusIdx), event.getY(stylusIdx))
                     } else if (stylusId == sid) {
                         enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_MOVE)
                     }
@@ -1411,8 +1428,16 @@ class EngineSurface @JvmOverloads constructor(
                         // V+1: lift closes the armed shape trace.
                         if (selectionTool != null) {
                             routeSelectionUp(event.getX(stylusIdx), event.getY(stylusIdx))
+                        } else if (paintTool != null) {
+                            // T1: lift commits the gradient/figure.
+                            routePaintUp(event.getX(stylusIdx), event.getY(stylusIdx))
                         } else {
-                            enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_UP)
+                            if (maskPaintArmed()) {
+                                // T1 quick mask: the stroke is already in
+                                // the mask (undo pushed at DOWN).
+                            } else {
+                                enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_UP)
+                            }
                         }
                         stylusId = -1
                         strokePointerId = -1
@@ -1548,6 +1573,20 @@ class EngineSurface @JvmOverloads constructor(
                     requestParentDisallowInterceptTouchEvent()
                     return true
                 }
+                // T1: armed paint tools + quick-mask painting consume
+                // the tap the same way (never ink).
+                if (paintTool != null && !navigateMode && !mousePan) {
+                    routePaintDown(x, y)
+                    strokePointerId = event.getPointerId(0)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
+                if (maskPaintArmed() && !navigateMode && !mousePan) {
+                    routeMaskDown(x, y)
+                    strokePointerId = event.getPointerId(0)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 if (textArmed && !navigateMode && !mousePan) {
                     routeTextAnchor(x, y)
                     requestParentDisallowInterceptTouchEvent()
@@ -1599,6 +1638,21 @@ class EngineSurface @JvmOverloads constructor(
                     requestParentDisallowInterceptTouchEvent()
                     return true
                 }
+                // T1: paint preview + quick-mask painting win the same way.
+                if (paintTool != null && !navigateMode && !mousePan &&
+                    event.getPointerId(0) == strokePointerId
+                ) {
+                    routePaintMove(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
+                if (maskPaintArmed() && !navigateMode && !mousePan &&
+                    event.getPointerId(0) == strokePointerId
+                ) {
+                    routeMaskMove(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 if (edgeArmed >= 0) {
                     if (checkEdgeSwipe(x, y, edgeSwipePx)) {
                         fireEdge(edgeArmed)
@@ -1633,6 +1687,20 @@ class EngineSurface @JvmOverloads constructor(
                 if (selectionTool != null) {
                     if (event.pointerCount > 0) {
                         routeSelectionUp(event.getX(0), event.getY(0))
+                    }
+                    strokePointerId = -1
+                    edgeArmed = -1
+                    pendingStroke = false
+                    edgeFired = false
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
+                // T1: lift commits the paint tool / ends mask painting.
+                if (paintTool != null || maskPaintArmed()) {
+                    if (event.pointerCount > 0) {
+                        if (paintTool != null) {
+                            routePaintUp(event.getX(0), event.getY(0))
+                        }
                     }
                     strokePointerId = -1
                     edgeArmed = -1
@@ -2333,6 +2401,9 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     fun clearSelection() = synchronized(selectionLock) {
+        if (selectionMask == null && shapePreview.isEmpty()) return
+        selectionUndoStack.addLast(selectionMask?.copyBits())
+        while (selectionUndoStack.size > 20) selectionUndoStack.removeFirst()
         selectionMask = null
         shapePreview = emptyList()
         lassoTrace.clear()
@@ -2352,19 +2423,389 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     fun invertSelection() = synchronized(selectionLock) {
-        selectionMask?.invert() ?: return
+        val m = selectionMask ?: return
+        pushSelectionUndoLocked()
+        m.invert()
         notifySelectionChanged()
     }
 
     /** V+2 tone density: Bayer dropout on the live selection. */
     fun thinSelectionTo(keepPct: Int) = synchronized(selectionLock) {
-        selectionMask?.applyDensityBayer(keepPct) ?: return
+        val m = selectionMask ?: return
+        pushSelectionUndoLocked()
+        m.applyDensityBayer(keepPct)
         notifySelectionChanged()
     }
 
     fun featherSelection() = synchronized(selectionLock) {
-        selectionMask?.featherPlus1() ?: return
+        val m = selectionMask ?: return
+        pushSelectionUndoLocked()
+        m.featherPlus1()
         notifySelectionChanged()
+    }
+
+    // ---- T1 fondations dessin (spec docs/t1-fill.md : §4 baguette, §5
+    // contour + masque rapide). Zéro JNI neuf côté sélection : le flou
+    // et la peinture du masque sont app-side ; seul le plan 0..255 est
+    // monté au moteur via le pont V+2 existant (selectionToPng +
+    // nSetSelectionMask).
+
+    /** Contour progressif : flou gaussien séparable du masque (0 = identité). */
+    fun featherSelectionRadius(radius: Float) = synchronized(selectionLock) {
+        val m = selectionMask ?: return
+        if (radius <= 0f) return
+        pushSelectionUndoLocked()
+        val blurred = featherBlurKotlin(m.copyBits(), m.w, m.h, radius)
+        m.setAlphaPlane(blurred)
+        m.refreshBBoxOutline()
+        notifySelectionChanged()
+    }
+
+    /** Pile undo app-side du masque (session-only, profondeur 20). */
+    private val selectionUndoStack = ArrayDeque<ByteArray?>()
+    private fun pushSelectionUndoLocked() {
+        val m = selectionMask ?: return
+        selectionUndoStack.addLast(m.copyBits())
+        while (selectionUndoStack.size > 20) selectionUndoStack.removeFirst()
+    }
+
+    fun pushSelectionUndo() = synchronized(selectionLock) {
+        pushSelectionUndoLocked()
+    }
+
+    fun undoSelection(): Boolean = synchronized(selectionLock) {
+        if (selectionUndoStack.isEmpty()) return false
+        val prev = selectionUndoStack.removeLast()
+        if (prev == null) {
+            // Le geste avait créé le masque : l'annuler le supprime.
+            selectionMask = null
+        } else {
+            var m = selectionMask
+            if (m == null) {
+                m = SelectionMask(engineWidth, engineHeight)
+                selectionMask = m
+            }
+            if (!m.setAlphaPlane(prev)) return false
+        }
+        notifySelectionChanged()
+        true
+    }
+
+    fun selectionUndoDepthForTest(): Int = synchronized(selectionLock) {
+        selectionUndoStack.size
+    }
+
+    /** Masque rapide : toggle session (voile rouge + peinture du masque). */
+    @Volatile
+    var quickMask: Boolean = false
+        set(value) {
+            field = value
+            synchronized(selectionLock) { notifySelectionChanged() }
+        }
+
+    /**
+     * Peint le masque au pinceau (masque rapide) : disque plein de rayon
+     * brushRadiusEngine en coords moteur. add = blanc (ajouter), sinon
+     * noir (retirer). 1 pas d'undo par DOWN (l'appelant pousse avant).
+     */
+    fun paintMaskAt(ex: Float, ey: Float, add: Boolean) =
+        synchronized(selectionLock) {
+            var m = selectionMask
+            if (m == null) {
+                m = SelectionMask(engineWidth, engineHeight)
+                selectionMask = m
+            }
+            m.paintDisc(ex, ey, brushRadiusEngine, if (add) 255 else 0)
+            notifySelectionChanged()
+        }
+
+    // ---- T1 outils de peinture (moteur, §1–§3 : 1 undo par validation).
+
+    /** Outil armé (null = encre). Le composable route via onPaintTap/Move/Up. */
+    @Volatile var paintTool: PaintTool? = null
+
+    /** Callbacks tap/move/up en coords MOTEUR (posés par le panneau T1). */
+    var onPaintTap: ((PaintTool, Float, Float) -> Unit)? = null
+    var onPaintMove: ((PaintTool, Float, Float) -> Unit)? = null
+    var onPaintUp: ((PaintTool, Float, Float) -> Unit)? = null
+
+    private fun routePaintDown(vx: Float, vy: Float) {
+        val tool = paintTool ?: return
+        val (ex, ey) = screenToEngine(vx, vy)
+        val cb = onPaintTap
+        if (cb != null) post { cb(tool, ex, ey) }
+        needsComposite = true
+    }
+
+    private fun routePaintMove(vx: Float, vy: Float) {
+        val tool = paintTool ?: return
+        val (ex, ey) = screenToEngine(vx, vy)
+        // T1 previews overlay-only : cadre/segment via shapePreview.
+        if (tool == PaintTool.GRADIENT || tool == PaintTool.SHAPE) {
+            synchronized(selectionLock) {
+                val start = shapeStartEngine
+                if (start != null) {
+                    shapePreview = listOf(start, Pair(ex, ey))
+                }
+            }
+        }
+        val cb = onPaintMove
+        if (cb != null) post { cb(tool, ex, ey) }
+        needsComposite = true
+    }
+
+    private fun routePaintUp(vx: Float, vy: Float) {
+        val tool = paintTool ?: return
+        val (ex, ey) = screenToEngine(vx, vy)
+        synchronized(selectionLock) {
+            shapePreview = emptyList()
+            if (tool == PaintTool.GRADIENT || tool == PaintTool.SHAPE) {
+                shapeStartEngine = null
+            }
+        }
+        val cb = onPaintUp
+        if (cb != null) post { cb(tool, ex, ey) }
+        needsComposite = true
+    }
+
+    /** Début du cadre gestuel (mémorisé pour la prévisualisation). */
+    fun paintFrameStart(ex: Float, ey: Float) = synchronized(selectionLock) {
+        shapeStartEngine = Pair(ex, ey)
+        shapePreview = listOf(Pair(ex, ey), Pair(ex, ey))
+        needsComposite = true
+    }
+
+    /** Prévisualisation libre (dégradé libre : ancres posées au tap). */
+    fun paintPreviewPoints(pts: List<Pair<Float, Float>>) =
+        synchronized(selectionLock) {
+            shapePreview = pts.toList()
+            needsComposite = true
+        }
+
+    /** Efface toute prévisualisation de peinture. */
+    fun paintPreviewClear() = synchronized(selectionLock) {
+        shapePreview = emptyList()
+        shapeStartEngine = null
+        needsComposite = true
+    }
+
+    // ---- T1 masque rapide : peinture du masque au doigt/stylet ----
+
+    /** Blanc = ajouter (défaut), noir = retirer (panneau). */
+    @Volatile var maskStrokeAdd: Boolean = true
+
+    private var lastMaskX = 0f
+    private var lastMaskY = 0f
+
+    /** Vrai quand un geste doit peindre le masque (pas de pixels). */
+    private fun maskPaintArmed(): Boolean =
+        quickMask && paintTool == null && selectionTool == null &&
+            !textArmed && !pipetteArmed
+
+    private fun routeMaskDown(vx: Float, vy: Float) {
+        val (ex, ey) = screenToEngine(vx, vy)
+        synchronized(selectionLock) {
+            selectionUndoStack.addLast(selectionMask?.copyBits())
+            while (selectionUndoStack.size > 20) selectionUndoStack.removeFirst()
+            var m = selectionMask
+            if (m == null) {
+                m = SelectionMask(engineWidth, engineHeight)
+                selectionMask = m
+            }
+            m.paintDisc(ex, ey, brushRadiusEngine, if (maskStrokeAdd) 255 else 0)
+            m.refreshBBoxOutline()
+            lastMaskX = ex
+            lastMaskY = ey
+            notifySelectionChanged()
+        }
+    }
+
+    private fun routeMaskMove(vx: Float, vy: Float) {
+        val (ex, ey) = screenToEngine(vx, vy)
+        synchronized(selectionLock) {
+            val m = selectionMask ?: return
+            val dx = ex - lastMaskX
+            val dy = ey - lastMaskY
+            val dist = kotlin.math.hypot(dx, dy)
+            val step = (brushRadiusEngine * 0.5f).coerceAtLeast(1f)
+            val n = (dist / step).toInt().coerceAtLeast(1)
+            for (i in 1..n) {
+                val t = i.toFloat() / n
+                m.paintDisc(
+                    lastMaskX + dx * t, lastMaskY + dy * t,
+                    brushRadiusEngine, if (maskStrokeAdd) 255 else 0
+                )
+            }
+            lastMaskX = ex
+            lastMaskY = ey
+            m.refreshBBoxOutline()
+            notifySelectionChanged()
+        }
+    }
+
+    /** Seau : remplit la région contiguë (1 undo moteur). */
+    fun floodFillAt(ex: Int, ey: Int, colorHex: String, json: String): Boolean =
+        synchronized(engineLock) {
+            if (handle == 0L) return false
+            if (!EngineHost.nFloodFill(handle, ex, ey, colorHex, json)) return false
+            needsComposite = true
+            notifyStrokeChanged()
+            true
+        }
+
+    /** Dégradé : peint la géométrie validée (1 undo moteur). */
+    fun paintGradientJson(json: String): Boolean = synchronized(engineLock) {
+        if (handle == 0L) return false
+        if (!EngineHost.nPaintGradient(handle, json)) return false
+        needsComposite = true
+        notifyStrokeChanged()
+        true
+    }
+
+    /** Figure : timbre la forme validée (1 undo moteur). */
+    fun stampShapeJson(json: String): Boolean = synchronized(engineLock) {
+        if (handle == 0L) return false
+        if (!EngineHost.nStampShape(handle, json)) return false
+        needsComposite = true
+        notifyStrokeChanged()
+        true
+    }
+
+    /** Index du calque actif (baguette source=calque). */
+    fun activeLayerIndex(): Int {
+        return try {
+            JSONObject(layerState()).optInt("active", 0)
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    /**
+     * Baguette magique (§4) : noyau moteur nMagicWand (exact, prémultiplié,
+     * source calque ou composite) + miroir app-side pour les fourmis et
+     * la contrainte de trait (flood Kotlin sur les mêmes octets source :
+     * soloRenderFull pour le calque, pullFrameFull pour le composite —
+     * exact sur contenu opaque). combine 0=set/1=add/2=sub. Régions sous
+     * 4x4px refusées avec hint (pas de sélection invisible). Le masque
+     * moteur est l'autorité pour les ops (blit/contraintes moteur) ; le
+     * miroir sert l'overlay et la porte de trait.
+     */
+    fun wandSelect(
+        ex: Int,
+        ey: Int,
+        tolerance: Float,
+        source: String,
+        combine: Int,
+        onResult: (Boolean) -> Unit
+    ) {
+        if (handle == 0L || !running.get()) {
+            post { onResult(false) }
+            return
+        }
+        val useLayer = source != "merged"
+        // Le miroir est calculé AVANT tout appel moteur : sous le seuil
+        // 4x4px rien n'est écrit nulle part (ni moteur, ni app).
+        if (useLayer) {
+            // Source calque : octets exacts via solo (0 flash, suspendRender).
+            Thread {
+                val bmp = try {
+                    soloRenderFull(activeLayerIndex())
+                } catch (_: Exception) {
+                    null
+                }
+                if (bmp == null) {
+                    post { onResult(false) }
+                    return@Thread
+                }
+                val wpx = IntArray(bmp.width * bmp.height)
+                bmp.getPixels(wpx, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                bmp.recycle()
+                val t0 = SystemClock.uptimeMillis()
+                val region = floodRegionKotlin(wpx, engineWidth, engineHeight, ex, ey, tolerance)
+                lastWandKotlinMs = SystemClock.uptimeMillis() - t0
+                if (!commitWand(region, combine, tolerance, "layer", ex, ey)) {
+                    post { onResult(false) }
+                    return@Thread
+                }
+                post { onResult(true) }
+            }.start()
+        } else {
+            val cur = currentFrameIdx
+            pullFrameFull(cur) { bmp ->
+                if (bmp == null) {
+                    post { onResult(false) }
+                    return@pullFrameFull
+                }
+                Thread {
+                    val wpx = IntArray(bmp.width * bmp.height)
+                    bmp.getPixels(wpx, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                    bmp.recycle()
+                    val region = floodRegionKotlin(wpx, engineWidth, engineHeight, ex, ey, tolerance)
+                    if (!commitWand(region, combine, tolerance, "merged", ex, ey)) {
+                        post { onResult(false) }
+                        return@Thread
+                    }
+                    post { onResult(true) }
+                }.start()
+            }
+        }
+    }
+
+    /** Durée du dernier miroir Kotlin (ms, sonde de tranche §4.4). */
+    @Volatile var lastWandKotlinMs: Long = -1L
+
+    /**
+     * Valide le miroir puis écrit le masque moteur (nMagicWand, même
+     * source) : les deux convergent (même métrique, mêmes octets
+     * source — exact sur opaque). Retourne false + rien écrit quand la
+     * région est sous 4x4px ou vide après cumul.
+     */
+    private fun commitWand(
+        region: BooleanArray,
+        combine: Int,
+        tolerance: Float,
+        source: String,
+        seedX: Int,
+        seedY: Int
+    ): Boolean {
+        var n = 0
+        for (b in region) if (b) n++
+        if (n < 16) return false  // hint « élargissez la tolérance »
+        val combineName = when (combine) {
+            1 -> "add"
+            2 -> "sub"
+            else -> "set"
+        }
+        val okEngine = synchronized(engineLock) {
+            if (handle == 0L) false
+            else EngineHost.nMagicWand(
+                handle, seedX, seedY,
+                wandJson(tolerance, source, combineName)
+            )
+        }
+        if (!okEngine) return false
+        synchronized(selectionLock) {
+            pushSelectionUndoLocked()
+            var m = selectionMask
+            if (m == null || combine == 0) {
+                m = SelectionMask(engineWidth, engineHeight)
+                selectionMask = m
+            }
+            m.setFromCombined(region, combine)
+            m.refreshBBoxOutline()
+            if (m.countSelected() == 0) {
+                // Soustraction totale : le moteur garde des zéros (qui
+                // bloqueraient tout) — on efface des deux côtés.
+                selectionMask = null
+                synchronized(engineLock) {
+                    if (handle != 0L) EngineHost.nSetSelectionMask(handle, null)
+                }
+                notifySelectionChanged()
+                return false
+            }
+            notifySelectionChanged()
+        }
+        return true
     }
 
     /** Engine-coord rect (tests + gesture commit path). */
@@ -2373,6 +2814,8 @@ class EngineSurface @JvmOverloads constructor(
             val m = SelectionMask(engineWidth, engineHeight)
             m.setRect(x0, y0, x1, y1)
             if (m.isEmpty()) return@synchronized
+            selectionUndoStack.addLast(selectionMask?.copyBits())
+            while (selectionUndoStack.size > 20) selectionUndoStack.removeFirst()
             selectionMask = m
             notifySelectionChanged()
         }
@@ -2383,12 +2826,40 @@ class EngineSurface @JvmOverloads constructor(
             val m = SelectionMask(engineWidth, engineHeight)
             m.setPolygon(pts)
             if (m.isEmpty()) return@synchronized
+            selectionUndoStack.addLast(selectionMask?.copyBits())
+            while (selectionUndoStack.size > 20) selectionUndoStack.removeFirst()
             selectionMask = m
             notifySelectionChanged()
         }
 
     fun selectionHashForTest(): Long = synchronized(selectionLock) {
         selectionMask?.hash() ?: 0L
+    }
+
+    fun selectionCountForTest(): Int = synchronized(selectionLock) {
+        selectionMask?.countSelected() ?: 0
+    }
+
+    fun selectionAlphaForTest(x: Int, y: Int): Int = synchronized(selectionLock) {
+        selectionMask?.alphaAt(x, y) ?: 0
+    }
+
+    fun selectionOutlineSizeForTest(): Int = synchronized(selectionLock) {
+        selectionMask?.outline?.size ?: 0
+    }
+
+    /** True when the active layer is vector (T1 paint ops refuse). */
+    fun activeLayerIsVector(): Boolean {
+        return try {
+            val st = JSONObject(layerState())
+            val a = st.optInt("active", -1)
+            val arr = st.optJSONArray("layers") ?: return false
+            val e = arr.optJSONObject(a) ?: return false
+            val s = e.optJSONObject("self") ?: e
+            s.optBoolean("vector", false)
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Forward mapping engine -> view (exact inverse of screenToEngine). */
@@ -2588,6 +3059,9 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     private fun drawSelectionOverlay(c: android.graphics.Canvas, dst: RectF, ang: Float) {
+        // T1 quick mask: red veil over the UNSELECTED area (same mask,
+        // second rendering — the ants below stay the first one).
+        if (quickMask) drawQuickVeil(c, dst, ang)
         val outline = synchronized(selectionLock) {
             val m = selectionMask
             if (m != null) m.outline else shapePreview
@@ -2609,6 +3083,51 @@ class EngineSurface @JvmOverloads constructor(
         antsPaint.pathEffect = fx
         c.drawPath(path, antsShadowPaint)
         c.drawPath(path, antsPaint)
+        c.restore()
+    }
+
+    // T1 quick mask veil (overlay-only, cached per mask content).
+    private var veilBmp: android.graphics.Bitmap? = null
+    private var veilHash: Long = 0L
+
+    private fun drawQuickVeil(c: android.graphics.Canvas, dst: RectF, ang: Float) {
+        val m = synchronized(selectionLock) { selectionMask } ?: return
+        val hh = m.hash()
+        var bmp = veilBmp
+        if (bmp == null || veilHash != hh || bmp.width != m.w || bmp.height != m.h) {
+            try {
+                bmp?.recycle()
+            } catch (_: Exception) {
+            }
+            bmp = try {
+                android.graphics.Bitmap.createBitmap(m.w, m.h, android.graphics.Bitmap.Config.ARGB_8888)
+            } catch (_: Exception) {
+                null
+            }
+            if (bmp == null) return
+            val px = IntArray(m.w * m.h)
+            for (y in 0 until m.h) {
+                for (x in 0 until m.w) {
+                    val ma = m.alphaAt(x, y)
+                    // Red over the unselected area (50% max), fading
+                    // with the feathered edge.
+                    val va = (255 - ma) / 2
+                    px[y * m.w + x] = (va shl 24) or 0xFF0000
+                }
+            }
+            try {
+                bmp.setPixels(px, 0, m.w, 0, 0, m.w, m.h)
+            } catch (_: Exception) {
+                return
+            }
+            veilBmp = bmp
+            veilHash = hh
+        }
+        val s = fitScale(width, height) * viewScaleMul
+        if (s <= 1e-6f) return
+        c.save()
+        if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+        c.drawBitmap(bmp, null, dst, null)
         c.restore()
     }
 
@@ -2803,6 +3322,16 @@ class EngineSurface @JvmOverloads constructor(
     // The load resets undo + flattens layers (M4 contract) — announced
     // by the caller with selection_flattened. ----
 
+    /** Integer lerp of two ARGB pixels by alpha 0..255 (T1 soft mix). */
+    private fun lerpArgb(b: Int, a: Int, ma: Int): Int {
+        val iba = 255 - ma
+        val r = (((b ushr 16) and 0xFF) * iba + ((a ushr 16) and 0xFF) * ma + 127) / 255
+        val g = (((b ushr 8) and 0xFF) * iba + ((a ushr 8) and 0xFF) * ma + 127) / 255
+        val bl = ((b and 0xFF) * iba + (a and 0xFF) * ma + 127) / 255
+        val al = (((b ushr 24) and 0xFF) * iba + ((a ushr 24) and 0xFF) * ma + 127) / 255
+        return (al shl 24) or (r shl 16) or (g shl 8) or bl
+    }
+
     private fun mixUnderMask(before: Bitmap, after: Bitmap, mask: SelectionMask): Bitmap {
         val w = before.width
         val h = before.height
@@ -2819,7 +3348,12 @@ class EngineSurface @JvmOverloads constructor(
             val base = y * w
             for (x in 0 until w) {
                 val mx = (x * mw / w).coerceIn(0, mw - 1)
-                opx[base + x] = if (mask.contains(mx.toFloat(), my.toFloat())) apx[base + x] else bpx[base + x]
+                // T1 soft alpha: lerp by mask alpha (binary masks select
+                // exactly, feathered edges blend).
+                val ma = mask.alphaAt(mx, my)
+                opx[base + x] = if (ma >= 255) apx[base + x]
+                else if (ma <= 0) bpx[base + x]
+                else lerpArgb(bpx[base + x], apx[base + x], ma)
             }
         }
         out.setPixels(opx, 0, w, 0, 0, w, h)

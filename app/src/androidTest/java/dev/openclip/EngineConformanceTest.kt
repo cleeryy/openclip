@@ -85,6 +85,7 @@ import dev.openclip.ui.v2VectorLayers
 // V+3 confort-pro pure units + JSON bridges (no new engine pixels).
 import dev.openclip.ui.BrushPushTestHooks
 import dev.openclip.ui.BrushPushThrottler
+import dev.openclip.ui.floodRegionKotlin
 import dev.openclip.ui.ChannelOp
 import dev.openclip.ui.ChannelOps
 import dev.openclip.ui.ChannelStore
@@ -7998,18 +7999,19 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         }
         val a = rect(0, 0, 10, 10)
         val b = rect(5, 5, 15, 15)
+        // T1: les ops booléennes sortent du 255/0 (plan doux 0..255).
         val add = ChannelOps.apply(ChannelOp.ADD, a, b)
-        assertEquals(1.toByte(), add[0])
+        assertEquals(255.toByte(), add[0])
         assertEquals(0.toByte(), add[19 * w2 + 19])
-        assertEquals(1.toByte(), add[7 * w2 + 7])
+        assertEquals(255.toByte(), add[7 * w2 + 7])
         val sub = ChannelOps.apply(ChannelOp.SUBTRACT, a, b)
-        assertEquals(1.toByte(), sub[2 * w2 + 2])
+        assertEquals(255.toByte(), sub[2 * w2 + 2])
         assertEquals(0.toByte(), sub[7 * w2 + 7])
         val cut = ChannelOps.apply(ChannelOp.INTERSECT, a, b)
         assertEquals(0.toByte(), cut[2 * w2 + 2])
-        assertEquals(1.toByte(), cut[7 * w2 + 7])
+        assertEquals(255.toByte(), cut[7 * w2 + 7])
         val rep = ChannelOps.apply(ChannelOp.REPLACE, a, b)
-        assertTrue(rep.contentEquals(b))
+        assertTrue(rep.contentEquals(b.map { if (it != 0.toByte()) 255.toByte() else 0 }.toByteArray()))
     }
 
     // §4 channelRenameDelete: rename/delete + guards (0 channels OK,
@@ -8987,5 +8989,609 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             overrideActivityLocale("en")
             composeRule.waitForIdle()
         }
+    }
+
+    // ================= T1 fondations dessin =================
+    // Spec docs/t1-fill.md §1–§6 : seau + dégradé + figures (moteur,
+    // 1 undo), baguette (noyau partagé + miroir), contour/masque
+    // rapide (app-side), 3 filtres registre.
+
+    /** Demi-masque PNG exact (w x h) pour nSetSelectionMask. */
+    private fun halfMaskPng(right: Boolean): java.io.File {
+        val dir = androidx.test.platform.app.InstrumentationRegistry
+            .getInstrumentation().targetContext.cacheDir
+        val f = java.io.File(dir, "t1-mask.png")
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val sel = if (right) x >= w / 2 else x < w / 2
+                bmp.setPixel(x, y, if (sel) -1 else -16777216)
+            }
+        }
+        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        bmp.recycle()
+        return f
+    }
+
+    private fun paintStroke(handle: Long) {
+        EngineHost.nSetBrush(
+            handle,
+            """{"radius":8,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#301810"}"""
+        )
+        val sid = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+        for (x in 70..170 step 5) {
+            EngineHost.nStrokeMove(handle, sid, x.toFloat(), 128f, 1f)
+        }
+        EngineHost.nStrokeEnd(handle, sid)
+    }
+
+    private fun compositeOf(handle: Long): IntArray {
+        val px = IntArray(w * h)
+        assertEquals(w * h, EngineHost.nCompositeInto(handle, px, w, h))
+        return px
+    }
+
+    // §1 seau : tap in-code, composite changé, undo restaure.
+    @Test
+    fun bucketFillChangesCompositeAndUndoRestores() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            paintStroke(handle)
+            val before = compositeOf(handle)
+            assertTrue(
+                EngineHost.nFloodFill(
+                    handle, 120, 128, "#FF0000",
+                    """{"tolerance":0.5,"antialias":true,"expandPx":0,"sampleMerged":false}"""
+                )
+            )
+            val after = compositeOf(handle)
+            val changed = after.indices.count { after[it] != before[it] }
+            assertTrue("bucket must paint the stroke region, got $changed", changed > 50)
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "undo must restore the pre-bucket composite exactly",
+                compositeOf(handle).contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §1 seau sous masque : hors-sélection byte-identique.
+    @Test
+    fun bucketFillMasked() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            paintStroke(handle)
+            val mask = halfMaskPng(right = true)
+            assertTrue(EngineHost.nSetSelectionMask(handle, mask.absolutePath))
+            mask.delete()
+            val before = compositeOf(handle)
+            assertTrue(
+                EngineHost.nFloodFill(
+                    handle, 120, 128, "#00FF00",
+                    """{"tolerance":1.0,"antialias":false}"""
+                )
+            )
+            val after = compositeOf(handle)
+            var leftSame = 0
+            var leftTotal = 0
+            var rightChanged = 0
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val i = y * w + x
+                    if (x < w / 2) {
+                        leftTotal++
+                        if (after[i] == before[i]) leftSame++
+                    } else if (after[i] != before[i]) {
+                        rightChanged++
+                    }
+                }
+            }
+            assertEquals("masked-out half must stay byte-identical", leftTotal, leftSame)
+            assertTrue("selected half must change, got $rightChanged", rightChanged > 50)
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §2 dégradé : commit + undo (endpoints verrouillés moteur).
+    @Test
+    fun gradientDragCommitsAndUndoRestores() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val before = compositeOf(handle)
+            assertTrue(
+                EngineHost.nPaintGradient(
+                    handle,
+                    """{"kind":"linear","x0":0,"y0":0,"x1":256,"y1":0,"stops":["#FF0000:0","#0000FF:1"],"dither":false}"""
+                )
+            )
+            val after = compositeOf(handle)
+            val changed = after.indices.count { after[it] != before[it] }
+            assertTrue("gradient must paint the canvas, got $changed", changed > w * h / 2)
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "undo must restore the pre-gradient composite exactly",
+                compositeOf(handle).contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §2 dégradé sous masque.
+    @Test
+    fun gradientMasked() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val mask = halfMaskPng(right = true)
+            assertTrue(EngineHost.nSetSelectionMask(handle, mask.absolutePath))
+            mask.delete()
+            val before = compositeOf(handle)
+            assertTrue(
+                EngineHost.nPaintGradient(
+                    handle,
+                    """{"kind":"linear","x0":0,"y0":0,"x1":256,"y1":0,"stops":["#FF0000:0","#0000FF:1"],"dither":false}"""
+                )
+            )
+            val after = compositeOf(handle)
+            var leftSame = 0
+            var leftTotal = 0
+            var rightChanged = 0
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val i = y * w + x
+                    if (x < w / 2) {
+                        leftTotal++
+                        if (after[i] == before[i]) leftSame++
+                    } else if (after[i] != before[i]) {
+                        rightChanged++
+                    }
+                }
+            }
+            assertEquals("masked-out half must stay byte-identical", leftTotal, leftSame)
+            assertTrue("selected half must change, got $rightChanged", rightChanged > 50)
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §2 dégradé libre : ancres multiples via JNI + undo.
+    @Test
+    fun gradientFreeCommitsAndUndoRestores() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val before = compositeOf(handle)
+            assertTrue(
+                EngineHost.nPaintGradient(
+                    handle,
+                    """{"kind":"free","x0":0,"y0":0,"x1":1,"y1":0,"stops":["#FF0000:0","#0000FF:1"],"pts":[[32,128],[224,128]],"dither":false}"""
+                )
+            )
+            val after = compositeOf(handle)
+            val changed = after.indices.count { after[it] != before[it] }
+            assertTrue("free gradient must paint the canvas, got $changed", changed > w * h / 2)
+            // L'ancre rouge domine près de (32,128).
+            val near = after[128 * w + 32]
+            val r = (near shr 16) and 0xFF
+            val b = near and 0xFF
+            assertTrue("near the red anchor red must dominate (got $near)", r > 200 && b < 60)
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "undo must restore the pre-gradient composite exactly",
+                compositeOf(handle).contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §3 figure : timbre + 1 undo.
+    @Test
+    fun shapeStampUndoable() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val before = compositeOf(handle)
+            assertTrue(
+                EngineHost.nStampShape(
+                    handle,
+                    """{"kind":"rect","x0":40,"y0":40,"x1":200,"y1":200,"fillOn":true,"fill":"#008000","strokeOn":true,"stroke":"#000000","strokeW":4}"""
+                )
+            )
+            val after = compositeOf(handle)
+            val changed = after.indices.count { after[it] != before[it] }
+            assertTrue("shape must paint pixels, got $changed", changed > 1000)
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "undo must restore the pre-shape composite exactly",
+                compositeOf(handle).contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §4 baguette : sélectionne + fourmis visibles (miroir app-side).
+    @Test
+    fun wandSelectsAndAntsShow() {
+        val es = surf()
+        awaitSurface(es)
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.setSelectionMask(null)
+        }
+        // Trait horizontal au milieu (région sombre connexe sur fond blanc).
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        val t0 = SystemClock.uptimeMillis()
+        dispatchAll(
+            es,
+            simpleDown(t0, cx - 80f, cy),
+            MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, cx, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_MOVE, cx + 80f, cy, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t0, t0 + 48, MotionEvent.ACTION_UP, cx + 80f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(400)
+        val (sex, sey) = es.screenToEngine(cx, cy)
+        val lock = Object()
+        var done = false
+        var ok = false
+        composeRule.activityRule.scenario.onActivity {
+            es.wandSelect(sex.toInt(), sey.toInt(), 0.15f, "layer", 0) { r ->
+                synchronized(lock) {
+                    ok = r
+                    done = true
+                    lock.notifyAll()
+                }
+            }
+        }
+        synchronized(lock) {
+            if (!done) lock.wait(15000)
+        }
+        assertTrue("wandSelect must succeed on the painted line", done && ok)
+        assertTrue("wand mask must be non-empty", es.selectionCountForTest() > 16)
+        assertTrue(
+            "wand mask must stay well below full canvas",
+            es.selectionCountForTest() < es.canvasWidth() * es.canvasHeight() / 2
+        )
+        assertEquals(
+            "marching ants must show the bbox loop",
+            4, es.selectionOutlineSizeForTest()
+        )
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.setSelectionMask(null)
+            es.undo()
+        }
+    }
+
+    // §4 baguette → trait : hors-sélection intact (bout-en-bout).
+    @Test
+    fun wandThenStrokeConstrained() {
+        val es = surf()
+        awaitSurface(es)
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.setSelectionMask(null)
+        }
+        val wv = es.width.toFloat()
+        val hv = es.height.toFloat()
+        // Ligne 1 (tiers haut) : future sélection baguette.
+        var t = SystemClock.uptimeMillis()
+        dispatchAll(
+            es,
+            simpleDown(t, wv * 0.3f, hv * 0.33f),
+            MotionEvent.obtain(t, t + 16, MotionEvent.ACTION_MOVE, wv * 0.5f, hv * 0.33f, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t, t + 32, MotionEvent.ACTION_MOVE, wv * 0.7f, hv * 0.33f, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t, t + 48, MotionEvent.ACTION_UP, wv * 0.7f, hv * 0.33f, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(400)
+        val (sex, sey) = es.screenToEngine(wv * 0.5f, hv * 0.33f)
+        val lock = Object()
+        var done = false
+        var ok = false
+        composeRule.activityRule.scenario.onActivity {
+            es.wandSelect(sex.toInt(), sey.toInt(), 0.15f, "layer", 0) { r ->
+                synchronized(lock) {
+                    ok = r
+                    done = true
+                    lock.notifyAll()
+                }
+            }
+        }
+        synchronized(lock) {
+            if (!done) lock.wait(15000)
+        }
+        assertTrue("wandSelect must succeed", done && ok)
+        // Ligne 2 (tiers bas, hors sélection) : la porte doit l'avaler.
+        t = SystemClock.uptimeMillis()
+        dispatchAll(
+            es,
+            simpleDown(t, wv * 0.3f, hv * 0.66f),
+            MotionEvent.obtain(t, t + 16, MotionEvent.ACTION_MOVE, wv * 0.5f, hv * 0.66f, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t, t + 32, MotionEvent.ACTION_MOVE, wv * 0.7f, hv * 0.66f, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t, t + 48, MotionEvent.ACTION_UP, wv * 0.7f, hv * 0.66f, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(400)
+        var bmp: Bitmap? = null
+        val clock = Object()
+        es.pullFrameFull(0) { b ->
+            synchronized(clock) {
+                bmp = b
+                clock.notifyAll()
+            }
+        }
+        synchronized(clock) {
+            if (bmp == null) clock.wait(5000)
+        }
+        assertNotNull("pullFrameFull must return a bitmap", bmp)
+        val b = bmp!!
+        val (e1x, e1y) = es.screenToEngine(wv * 0.5f, hv * 0.33f)
+        val (e2x, e2y) = es.screenToEngine(wv * 0.5f, hv * 0.66f)
+        // Coordonnées bitmap = pixels moteur (pullFrameFull = engineWidth).
+        val sx = (b.width.toFloat() / es.canvasWidth() * e1x).toInt()
+            .coerceIn(0, b.width - 1)
+        val sy = (b.height.toFloat() / es.canvasHeight() * e1y).toInt()
+            .coerceIn(0, b.height - 1)
+        val tx = (b.width.toFloat() / es.canvasWidth() * e2x).toInt()
+            .coerceIn(0, b.width - 1)
+        val ty = (b.height.toFloat() / es.canvasHeight() * e2y).toInt()
+            .coerceIn(0, b.height - 1)
+        fun dark(px: Int): Boolean {
+            val r = (px shr 16) and 0xFF
+            val g = (px shr 8) and 0xFF
+            val bl = px and 0xFF
+            return r < 100 && g < 100 && bl < 100
+        }
+        assertTrue("line 1 (selected) must carry ink", dark(b.getPixel(sx, sy)))
+        assertTrue("line 2 (outside) must stay white", b.getPixel(tx, ty) == -1)
+        b.recycle()
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.setSelectionMask(null)
+            es.undo()
+        }
+    }
+
+    // §5 contour progressif : bord = rampe, centre/extérieur intacts.
+    @Test
+    fun selectionFeatherRadius() {
+        val es = surf()
+        awaitSurface(es)
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.selectRectEngine(40f, 40f, 140f, 140f)
+            es.featherSelectionRadius(8f)
+        }
+        assertEquals("center must stay fully selected", 255, es.selectionAlphaForTest(90, 90))
+        assertEquals("far outside must stay empty", 0, es.selectionAlphaForTest(10, 10))
+        val edge = es.selectionAlphaForTest(40, 90)
+        assertTrue("edge must be a ramp (got $edge)", edge in 1..254)
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+        }
+    }
+
+    // §5 rayon 0 = identité byte-exacte.
+    @Test
+    fun selectionFeatherZeroIdentity() {
+        val es = surf()
+        awaitSurface(es)
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.selectRectEngine(40f, 40f, 140f, 140f)
+        }
+        val h1 = es.selectionHashForTest()
+        composeRule.activityRule.scenario.onActivity {
+            es.featherSelectionRadius(0f)
+        }
+        assertEquals("radius 0 must leave the mask byte-identical", h1, es.selectionHashForTest())
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+        }
+    }
+
+    // §5 masque rapide : blanc agrandit, noir réduit, toggle = fourmis.
+    @Test
+    fun quickMaskPaintEdits() {
+        val es = surf()
+        awaitSurface(es)
+        val ew = es.canvasWidth()
+        val eh = es.canvasHeight()
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.quickMask = true
+            es.paintMaskAt(ew * 0.25f, eh * 0.25f, true)
+        }
+        val grown = es.selectionCountForTest()
+        assertTrue("white must grow the mask (got $grown)", grown > 0)
+        composeRule.activityRule.scenario.onActivity {
+            es.paintMaskAt(ew * 0.25f, eh * 0.25f, false)
+        }
+        val shrunk = es.selectionCountForTest()
+        assertTrue("black must shrink the mask ($grown -> $shrunk)", shrunk < grown)
+        composeRule.activityRule.scenario.onActivity {
+            es.quickMask = false
+            es.clearSelection()
+        }
+    }
+
+    // §5 undo app-side du masque.
+    @Test
+    fun quickMaskUndoRestores() {
+        val es = surf()
+        awaitSurface(es)
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+        }
+        uiSync { it.selectRectEngine(40f, 40f, 140f, 140f) }
+        val h1 = es.selectionHashForTest()
+        composeRule.activityRule.scenario.onActivity {
+            es.pushSelectionUndo()
+            // Blanc HORS du rect (l'intérieur est déjà à 255 : no-op).
+            es.paintMaskAt(180f, 60f, true)
+        }
+        assertTrue("mask paint must change the mask", es.selectionHashForTest() != h1)
+        composeRule.activityRule.scenario.onActivity {
+            assertTrue("mask undo must succeed", es.undoSelection())
+        }
+        assertEquals("mask undo must restore the mask exactly", h1, es.selectionHashForTest())
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+        }
+    }
+
+    // §6 unsharp : pattern posterize (modifie + undo).
+    @Test
+    fun applyFilterKnownUnsharpModifiesComposite() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            paintStroke(handle)
+            val before = compositeOf(handle)
+            assertTrue(
+                EngineHost.nApplyFilter(
+                    handle, "unsharp",
+                    """{"radius":2,"amount":1,"threshold":0}"""
+                )
+            )
+            val after = compositeOf(handle)
+            val changed = after.indices.count { after[it] != before[it] }
+            assertTrue("unsharp must modify composite pixels, got $changed", changed > 0)
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "undo must restore the pre-filter composite exactly",
+                compositeOf(handle).contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // §6 seuillage sous masque : pont sélection, hors-masque identique.
+    @Test
+    fun thresholdMasked() {
+        val es = surf()
+        awaitSurface(es)
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.setSelectionMask(null)
+        }
+        // Trait pleine largeur au milieu.
+        val wv = es.width.toFloat()
+        val hv = es.height.toFloat()
+        val t = SystemClock.uptimeMillis()
+        dispatchAll(
+            es,
+            simpleDown(t, wv * 0.2f, hv * 0.5f),
+            MotionEvent.obtain(t, t + 16, MotionEvent.ACTION_MOVE, wv * 0.5f, hv * 0.5f, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t, t + 32, MotionEvent.ACTION_MOVE, wv * 0.8f, hv * 0.5f, 1f, 1f, 0, 1f, 1f, 0, 0),
+            MotionEvent.obtain(t, t + 48, MotionEvent.ACTION_UP, wv * 0.8f, hv * 0.5f, 1f, 1f, 0, 1f, 1f, 0, 0)
+        )
+        Thread.sleep(400)
+        val ew = es.canvasWidth()
+        val eh = es.canvasHeight()
+        // Moitié droite sélectionnée ; seuil 10 : l'encre sombre du trait
+        // (luma ~20) passe au blanc à droite, reste à gauche.
+        uiSync { it.selectRectEngine(ew / 2f, 0f, ew.toFloat(), eh.toFloat()) }
+        val lock = Object()
+        var done = false
+        var ok = false
+        composeRule.activityRule.scenario.onActivity {
+            es.applyFilterInSelection("threshold", """{"level":10,"dither":0}""") { r ->
+                synchronized(lock) {
+                    ok = r
+                    done = true
+                    lock.notifyAll()
+                }
+            }
+        }
+        synchronized(lock) {
+            if (!done) lock.wait(20000)
+        }
+        assertTrue("threshold in selection must succeed", done && ok)
+        var bmp: Bitmap? = null
+        val clock = Object()
+        es.pullFrameFull(es.currentFrameIndex()) { b ->
+            synchronized(clock) {
+                bmp = b
+                clock.notifyAll()
+            }
+        }
+        synchronized(clock) {
+            if (bmp == null) clock.wait(5000)
+        }
+        assertNotNull("pullFrameFull must return a bitmap", bmp)
+        val b = bmp!!
+        val my = (b.height / 2).coerceIn(0, b.height - 1)
+        val lx = (b.width / 4).coerceIn(0, b.width - 1)
+        val rx = (b.width * 3 / 4).coerceIn(0, b.width - 1)
+        fun dark(px: Int): Boolean {
+            val r = (px shr 16) and 0xFF
+            return r < 100
+        }
+        assertTrue("left of mask must keep the inked stroke", dark(b.getPixel(lx, my)))
+        assertTrue("right of mask must be thresholded white", b.getPixel(rx, my) == -1)
+        b.recycle()
+        composeRule.activityRule.scenario.onActivity {
+            es.clearSelection()
+            es.setSelectionMask(null)
+            es.undo()
+        }
+    }
+
+    // T1 UI : le toggle Peinture ouvre la rangée T1 + le panneau seau
+    // (composition + tags, sans toucher au moteur). assertExists pour
+    // la rangée et le panneau (le layout vertical dépend de l'écran) ;
+    // IsDisplayed pour les chips de la rangée principale (contrat
+    // slice7 : visibles après scroll explicite).
+    @Test
+    fun t1PaintRowOpensBucketPanel() {
+        ensureDockOpen()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-t1-toggle").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-t1-toggle").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-t1-row").assertExists()
+        composeRule.onNodeWithTag("tool-t1-bucket").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-t1-bucket").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("t1-bucket-panel").assertExists()
+        composeRule.onNodeWithTag("t1-tolerance").assertExists()
+        // Refermer : la rangée disparaît, la rangée principale reste.
+        composeRule.onNodeWithTag("tool-t1-toggle").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-t1-bucket").assertDoesNotExist()
+        composeRule.onNodeWithTag("tool-file").performScrollTo()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tool-file").assertIsDisplayed()
+    }
+
+    // Sonde §4.4 : temps du miroir Kotlin sur 1024px (tranche le repli ;
+    // 5 s = garde-fou, jamais un gate strict — la décision est notée en
+    // ARCHITECTURE.md avec la mesure lue dans le log T1-PROBE).
+    @Test
+    fun wandKotlinMirrorTiming1024() {
+        val s = 1024
+        val px = IntArray(s * s) { -1 }
+        val r = 400
+        for (y in 0 until s) {
+            for (x in 0 until s) {
+                val dx = x - s / 2
+                val dy = y - s / 2
+                if (dx * dx + dy * dy < r * r) px[y * s + x] = -16777216
+            }
+        }
+        val t0 = SystemClock.uptimeMillis()
+        val region = floodRegionKotlin(px, s, s, 4, 4, 0.15f)
+        val dt = SystemClock.uptimeMillis() - t0
+        var n = 0
+        for (v in region) if (v) n++
+        println("T1-PROBE wandKotlinMirror1024: ${dt}ms selected=$n")
+        assertTrue("mirror must select the background ($n)", n > s * s / 2)
+        assertTrue("mirror must exclude the disc", n < s * s)
+        assertTrue("mirror timing sanity (<5s, got ${dt}ms)", dt < 5000)
     }
 }

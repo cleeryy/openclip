@@ -503,6 +503,149 @@ static bool fDenoise(const std::vector<std::uint8_t>& in, int w, int h,
     return true;
 }
 
+// T1 unsharp mask (ARCHITECTURE.md "T1 additions", clean-room): true
+// parameterizable-radius unsharp mask. out = c + amount*(c-blur) per
+// channel when |c-blur| > threshold, else c (threshold calms flat
+// areas against noise). radius bounds match gaussianBlur; amount 0 =
+// byte-identical early-out (no-op success).
+static bool fUnsharp(const std::vector<std::uint8_t>& in, int w, int h,
+                     double radius, double amount, double threshD,
+                     std::vector<std::uint8_t>& out, std::string& error) {
+    if (!(radius > 0.0) || radius > 64.0) {
+        error = "unsharp: radius must be in (0,64]";
+        return false;
+    }
+    if (!(amount >= 0.0) || amount > 8.0) {
+        error = "unsharp: amount must be in [0,8]";
+        return false;
+    }
+    const double threshold =
+        threshD < 0.0 ? 0.0 : (threshD > 255.0 ? 255.0 : threshD);
+    out = in;
+    if (amount <= 0.0) return true;
+    std::vector<float> bl;
+    blurSeparable(in, w, h, radius, bl);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            for (int c = 0; c < 3; ++c) {
+                const std::size_t i4 =
+                    (static_cast<std::size_t>(y) * w + x) * 4;
+                const std::size_t i3 =
+                    (static_cast<std::size_t>(y) * w + x) * 3;
+                const double diff =
+                    static_cast<double>(in[i4 + c]) - bl[i3 + c];
+                if (std::fabs(diff) <= threshold) continue;
+                out[i4 + c] = clamp255(in[i4 + c] + amount * diff);
+            }
+    return true;
+}
+
+// T1 color balance (ARCHITECTURE.md "T1 additions", clean-room):
+// "shadows|midtones|highlights":"cr,mv,jb" triplets, each -100..+100.
+// Zone weights are soft luma ramps (shadows peak at black,
+// highlights at white, midtones at mid gray). Adversary channels:
+// cr>0 adds red / removes green+blue (cyan does the reverse),
+// mv>0 adds magenta (red+blue) / removes green, jb>0 adds yellow
+// (red+green) / removes blue. Deltas are in raw px units (triplet
+// value * zone weight); the registry clamps to [0,alpha] after.
+static bool parseTriplet(const std::string& s, double v[3],
+                         std::string& error) {
+    char* e = nullptr;
+    const char* p = s.c_str();
+    for (int k = 0; k < 3; ++k) {
+        while (*p == ' ' || *p == '\t') ++p;
+        const double d = std::strtod(p, &e);
+        if (e == p || !(d >= -100.0) || !(d <= 100.0)) {
+            error = "colorBalance: triplets must be \"cr,mv,jb\" in [-100,100]";
+            return false;
+        }
+        v[k] = d;
+        p = e;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (k < 2) {
+            if (*p != ',') {
+                error = "colorBalance: triplets must be \"cr,mv,jb\" in [-100,100]";
+                return false;
+            }
+            ++p;
+        }
+    }
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p != '\0') {
+        error = "colorBalance: triplets must be \"cr,mv,jb\" in [-100,100]";
+        return false;
+    }
+    return true;
+}
+
+static bool fColorBalance(const std::vector<std::uint8_t>& in,
+                          const double sh[3], const double mid[3],
+                          const double hi[3], std::vector<std::uint8_t>& out) {
+    out = in;
+    for (std::size_t i = 0; i + 3 < out.size(); i += 4) {
+        const double lum =
+            (0.299 * in[i] + 0.587 * in[i + 1] + 0.114 * in[i + 2]) / 255.0;
+        // Soft QUADRATIC zone ramps (spec §6.2 "recouvrement doux"):
+        // shadows peak at black, highlights at white, midtones at mid
+        // gray; the square falloff keeps far zones within +/-1 px of
+        // identity (locked by filters_balance_shadows_only_dark).
+        const double wSh = (1.0 - lum) * (1.0 - lum);
+        const double wHi = lum * lum;
+        double midW = 1.0 - std::fabs(2.0 * lum - 1.0);
+        if (midW < 0.0) midW = 0.0;
+        midW *= midW;
+        const double zones[3] = {wSh, midW, wHi};
+        const double* trips[3] = {sh, mid, hi};
+        double dr = 0, dg = 0, db = 0;
+        for (int z = 0; z < 3; ++z) {
+            const double w = zones[z];
+            if (w <= 0.0) continue;
+            const double cr = trips[z][0] * w;
+            const double mv = trips[z][1] * w;
+            const double jb = trips[z][2] * w;
+            dr += cr + 0.5 * mv + 0.5 * jb;
+            dg += -0.5 * cr - mv + 0.5 * jb;
+            db += -0.5 * cr + 0.5 * mv - jb;
+        }
+        out[i] = clamp255(static_cast<double>(in[i]) + dr);
+        out[i + 1] = clamp255(static_cast<double>(in[i + 1]) + dg);
+        out[i + 2] = clamp255(static_cast<double>(in[i + 2]) + db);
+    }
+    return true;
+}
+
+// Ordered Bayer 8x8 (0..63) — same table as the V+2 GIF writer
+// (clean-room from scratch, duplicated here: single-header rule, no
+// cross-io dependency from the filter kernel).
+static const int kThreshBayer8[8][8] = {
+    {0, 32, 8, 40, 2, 34, 10, 42},   {48, 16, 56, 24, 50, 18, 58, 26},
+    {12, 44, 4, 36, 14, 46, 6, 38},  {60, 28, 52, 20, 62, 30, 54, 22},
+    {3, 35, 11, 43, 1, 33, 9, 41},   {51, 19, 59, 27, 49, 17, 57, 25},
+    {15, 47, 7, 39, 13, 45, 5, 37},  {63, 31, 55, 23, 61, 29, 53, 21},
+};
+
+// T1 threshold (ARCHITECTURE.md "T1 additions", clean-room): binary
+// black/white by Rec.601 luma. dither != 0 = ordered Bayer-8 around
+// the level (mean-preserving: +/-31.5 luma units).
+static bool fThreshold(const std::vector<std::uint8_t>& in, int w, int h,
+                       double levelD, bool dither,
+                       std::vector<std::uint8_t>& out) {
+    double level = levelD;
+    if (level < 0.0) level = 0.0;
+    if (level > 255.0) level = 255.0;
+    out = in;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            double lum = 0.299 * in[i] + 0.587 * in[i + 1] + 0.114 * in[i + 2];
+            if (dither)
+                lum += kThreshBayer8[y & 7][x & 7] - 31.5;
+            const std::uint8_t v = (lum >= level) ? 255 : 0;
+            out[i] = out[i + 1] = out[i + 2] = v;
+        }
+    return true;
+}
+
 }  // namespace (anonymous helpers)
 
 // --- Registry ---
@@ -516,7 +659,7 @@ bool canApply(const std::string& name) {
 std::vector<std::string> filterNames() {
     return {"gaussianBlur", "sharpen", "motionBlur", "radialBlur", "posterize",
             "levels", "chromaticAberration", "addNoise", "mosaic",
-            "gradientMap", "denoise"};
+            "gradientMap", "denoise", "unsharp", "colorBalance", "threshold"};
 }
 
 bool applyFilter(Surface& s, const std::string& name,
@@ -600,6 +743,37 @@ bool applyFilter(Surface& s, const std::string& name,
             if (jsonStr(paramsJson, "mode", mv) && !mv.empty()) mode = mv;
         }
         ok = fDenoise(in, w, h, strength, mode, out, error);
+    } else if (name == "unsharp") {
+        double radius = 2.0, amount = 0.6, threshold = 2.0;
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "radius", d)) radius = d;
+            if (jsonNum(paramsJson, "amount", d)) amount = d;
+            if (jsonNum(paramsJson, "threshold", d)) threshold = d;
+        }
+        ok = fUnsharp(in, w, h, radius, amount, threshold, out, error);
+    } else if (name == "colorBalance") {
+        double sh[3] = {0, 0, 0}, mid[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+        ok = true;
+        if (!paramsJson.empty()) {
+            std::string sv;
+            if (jsonStr(paramsJson, "shadows", sv) && !sv.empty() &&
+                !parseTriplet(sv, sh, error))
+                ok = false;
+            if (ok && jsonStr(paramsJson, "midtones", sv) && !sv.empty() &&
+                !parseTriplet(sv, mid, error))
+                ok = false;
+            if (ok && jsonStr(paramsJson, "highlights", sv) && !sv.empty() &&
+                !parseTriplet(sv, hi, error))
+                ok = false;
+        }
+        if (ok) ok = fColorBalance(in, sh, mid, hi, out);
+    } else if (name == "threshold") {
+        double level = 128.0, dither = 0.0;
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "level", d)) level = d;
+            if (jsonNum(paramsJson, "dither", d)) dither = d;
+        }
+        ok = fThreshold(in, w, h, level, dither != 0.0, out);
     }
     if (!ok) return false;  // surface untouched
     // Alpha contract: never modify alpha; clamp RGB to [0, alpha].

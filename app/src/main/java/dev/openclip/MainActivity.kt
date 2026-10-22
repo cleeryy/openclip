@@ -99,6 +99,7 @@ import dev.openclip.ui.WorkspaceStore
 import dev.openclip.ui.parseHexColor
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.BrushHelpDialog
+import dev.openclip.ui.FeatherDialog
 import dev.openclip.ui.GesturesHelpDialog
 import dev.openclip.ui.LayerPanel
 import dev.openclip.ui.AutosavePanel
@@ -286,6 +287,8 @@ class MainActivity : ComponentActivity() {
         // V+3 §7: physical-keyboard shortcuts (fixed table, help dialog)
         // + external play-toggle requests for the timeline.
         val showShortcuts = remember { mutableStateOf(false) }
+        // T1 §5 : dialogue contour progressif (remplace le +1px fixe).
+        val showFeather = remember { mutableStateOf(false) }
         val playTickExt = remember { mutableStateOf(0) }
         val toolState = remember { ShortcutToolState() }
         // Slice 7: command bar folds to a pastille (phone default
@@ -450,6 +453,16 @@ class MainActivity : ComponentActivity() {
                 }
                 ShortcutAction.HELP -> {
                     showShortcuts.value = true
+                    true
+                }
+                // T1 §5: Q = bascule du masque rapide (session, overlay).
+                ShortcutAction.QUICK_MASK -> {
+                    if (s == null) return false
+                    s.quickMask = !s.quickMask
+                    if (s.quickMask) {
+                        s.paintTool = null
+                        s.selectionTool = null
+                    }
                     true
                 }
             }
@@ -1747,12 +1760,14 @@ class MainActivity : ComponentActivity() {
                                     }
                                 ),
                                 StudioMenuItem(
-                                    label = stringResource(R.string.select_feather),
+                                    // T1 §5 : l'ancien +1px fixe est
+                                    // remplace par le dialogue a rayon
+                                    // (migration documentee, pas de code
+                                    // mort : featherSelection() reste pour
+                                    // le toggle baguette "adoucir 1px").
+                                    label = stringResource(R.string.select_feather_radius),
                                     enabled = surface.hasSelection(),
-                                    onClick = {
-                                        surface.featherSelection()
-                                        refreshKey.value++
-                                    }
+                                    onClick = { showFeather.value = true }
                                 )
                             )
                         ),
@@ -2685,6 +2700,15 @@ class MainActivity : ComponentActivity() {
                 // V+3 §7: keyboard shortcut table (? key or Help menu).
                 if (showShortcuts.value) {
                     ShortcutHelpDialog(onDismiss = { showShortcuts.value = false })
+                }
+                // T1 §5 : contour progressif 0-32px.
+                if (showFeather.value) {
+                    activeSurface()?.let { surface ->
+                        FeatherDialog(
+                            surface = surface,
+                            onDismiss = { showFeather.value = false }
+                        )
+                    }
                 }
                 // V+1: one-shot eraser migration note (dialog, persisted
                 // in BrushPrefs so it shows once per install).

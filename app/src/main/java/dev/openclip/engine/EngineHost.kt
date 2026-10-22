@@ -99,4 +99,13 @@ object EngineHost {
 
     // M10 additions (ARCHITECTURE.md): procedural material tones.
     external fun nApplyTone(handle: Long, name: String): Boolean
+
+    // T1 additions (ARCHITECTURE.md): bucket fill + magic wand (shared
+    // flood kernel), gradient paint, figure stamps. All undoable via
+    // full-layer tile snapshots (filter pattern); false + layer
+    // untouched on bad layer/params/seed.
+    external fun nFloodFill(handle: Long, x: Int, y: Int, colorHex: String, json: String): Boolean
+    external fun nMagicWand(handle: Long, x: Int, y: Int, json: String): Boolean
+    external fun nPaintGradient(handle: Long, json: String): Boolean
+    external fun nStampShape(handle: Long, json: String): Boolean
 }
