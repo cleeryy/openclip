@@ -216,9 +216,24 @@ object BezierEdit {
 // ---- SVG export (spec §3.3, app-side pur) ----
 
 object SvgExport {
+    /** T2: per-path stroke color + linecap (round|butt from the tip). */
+    data class Stroke(
+        val pts: List<Triple<Float, Float, Float>>,
+        val width: Float,
+        val colorHex: String = "#000000",
+        val linecap: String = "round"
+    )
+
     fun serialize(
         w: Int, h: Int,
         paths: List<Pair<List<Triple<Float, Float, Float>>, Float>>
+    ): String = serializeStyled(w, h, paths.map { (pts, width) ->
+        Stroke(pts, width)
+    })
+
+    fun serializeStyled(
+        w: Int, h: Int,
+        strokes: List<Stroke>
     ): String {
         val sb = StringBuilder()
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
@@ -229,20 +244,22 @@ object SvgExport {
                 w, h, w, h
             )
         )
-        for ((pts, width) in paths) {
-            if (pts.isEmpty()) continue
+        for (s in strokes) {
+            if (s.pts.isEmpty()) continue
             sb.append("<path d=\"M")
-            pts.forEachIndexed { i, (x, y, _) ->
+            s.pts.forEachIndexed { i, (x, y, _) ->
                 if (i > 0) sb.append('L')
                 sb.append(String.format(Locale.US, "%.1f %.1f", x, y))
             }
-            // Stroke width = mean profile (pressure-varying widths are
-            // approximated — documented honest limit, spec §3.3).
+            // T2: exact per-path color + linecap (the old "mean width
+            // + black" approximation is gone — spec §4.2).
+            val cap = if (s.linecap == "butt") "butt" else "round"
+            val col = if (s.colorHex.matches(Regex("#[0-9a-fA-F]{6}"))) s.colorHex else "#000000"
             sb.append(
                 String.format(
                     Locale.US,
-                    "\" fill=\"none\" stroke=\"#000000\" stroke-width=\"%.1f\"/>\n",
-                    width
+                    "\" fill=\"none\" stroke=\"%s\" stroke-width=\"%.1f\" stroke-linecap=\"%s\"/>\n",
+                    col, s.width, cap
                 )
             )
         }

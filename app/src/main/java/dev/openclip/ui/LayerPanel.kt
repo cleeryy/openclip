@@ -82,6 +82,7 @@ internal data class LayerInfo(
     val clipped: Boolean,
     val hasAdjust: Boolean,
     val hasText: Boolean = false,
+    val hasBubble: Boolean = false,
     val tagColor: Int? = null,
     val children: List<LayerInfo> = emptyList()
 )
@@ -158,7 +159,8 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
                     hasMask = c.optBoolean("mask", false),
                     clipped = c.optBoolean("clipped", false),
                     hasAdjust = c.optJSONObject("adjust") != null,
-                hasText = c.optJSONObject("text") != null
+                hasText = c.optJSONObject("text") != null,
+                hasBubble = c.optJSONObject("bubble") != null
                 )
             )
         }
@@ -177,6 +179,8 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
         hasAdjust = adj != null,
         hasText = s.optJSONObject("text") != null ||
             o.optJSONObject("text") != null,
+        hasBubble = s.optJSONObject("bubble") != null ||
+            o.optJSONObject("bubble") != null,
         children = kids
     )
 }
@@ -706,6 +710,17 @@ private fun LayerRow(
                     modifier = Modifier
                         .testTag("layer-badge-tx-${info.index}")
                         .semantics { contentDescription = txDesc }
+                )
+            }
+            if (info.hasBubble) {
+                val bDesc = stringResource(R.string.bubble_layer_badge)
+                Text(
+                    "○",
+                    color = Color(0xFFE08AB0),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-bubble-${info.index}")
+                        .semantics { contentDescription = bDesc }
                 )
             }
             if (info.hasAdjust) {

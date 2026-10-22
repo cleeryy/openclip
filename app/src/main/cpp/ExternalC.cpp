@@ -39,6 +39,7 @@
 
 #include "openclip/blend.h"
 #include "openclip/brush.h"
+#include "openclip/bubble.h"
 #include "openclip/canvas.h"
 #include "openclip/cels.h"
 #include "openclip/filters.h"
@@ -512,6 +513,88 @@ void parseTextDescriptor(const std::string& j, openclip::Layer& l) {
     l.textColor = color.empty() ? "#141414" : color.substr(0, 128);
     const std::string box = jsonStr(j, "box");
     l.textBox = box.substr(0, 128);
+    // T2 extensions (ARCHITECTURE.md §T2 §1–§2, opaque M3 keys).
+    // runs arrives as a raw JSON array: capture the bracketed span
+    // (bounded); string forms fall back to jsonStr.
+    l.textRuns.clear();
+    {
+        const std::size_t at = j.find("\"runs\"");
+        if (at != std::string::npos) {
+            const std::size_t colon = j.find(':', at + 6);
+            if (colon != std::string::npos) {
+                std::size_t q = colon + 1;
+                while (q < j.size() && (j[q] == ' ' || j[q] == '\t')) ++q;
+                if (q < j.size() && j[q] == '[') {
+                    int dep = 0;
+                    std::size_t k = q;
+                    bool inS = false;
+                    while (k < j.size() && k - q < 16384) {
+                        const char c = j[k];
+                        if (c == '"' && (k == 0 || j[k - 1] != '\\'))
+                            inS = !inS;
+                        if (!inS) {
+                            if (c == '[') ++dep;
+                            if (c == ']') {
+                                --dep;
+                                if (dep == 0) {
+                                    ++k;
+                                    break;
+                                }
+                            }
+                        }
+                        ++k;
+                    }
+                    if (dep == 0) l.textRuns = j.substr(q, k - q);
+                } else {
+                    l.textRuns = jsonStr(j, "runs").substr(0, 16384);
+                }
+            }
+        }
+    }
+    // outline: string "#RRGGBB" plus optional object {"w":..,
+    // "color":..} — sniff the first non-space char like runs above.
+    l.textOutline.clear();
+    {
+        const std::size_t at = j.find("\"outline\"");
+        if (at != std::string::npos) {
+            const std::size_t colon = j.find(':', at + 9);
+            if (colon != std::string::npos) {
+                std::size_t q = colon + 1;
+                while (q < j.size() && (j[q] == ' ' || j[q] == '\t')) ++q;
+                if (q < j.size() && j[q] == '{') {
+                    int dep = 0;
+                    std::size_t k = q;
+                    bool inS = false;
+                    while (k < j.size() && k - q < 256) {
+                        const char c = j[k];
+                        if (c == '"' && (k == 0 || j[k - 1] != '\\'))
+                            inS = !inS;
+                        if (!inS) {
+                            if (c == '{') ++dep;
+                            if (c == '}') {
+                                --dep;
+                                if (dep == 0) {
+                                    ++k;
+                                    break;
+                                }
+                            }
+                        }
+                        ++k;
+                    }
+                    if (dep == 0) l.textOutline = j.substr(q, k - q);
+                } else {
+                    l.textOutline = jsonStr(j, "outline").substr(0, 256);
+                }
+            }
+        }
+    }
+    const std::string fontfile = jsonStr(j, "fontfile");
+    l.textFontFile = fontfile.substr(0, 128);
+    const std::string dir = jsonStr(j, "dir");
+    l.textDir = (dir == "v") ? "v" : "";
+    const std::string hy = jsonStr(j, "hyphen");
+    const double hyn = jsonNum(j, "hyphen", -1.0);
+    l.textHyphen = (hy == "1" || hy == "true" || hyn == 1.0) ? "1" : "";
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -779,7 +862,8 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
         out += "}";
     }
     // V+1: text fiche (absent = normal raster layer; the app parses
-    // tolerantly and shows the Tx badge + re-edit).
+    // tolerantly and shows the Tx badge + re-edit). T2 keys ride along
+    // (runs/outline/fontfile/dir/hyphen, ARCHITECTURE.md §T2).
     if (l.hasText()) {
         out += ",\"text\":{\"content\":";
         appendJsonStr(out, l.textContent);
@@ -803,7 +887,65 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
         appendJsonStr(out, l.textColor);
         out += ",\"box\":";
         appendJsonStr(out, l.textBox);
+        if (!l.textRuns.empty()) {
+            // Stored as a raw JSON array span when possible (the app
+            // sends arrays); foreign string forms are escaped.
+            out += ",\"runs\":";
+            if (l.textRuns[0] == '[')
+                out += l.textRuns;
+            else
+                appendJsonStr(out, l.textRuns);
+        }
+        if (!l.textOutline.empty()) {
+            // Stored as a raw JSON object span when possible.
+            out += ",\"outline\":";
+            if (l.textOutline[0] == '{')
+                out += l.textOutline;
+            else
+                appendJsonStr(out, l.textOutline);
+        }
+        if (!l.textFontFile.empty()) {
+            out += ",\"fontfile\":";
+            appendJsonStr(out, l.textFontFile);
+        }
+        if (!l.textDir.empty()) {
+            out += ",\"dir\":";
+            appendJsonStr(out, l.textDir);
+        }
+        if (!l.textHyphen.empty()) {
+            out += ",\"hyphen\":true";
+        }
         out += "}";
+    }
+    // T2 bubble fiche (absent = normal layer; the app shows the o
+    // badge + panel — ARCHITECTURE.md §T2 §5).
+    if (l.hasBubble()) {
+        out += ",\"bubble\":{\"shape\":";
+        appendJsonStr(out, l.bubbleShape);
+        out += ",\"frame\":";
+        appendJsonStr(out, l.bubbleFrame);
+        out += ",\"tail\":";
+        appendJsonStr(out, l.bubbleTail);
+        out += ",\"fill\":";
+        appendJsonStr(out, l.bubbleFill.empty() ? "#FFFFFF" : l.bubbleFill);
+        out += ",\"stroke\":";
+        appendJsonStr(out,
+                      l.bubbleStroke.empty() ? "#000000" : l.bubbleStroke);
+        out += ",\"strokeW\":";
+        char wbuf[32];
+        std::snprintf(wbuf, sizeof wbuf, "%g", l.bubbleStrokeW);
+        out += wbuf;
+        out += ",\"textLayer\":";
+        out += std::to_string(l.bubbleTextLayer);
+        out += "}";
+    }
+    // T2 vector counters (the visible over-cap counter + live count;
+    // styles re-read via nVectorPaths — ARCHITECTURE.md §T2 §4).
+    if (l.isVector) {
+        out += ",\"vectorPaths\":";
+        out += std::to_string(l.vectorData.size());
+        out += ",\"vectorStored\":";
+        out += l.vectorStored ? "true" : "false";
     }
     // V+2: generic fiche map (absent = no fiches; the app parses
     // tolerantly and rebuilds panels/bulles/speed from it).
@@ -907,6 +1049,11 @@ Java_dev_openclip_engine_EngineHost_nSetLayerText(JNIEnv* env, jclass,
         l.textTracking = 0.0;
         l.textColor.clear();
         l.textBox.clear();
+        l.textRuns.clear();
+        l.textOutline.clear();
+        l.textFontFile.clear();
+        l.textDir.clear();
+        l.textHyphen.clear();
         return JNI_TRUE;
     }
     parseTextDescriptor(j, l);
@@ -1787,6 +1934,211 @@ Java_dev_openclip_engine_EngineHost_nUndoVector(JNIEnv*, jclass, jlong handle,
                : JNI_FALSE;
 }
 
+// T2 indexed vector ops (ARCHITECTURE.md §T2 §3): snapshot-first
+// (1 undo step each), false + layer intact on bad input. id is the
+// positional index in vectorData (the app re-reads nVectorPaths
+// before every op — no id caching across gestures).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nReplaceVectorPath(
+    JNIEnv* env, jclass, jlong handle, jint index, jint id,
+    jstring pathJson) {
+    Session* s = asSession(handle);
+    if (!s || !pathJson || index < 0 ||
+        index >= static_cast<int>(cur(s).layerCount()) || id < 0)
+        return JNI_FALSE;
+    const std::string j = toStd(env, pathJson);
+    if (j.empty()) return JNI_FALSE;
+    std::string kind = jsonStr(j, "kind");
+    kind = (kind == "eraser-stroke") ? "eraser-stroke" : "stroke";
+    (void)kind;  // replace never converts ink<->eraser (engine keeps it)
+    openclip::VectorHistory& h = vecs(s)[static_cast<std::size_t>(index)];
+    std::string err;
+    return openclip::replaceVectorPath(cur(s), h,
+                                       static_cast<std::size_t>(index),
+                                       static_cast<std::size_t>(id), j,
+                                       1.0f + 3.0f * s->curve, err)
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nConnectVectorPaths(
+    JNIEnv* env, jclass, jlong handle, jint index, jint a, jint b,
+    jstring tolJson) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<int>(cur(s).layerCount()) || a < 0 || b < 0)
+        return JNI_FALSE;
+    float tol = 12.0f;  // default seam tolerance (ARCHITECTURE.md §T2)
+    const std::string j = tolJson ? toStd(env, tolJson) : std::string();
+    if (!j.empty()) {
+        // Bare number or {"tol":..} (M3 rule: garbage = default).
+        char* endp = nullptr;
+        const double bare =
+            std::strtod(j.c_str(), &endp);
+        if (endp != j.c_str() &&
+            static_cast<std::size_t>(endp - j.c_str()) == j.size() &&
+            bare > 0 && bare <= 512)
+            tol = static_cast<float>(bare);
+        else {
+            const double t = jsonNum(j, "tol", 12.0);
+            if (t > 0 && t <= 512) tol = static_cast<float>(t);
+        }
+    }
+    openclip::VectorHistory& h = vecs(s)[static_cast<std::size_t>(index)];
+    std::string err;
+    return openclip::connectVectorPaths(cur(s), h,
+                                        static_cast<std::size_t>(index),
+                                        static_cast<std::size_t>(a),
+                                        static_cast<std::size_t>(b), tol, err)
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+// Parse a doubles array: {"widths":[...]} or a bare [...] span.
+bool parseWidthsJson(const std::string& j, std::vector<float>& out) {
+    out.clear();
+    std::size_t ob = j.find("\"widths\"");
+    ob = (ob == std::string::npos) ? j.find('[')
+                                   : j.find('[', ob + 8);
+    if (ob == std::string::npos) return false;
+    int dep = 0;
+    std::size_t cb = std::string::npos;
+    bool inS = false;
+    for (std::size_t k = ob; k < j.size() && k - ob < 1048576; ++k) {
+        const char c = j[k];
+        if (c == '"' && (k == 0 || j[k - 1] != '\\')) inS = !inS;
+        if (inS) continue;
+        if (c == '[') ++dep;
+        if (c == ']') {
+            --dep;
+            if (dep == 0) {
+                cb = k;
+                break;
+            }
+        }
+    }
+    if (cb == std::string::npos) return false;
+    const std::string arr = j.substr(ob + 1, cb - ob - 1);
+    std::size_t q = 0;
+    while (q < arr.size() && out.size() < 65536) {
+        while (q < arr.size() && (arr[q] < '0' || arr[q] > '9') &&
+               arr[q] != '-' && arr[q] != '+' && arr[q] != '.')
+            ++q;
+        if (q >= arr.size()) break;
+        char* e1 = nullptr;
+        const float v = std::strtof(arr.c_str() + q, &e1);
+        if (e1 == arr.c_str() + q) break;
+        q = static_cast<std::size_t>(e1 - arr.c_str());
+        out.push_back(v);
+    }
+    return !out.empty();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetVectorWidths(
+    JNIEnv* env, jclass, jlong handle, jint index, jint id,
+    jstring widthsJson) {
+    Session* s = asSession(handle);
+    if (!s || !widthsJson || index < 0 ||
+        index >= static_cast<int>(cur(s).layerCount()) || id < 0)
+        return JNI_FALSE;
+    const std::string j = toStd(env, widthsJson);
+    if (j.empty()) return JNI_FALSE;
+    std::vector<float> w;
+    if (!parseWidthsJson(j, w)) return JNI_FALSE;
+    openclip::VectorHistory& h = vecs(s)[static_cast<std::size_t>(index)];
+    std::string err;
+    return openclip::setVectorWidths(cur(s), h,
+                                     static_cast<std::size_t>(index),
+                                     static_cast<std::size_t>(id), w, err)
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+// T2 bubble fiche (ARCHITECTURE.md §T2 §5, M8 pattern): null/empty
+// clears the fiche (normal layer again); otherwise the parsed fiche
+// is stored (opaque to the engine) and renders at composite time.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerBubble(
+    JNIEnv* env, jclass, jlong handle, jint index, jstring json) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
+    const std::string j = json ? toStd(env, json) : std::string();
+    if (j.empty()) {  // null/empty clears the descriptor
+        l.bubbleShape.clear();
+        l.bubbleFrame.clear();
+        l.bubbleTail.clear();
+        l.bubbleFill = "#FFFFFF";
+        l.bubbleStroke = "#000000";
+        l.bubbleStrokeW = 4.0f;
+        l.bubbleTextLayer = -1;
+        return JNI_TRUE;
+    }
+    const std::string shape = jsonStr(j, "shape");
+    // frame: string "x,y,w,h" or [x,y,w,h] array (M3 tolerance).
+    std::string frame = jsonStr(j, "frame");
+    if (frame.empty()) {
+        const std::size_t at = j.find("\"frame\"");
+        if (at != std::string::npos) {
+            const std::size_t ob = j.find('[', at + 7);
+            if (ob != std::string::npos) {
+                const std::size_t cb = j.find(']', ob);
+                if (cb != std::string::npos) {
+                    std::string nums;
+                    for (std::size_t k = ob + 1; k < cb; ++k)
+                        if ((j[k] >= '0' && j[k] <= '9') || j[k] == '-' ||
+                            j[k] == '+' || j[k] == '.' || j[k] == ',')
+                            nums += j[k];
+                    frame = nums;
+                }
+            }
+        }
+    }
+    std::string tail = jsonStr(j, "tail");
+    if (tail.empty()) {
+        const std::size_t at = j.find("\"tail\"");
+        if (at != std::string::npos) {
+            const std::size_t ob = j.find('[', at + 6);
+            if (ob != std::string::npos) {
+                const std::size_t cb = j.find(']', ob);
+                if (cb != std::string::npos) {
+                    std::string nums;
+                    for (std::size_t k = ob + 1; k < cb; ++k)
+                        if ((j[k] >= '0' && j[k] <= '9') || j[k] == '-' ||
+                            j[k] == '+' || j[k] == '.' || j[k] == ',')
+                            nums += j[k];
+                    tail = nums;
+                }
+            }
+        }
+    }
+    std::string fill = jsonStr(j, "fill");
+    if (fill.empty()) fill = "#FFFFFF";
+    std::string stroke = jsonStr(j, "stroke");
+    if (stroke.empty()) stroke = "#000000";
+    double sw = jsonNum(j, "strokeW", 4.0);
+    if (!(sw >= 1.0 && sw <= 32.0)) sw = 4.0;
+    const double tl = jsonNum(j, "textLayer", -1.0);
+    openclip::BubbleSpec spec;
+    std::string err;
+    if (!openclip::parseBubbleSpec(shape, frame, tail, fill, stroke,
+                                   static_cast<float>(sw), spec, err))
+        return JNI_FALSE;
+    l.bubbleShape = spec.shape;
+    l.bubbleFrame = frame;
+    l.bubbleTail = tail;
+    l.bubbleFill = fill.substr(0, 128);
+    l.bubbleStroke = stroke.substr(0, 128);
+    l.bubbleStrokeW = static_cast<float>(sw);
+    l.bubbleTextLayer =
+        (tl >= -1.0 && tl <= 1024.0) ? static_cast<int>(tl) : -1;
+    return JNI_TRUE;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
                                                jlong handle, jstring kindsJson) {
@@ -2406,9 +2758,30 @@ Java_dev_openclip_engine_EngineHost_nVectorPaths(JNIEnv* env, jclass,
             std::snprintf(buf, sizeof buf, "%.2f", vp.widthProfile[i]);
             out += buf;
         }
+        // T2 style (ARCHITECTURE.md §T2 §4): read-only, no new symbol.
         out += "],\"kind\":\"";
         out += vp.kind;
-        out += "\"}";
+        out += "\",\"tip\":\"";
+        out += vp.tip;
+        out += "\",\"size\":";
+        {
+            char sbuf[32];
+            std::snprintf(sbuf, sizeof sbuf, "%g", vp.sizeMul);
+            out += sbuf;
+        }
+        out += ",\"color\":\"#";
+        {
+            char hbuf[8];
+            std::snprintf(hbuf, sizeof hbuf, "%02X%02X%02X", vp.r, vp.g,
+                          vp.b);
+            out += hbuf;
+        }
+        out += "\",\"corners\":[";
+        for (std::size_t i = 0; i < vp.corners.size(); ++i) {
+            if (i > 0) out += ",";
+            out += vp.corners[i] ? "1" : "0";
+        }
+        out += "]}";
     }
     out += "]}";
     return env->NewStringUTF(out.c_str());

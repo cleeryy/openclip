@@ -5,9 +5,11 @@
 
 #include "openclip/canvas.h"
 #include "openclip/filters.h"
+#include "openclip/vector.h"
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <sstream>
 
@@ -129,7 +131,7 @@ bool decodePng(const std::vector<std::uint8_t>& png, Surface& s) {
 
 // --- save: recursive stack writer ---
 
-void writeLayerList(const std::vector<Layer>& layers, std::ostringstream& xml,
+void writeLayerList(std::vector<Layer>& layers, std::ostringstream& xml,
                     std::vector<std::pair<std::string, std::vector<std::uint8_t>>>&
                         entries,
                     int& idx, int indent, std::size_t depth,
@@ -149,6 +151,89 @@ void writeTextAttrs(const Layer& l, std::ostringstream& xml) {
         << " x-openclip-tracking=\"" << l.textTracking << "\""
         << " x-openclip-color=\"" << xmlEscape(l.textColor) << "\""
         << " x-openclip-box=\"" << xmlEscape(l.textBox) << "\"";
+    // T2 extensions (ARCHITECTURE.md §T2 §1–§2, opaque): written only
+    // when set (absent = global style / horizontal / no hyphen).
+    if (!l.textRuns.empty())
+        xml << " x-openclip-text-runs=\"" << xmlEscape(l.textRuns) << "\"";
+    if (!l.textOutline.empty())
+        xml << " x-openclip-text-outline=\""
+            << xmlEscape(l.textOutline) << "\"";
+    if (!l.textFontFile.empty())
+        xml << " x-openclip-text-fontfile=\""
+            << xmlEscape(l.textFontFile) << "\"";
+    if (!l.textDir.empty())
+        xml << " x-openclip-text-dir=\"" << xmlEscape(l.textDir) << "\"";
+    if (!l.textHyphen.empty())
+        xml << " x-openclip-text-hyphen=\""
+            << xmlEscape(l.textHyphen) << "\"";
+}
+
+// T2 bubble fiche attrs (ARCHITECTURE.md §T2 §5): written only when
+// the layer carries a balloon; readers ignoring unknown attrs degrade
+// to the visible pixels.
+void writeBubbleAttrs(const Layer& l, std::ostringstream& xml) {
+    if (!l.hasBubble()) return;
+    xml << " x-openclip-bubble=\"" << xmlEscape(l.bubbleShape) << "\""
+        << " x-openclip-bubble-frame=\"" << xmlEscape(l.bubbleFrame)
+        << "\"";
+    if (!l.bubbleTail.empty())
+        xml << " x-openclip-bubble-tail=\"" << xmlEscape(l.bubbleTail)
+            << "\"";
+    xml << " x-openclip-bubble-fill=\"" << xmlEscape(l.bubbleFill) << "\""
+        << " x-openclip-bubble-stroke=\""
+        << xmlEscape(l.bubbleStroke) << "\""
+        << " x-openclip-bubble-strokew=\"" << l.bubbleStrokeW << "\""
+        << " x-openclip-bubble-text=\"" << l.bubbleTextLayer << "\"";
+}
+
+// T2 vector sibling (ARCHITECTURE.md §T2 §4): serialize vectorData as
+// data/vectorNNN.json when it fits the 256 KiB cap; sets vectorStored
+// (the visible counter in nLayerState). Over-cap = PNG alone.
+void writeVectorSibling(Layer& l, std::ostringstream& xml,
+                        std::vector<std::pair<std::string, std::vector<std::uint8_t>>>&
+                            entries,
+                        int idx) {
+    l.vectorStored = false;
+    if (!l.isVector || l.vectorData.empty()) return;
+    std::ostringstream js;
+    js << "{\"paths\":[";
+    for (std::size_t k = 0; k < l.vectorData.size(); ++k) {
+        if (k > 0) js << ",";
+        const VectorPath& vp = l.vectorData[k];
+        js << "{\"pts\":[";
+        for (std::size_t i = 0; i < vp.pts.size(); ++i) {
+            if (i > 0) js << ",";
+            char buf[48];
+            std::snprintf(buf, sizeof buf, "[%.2f,%.2f]", vp.pts[i].x,
+                          vp.pts[i].y);
+            js << buf;
+        }
+        js << "],\"widths\":[";
+        for (std::size_t i = 0; i < vp.widthProfile.size(); ++i) {
+            if (i > 0) js << ",";
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.2f", vp.widthProfile[i]);
+            js << buf;
+        }
+        js << "],\"tip\":\"" << vp.tip << "\",\"size\":" << vp.sizeMul
+           << ",\"color\":\"#";
+        char hex[8];
+        std::snprintf(hex, sizeof hex, "%02X%02X%02X", vp.r, vp.g, vp.b);
+        js << hex << "\",\"corners\":[";
+        for (std::size_t i = 0; i < vp.corners.size(); ++i) {
+            if (i > 0) js << ",";
+            js << (vp.corners[i] ? "1" : "0");
+        }
+        js << "],\"kind\":\"" << vp.kind << "\"}";
+    }
+    js << "]}";
+    const std::string s = js.str();
+    if (s.size() > 262144) return;  // cap: PNG alone + counter
+    char name[64];
+    std::snprintf(name, sizeof name, "data/vector%03d.json", idx);
+    entries.push_back({name, {s.begin(), s.end()}});
+    xml << " x-openclip-vector=\"" << name << "\"";
+    l.vectorStored = true;
 }
 
 // V+2: generic opaque fiche map (nSetLayerMeta). Written verbatim,
@@ -159,7 +244,7 @@ void writeMetaAttrs(const Layer& l, std::ostringstream& xml) {
         xml << " " << kv.first << "=\"" << xmlEscape(kv.second) << "\"";
 }
 
-void writeLayerOne(const Layer& l, std::ostringstream& xml,
+void writeLayerOne(Layer& l, std::ostringstream& xml,
                    std::vector<std::pair<std::string, std::vector<std::uint8_t>>>&
                        entries,
                    int& idx, int indent, std::size_t depth, std::string& error,
@@ -187,6 +272,7 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
                     << "\"";
         }
         writeTextAttrs(l, xml);
+        writeBubbleAttrs(l, xml);
         writeMetaAttrs(l, xml);
         xml << ">\n";
         writeLayerList(l.children, xml, entries, idx, indent + 1,
@@ -210,7 +296,9 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
             xml << " adjust-curve=\"" << xmlEscape(l.adjustCurve) << "\"";
     }
     writeTextAttrs(l, xml);
+    writeBubbleAttrs(l, xml);
     writeMetaAttrs(l, xml);
+    writeVectorSibling(l, xml, entries, idx);
     xml << "/>\n";
     std::vector<std::uint8_t> png;
     if (!encodePng(l.surface, png)) {
@@ -222,14 +310,14 @@ void writeLayerOne(const Layer& l, std::ostringstream& xml,
     ++idx;
 }
 
-void writeLayerList(const std::vector<Layer>& layers, std::ostringstream& xml,
+void writeLayerList(std::vector<Layer>& layers, std::ostringstream& xml,
                     std::vector<std::pair<std::string, std::vector<std::uint8_t>>>&
                         entries,
                     int& idx, int indent, std::size_t depth,
                     std::string& error, bool& ok) {
     if (!ok) return;
-    for (const auto& l : layers) writeLayerOne(l, xml, entries, idx, indent,
-                                               depth, error, ok);
+    for (auto& l : layers) writeLayerOne(l, xml, entries, idx, indent,
+                                         depth, error, ok);
 }
 
 // --- load: recursive stack reader ---
@@ -300,9 +388,22 @@ void applyMetaAttrs(const std::string& xml, std::size_t tagStart,
             name == "x-openclip-size" || name == "x-openclip-style" ||
             name == "x-openclip-align" || name == "x-openclip-leading" ||
             name == "x-openclip-tracking" || name == "x-openclip-color" ||
-            name == "x-openclip-box") {
+            name == "x-openclip-box" || name == "x-openclip-text-runs" ||
+            name == "x-openclip-text-outline" ||
+            name == "x-openclip-text-fontfile" ||
+            name == "x-openclip-text-dir" ||
+            name == "x-openclip-text-hyphen" ||
+            name == "x-openclip-bubble" ||
+            name == "x-openclip-bubble-frame" ||
+            name == "x-openclip-bubble-tail" ||
+            name == "x-openclip-bubble-fill" ||
+            name == "x-openclip-bubble-stroke" ||
+            name == "x-openclip-bubble-strokew" ||
+            name == "x-openclip-bubble-text" ||
+            name == "x-openclip-vector") {
             p = e;
-            continue;  // text fiche has its own attrs (above)
+            continue;  // text/bubble/vector fiches have their own
+                       // attrs (above)
         }
         std::string v;
         if (tagAttr(xml, p, name.c_str(), v)) {
@@ -359,6 +460,282 @@ void applyTextAttrs(const std::string& xml, std::size_t tagStart,
     l.textColor = tagAttr(xml, tagStart, "x-openclip-color", v) ? capped(v)
                                                                 : "#141414";
     l.textBox = tagAttr(xml, tagStart, "x-openclip-box", v) ? capped(v) : "";
+    // T2 extensions (ARCHITECTURE.md §T2 §1–§2, opaque): absent = the
+    // global style / horizontal / no hyphen (rule M3).
+    l.textRuns.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-text-runs", v))
+        l.textRuns = v.substr(0, 16384);
+    l.textOutline.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-text-outline", v))
+        l.textOutline = v.substr(0, 256);
+    l.textFontFile.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-text-fontfile", v))
+        l.textFontFile = capped(v);
+    l.textDir.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-text-dir", v)) {
+        const std::string d = capped(v);
+        if (d == "v" || d == "h") l.textDir = d;
+    }
+    l.textHyphen.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-text-hyphen", v)) {
+        const std::string hh = capped(v);
+        if (hh == "1" || hh == "true") l.textHyphen = "1";
+    }
+}
+
+// T2 bubble fiche reader (ARCHITECTURE.md §T2 §5, same M8 contract as
+// the text fiche above): absent/unknown shape = normal layer.
+void applyBubbleAttrs(const std::string& xml, std::size_t tagStart,
+                      Layer& l) {
+    l.bubbleShape.clear();
+    l.bubbleFrame.clear();
+    l.bubbleTail.clear();
+    l.bubbleFill = "#FFFFFF";
+    l.bubbleStroke = "#000000";
+    l.bubbleStrokeW = 4.0f;
+    l.bubbleTextLayer = -1;
+    std::string v;
+    if (!tagAttr(xml, tagStart, "x-openclip-bubble", v)) return;
+    if (v != "ellipse" && v != "rounded") return;
+    l.bubbleShape = v;
+    auto capped = [](const std::string& s) { return s.substr(0, 128); };
+    l.bubbleFrame =
+        tagAttr(xml, tagStart, "x-openclip-bubble-frame", v) ? capped(v)
+                                                             : "";
+    l.bubbleTail =
+        tagAttr(xml, tagStart, "x-openclip-bubble-tail", v) ? capped(v)
+                                                            : "";
+    if (tagAttr(xml, tagStart, "x-openclip-bubble-fill", v) && !v.empty())
+        l.bubbleFill = capped(v);
+    if (tagAttr(xml, tagStart, "x-openclip-bubble-stroke", v) && !v.empty())
+        l.bubbleStroke = capped(v);
+    if (tagAttr(xml, tagStart, "x-openclip-bubble-strokew", v)) {
+        try {
+            l.bubbleStrokeW = std::stof(v);
+        } catch (...) {
+            l.bubbleStrokeW = 4.0f;
+        }
+        if (!(l.bubbleStrokeW >= 1.0f && l.bubbleStrokeW <= 32.0f))
+            l.bubbleStrokeW = 4.0f;
+    }
+    if (tagAttr(xml, tagStart, "x-openclip-bubble-text", v)) {
+        try {
+            l.bubbleTextLayer = std::stoi(v);
+        } catch (...) {
+            l.bubbleTextLayer = -1;
+        }
+        if (l.bubbleTextLayer < -1 || l.bubbleTextLayer > 1024)
+            l.bubbleTextLayer = -1;
+    }
+}
+
+// T2 vector sibling loader (ARCHITECTURE.md §T2 §4): parses
+// data/vectorNNN.json (the writer's format above) into vectorData.
+// Missing/unreadable = PNG alone as a NORMAL raster layer (isVector
+// cleared — never a broken layer, the degraded-propre contract).
+bool applyVectorSibling(const std::string& xml, std::size_t tagStart,
+                        const std::map<std::string, std::vector<std::uint8_t>>&
+                            entries,
+                        Layer& l) {
+    l.vectorData.clear();
+    l.vectorStored = false;
+    std::string src;
+    if (!tagAttr(xml, tagStart, "x-openclip-vector", src)) return false;
+    auto eit = entries.find(src);
+    if (eit == entries.end() || eit->second.size() > 262144) return false;
+    const std::string js(eit->second.begin(), eit->second.end());
+    // Tolerant scan of {"pts":[[x,y]...],"widths":[...],"tip":..,
+    // "size":..,"color":..,"corners":[..],"kind":..} objects.
+    std::size_t pos = 0;
+    int parsed = 0;
+    while (parsed < 4096) {
+        const std::size_t ob = js.find('{', pos);
+        if (ob == std::string::npos) break;
+        // Skip the outer {"paths":[...] opener (no pts key inside).
+        const std::size_t ptsK = js.find("\"pts\"", ob);
+        const std::size_t nextOb = js.find('{', ob + 1);
+        if (ptsK == std::string::npos ||
+            (nextOb != std::string::npos && nextOb < ptsK)) {
+            pos = ob + 1;
+            continue;
+        }
+        VectorPath vp;
+        // pts: [[x,y],[x,y]...]
+        const std::size_t pa = js.find('[', ptsK);
+        const std::size_t pe = (pa == std::string::npos)
+                                   ? std::string::npos
+                                   : js.find("]]", pa);
+        if (pa == std::string::npos || pe == std::string::npos) break;
+        {
+            const std::string arr = js.substr(pa + 1, pe - pa);
+            std::size_t q = 0;
+            while (q < arr.size()) {
+                while (q < arr.size() &&
+                       (arr[q] < '0' || arr[q] > '9') && arr[q] != '-' &&
+                       arr[q] != '+' && arr[q] != '.')
+                    ++q;
+                if (q >= arr.size()) break;
+                char* e1 = nullptr;
+                const float x =
+                    std::strtof(arr.c_str() + q, &e1);
+                if (e1 == arr.c_str() + q) break;
+                q = static_cast<std::size_t>(e1 - arr.c_str());
+                while (q < arr.size() &&
+                       (arr[q] < '0' || arr[q] > '9') && arr[q] != '-' &&
+                       arr[q] != '+' && arr[q] != '.')
+                    ++q;
+                if (q >= arr.size()) break;
+                char* e2 = nullptr;
+                const float y =
+                    std::strtof(arr.c_str() + q, &e2);
+                if (e2 == arr.c_str() + q) break;
+                q = static_cast<std::size_t>(e2 - arr.c_str());
+                vp.pts.push_back(Vec2{x, y});
+                if (vp.pts.size() > 65536) break;
+            }
+        }
+        if (vp.pts.empty()) break;
+        // widths: [...]
+        const std::size_t wk = js.find("\"widths\"", ob);
+        if (wk != std::string::npos) {
+            const std::size_t wa = js.find('[', wk);
+            const std::size_t we =
+                (wa == std::string::npos)
+                    ? std::string::npos
+                    : js.find(']', wa);
+            if (wa != std::string::npos && we != std::string::npos) {
+                const std::string arr = js.substr(wa + 1, we - wa - 1);
+                std::size_t q = 0;
+                while (q < arr.size() && vp.widthProfile.size() < 65536) {
+                    while (q < arr.size() &&
+                           (arr[q] < '0' || arr[q] > '9') &&
+                           arr[q] != '-' && arr[q] != '+' &&
+                           arr[q] != '.')
+                        ++q;
+                    if (q >= arr.size()) break;
+                    char* e1 = nullptr;
+                    const float w =
+                        std::strtof(arr.c_str() + q, &e1);
+                    if (e1 == arr.c_str() + q) break;
+                    q = static_cast<std::size_t>(e1 - arr.c_str());
+                    float cw = w;
+                    if (!(cw >= 0.5f)) cw = 0.5f;
+                    if (cw > 128.0f) cw = 128.0f;
+                    vp.widthProfile.push_back(cw);
+                }
+            }
+        }
+        if (vp.widthProfile.size() != vp.pts.size())
+            vp.widthProfile.assign(vp.pts.size(), 8.0f);
+        // kind / tip / size / color / corners (M3: bad = defaults).
+        auto strKey = [&](const char* key, std::string& out) {
+            const std::string pat = std::string("\"") + key + "\"";
+            const std::size_t at = js.find(pat, ob);
+            if (at == std::string::npos) return;
+            const std::size_t colon = js.find(':', at + pat.size());
+            if (colon == std::string::npos) return;
+            const std::size_t q1 = js.find('"', colon + 1);
+            if (q1 == std::string::npos) return;
+            const std::size_t q2 = js.find('"', q1 + 1);
+            if (q2 == std::string::npos) return;
+            out = js.substr(q1 + 1, q2 - q1 - 1);
+        };
+        std::string kind, tip, col;
+        strKey("kind", kind);
+        vp.kind = (kind == "eraser-stroke") ? "eraser-stroke" : "stroke";
+        strKey("tip", tip);
+        vp.tip = (tip == "flat") ? "flat" : "round";
+        {
+            const std::size_t at = js.find("\"size\"", ob);
+            if (at != std::string::npos) {
+                const std::size_t colon = js.find(':', at + 6);
+                if (colon != std::string::npos) {
+                    char* e1 = nullptr;
+                    const double sz =
+                        std::strtod(js.c_str() + colon + 1, &e1);
+                    if (e1 != js.c_str() + colon + 1 && sz >= 0.25 &&
+                        sz <= 4.0)
+                        vp.sizeMul = static_cast<float>(sz);
+                }
+            }
+        }
+        strKey("color", col);
+        if (!col.empty()) {
+            std::string h = col;
+            if (!h.empty() && h[0] == '#') h = h.substr(1);
+            if (h.size() == 6) {
+                auto hx = [](char c) -> int {
+                    if (c >= '0' && c <= '9') return c - '0';
+                    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                    return -1;
+                };
+                int v[3];
+                bool okc = true;
+                for (int i = 0; i < 3 && okc; ++i) {
+                    const int hi = hx(h[i * 2]), lo = hx(h[i * 2 + 1]);
+                    if (hi < 0 || lo < 0)
+                        okc = false;
+                    else
+                        v[i] = hi * 16 + lo;
+                }
+                if (okc) {
+                    vp.r = static_cast<std::uint8_t>(v[0]);
+                    vp.g = static_cast<std::uint8_t>(v[1]);
+                    vp.b = static_cast<std::uint8_t>(v[2]);
+                }
+            }
+        }
+        vp.corners.assign(vp.pts.size(), 0);
+        {
+            const std::size_t at = js.find("\"corners\"", ob);
+            if (at != std::string::npos) {
+                const std::size_t ca = js.find('[', at);
+                const std::size_t cb = (ca == std::string::npos)
+                                           ? std::string::npos
+                                           : js.find(']', ca);
+                if (ca != std::string::npos && cb != std::string::npos) {
+                    const std::string arr = js.substr(ca + 1, cb - ca - 1);
+                    std::size_t q = 0, n = 0;
+                    while (q < arr.size() && n < vp.corners.size()) {
+                        while (q < arr.size() && arr[q] != '0' &&
+                               arr[q] != '1')
+                            ++q;
+                        if (q >= arr.size()) break;
+                        vp.corners[n++] = (arr[q] == '1') ? 1 : 0;
+                        ++q;
+                    }
+                }
+            }
+        }
+        l.vectorData.push_back(std::move(vp));
+        ++parsed;
+        // Advance past this object (brace-depth walk, bounded).
+        int dep = 0;
+        std::size_t k = ob;
+        bool inStr = false;
+        while (k < js.size()) {
+            const char c = js[k];
+            if (c == '"' && (k == 0 || js[k - 1] != '\\')) inStr = !inStr;
+            if (!inStr) {
+                if (c == '{') ++dep;
+                if (c == '}') {
+                    --dep;
+                    if (dep == 0) {
+                        ++k;
+                        break;
+                    }
+                }
+            }
+            ++k;
+            if (k - ob > 1048576) break;  // insane object: stop
+        }
+        pos = k;
+    }
+    if (l.vectorData.empty()) return false;
+    l.isVector = true;
+    l.vectorStored = true;
+    return true;
 }
 
 bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
@@ -416,7 +793,12 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                     blendFromName(blendVectorValue(comp).c_str());
                 applyAdjustAttrs(xml, lOpen, l);
                 applyTextAttrs(xml, lOpen, l);
+                applyBubbleAttrs(xml, lOpen, l);
                 applyMetaAttrs(xml, lOpen, l);
+                // T2 vector sibling: present + parsed = vector layer
+                // restored; missing/unreadable = PNG alone as a normal
+                // raster layer (degraded propre, never broken).
+                applyVectorSibling(xml, lOpen, entries, l);
                 l.surface.resize(tmp.width(), tmp.height());
                 if (s.width() == tmp.width() && s.height() == tmp.height()) {
                     l.surface.bytes().swap(s.bytes());
@@ -468,6 +850,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 g.passThrough = (iso != "isolated");
                 applyAdjustAttrs(xml, lOpen, g);
                 applyTextAttrs(xml, lOpen, g);
+                applyBubbleAttrs(xml, lOpen, g);
                 applyMetaAttrs(xml, lOpen, g);
                 out.push_back(std::move(g));
                 continue;

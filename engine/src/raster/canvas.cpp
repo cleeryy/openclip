@@ -2,6 +2,7 @@
 #include "openclip/canvas.h"
 
 #include "openclip/blend.h"
+#include "openclip/bubble.h"
 #include "openclip/filters.h"
 #include "openclip/vector.h"
 
@@ -27,7 +28,7 @@ inline const Surface* rasterizeForComposite(const Layer& l, Surface& tmp,
                                             int w, int h) {
     if (!l.isVector || l.vectorData.empty()) return nullptr;
     tmp.resize(w, h);
-    rasterizeVectorPaths(l.vectorData, tmp, 0, 0, 0);
+    rasterizeVectorPaths(l.vectorData, tmp);
     return &tmp;
 }
 
@@ -43,6 +44,32 @@ inline std::vector<const Surface*> rasterizeAllVectors(
     std::vector<const Surface*> ptrs(layers.size(), nullptr);
     for (std::size_t i = 0; i < layers.size(); ++i) {
         ptrs[i] = rasterizeForComposite(layers[i], scratch[i], w, h);
+    }
+    return ptrs;
+}
+
+// T2: pre-render every bubble layer of a flat top-level list into
+// scratch (nullptr for non-bubble entries). Composite-time only:
+// the fiche never touches layer pixels (ARCHITECTURE.md §T2 §5).
+inline std::vector<const Surface*> renderAllBubbles(
+    const std::vector<Layer>& layers, std::vector<Surface>& scratch, int w,
+    int h) {
+    scratch.clear();
+    scratch.resize(layers.size());
+    std::vector<const Surface*> ptrs(layers.size(), nullptr);
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        const Layer& l = layers[i];
+        if (l.isGroup || !l.hasBubble()) continue;
+        BubbleSpec spec;
+        std::string err;
+        if (!parseBubbleSpec(l.bubbleShape, l.bubbleFrame, l.bubbleTail,
+                             l.bubbleFill, l.bubbleStroke, l.bubbleStrokeW,
+                             spec, err))
+            continue;  // malformed fiche = no balloon, pixels intact
+        scratch[i].resize(w, h);
+        scratch[i].clear();
+        if (!renderBubble(spec, scratch[i], err)) continue;
+        ptrs[i] = &scratch[i];
     }
     return ptrs;
 }
@@ -188,6 +215,9 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
     std::vector<Surface> vecScratch;
     const std::vector<const Surface*> vecCache =
         rasterizeAllVectors(layers, vecScratch, w, h);
+    std::vector<Surface> bubScratch;
+    const std::vector<const Surface*> bubCache =
+        renderAllBubbles(layers, bubScratch, w, h);
     for (std::size_t li = 0; li < layers.size(); ++li) {
         const auto& l = layers[li];
         if (!l.visible || l.opacity <= 0.0f) continue;
@@ -272,6 +302,7 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
             continue;
         }
         const Surface* vecTmp = vecCache[li];
+        const Surface* bubTmp = bubCache[li];
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 // M8: adjustment layers paint no pixels; their op
@@ -279,7 +310,26 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                 if (walkAdjustment(out, l, x, y)) continue;
                 if (l.clipped && !stencilPainted(layers, vecCache, li, out, x, y))
                     continue;
+                // T2 bubble: composite-time balloon OVER the layer's own
+                // pixels (the fiche never commits pixels).
                 Pixel s = layerPixel(l, vecTmp, x, y);
+                if (bubTmp) {
+                    const Pixel bpx = bubTmp->get(x, y);
+                    if (bpx.a != 0) {
+                        // Source-over balloon onto the layer pixel.
+                        const int ia = 255 - bpx.a;
+                        Pixel m;
+                        m.r = static_cast<std::uint8_t>(
+                            bpx.r + (s.r * ia + 127) / 255);
+                        m.g = static_cast<std::uint8_t>(
+                            bpx.g + (s.g * ia + 127) / 255);
+                        m.b = static_cast<std::uint8_t>(
+                            bpx.b + (s.b * ia + 127) / 255);
+                        m.a = static_cast<std::uint8_t>(
+                            bpx.a + (s.a * ia + 127) / 255);
+                        s = m;
+                    }
+                }
                 if (s.a == 0) continue;
                 if (l.hasMask) {
                     const std::uint8_t ma = l.mask.get(x, y).a;

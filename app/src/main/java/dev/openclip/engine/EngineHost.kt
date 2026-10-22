@@ -108,4 +108,12 @@ object EngineHost {
     external fun nMagicWand(handle: Long, x: Int, y: Int, json: String): Boolean
     external fun nPaintGradient(handle: Long, json: String): Boolean
     external fun nStampShape(handle: Long, json: String): Boolean
+
+    // T2 additions (ARCHITECTURE.md): indexed vector ops (retrace,
+    // connect, widths) + bubble fiche. Text runs/outline/fonts/dir/
+    // hyphen ride the existing nSetLayerText JSON (0 new symbols).
+    external fun nReplaceVectorPath(handle: Long, index: Int, id: Int, pathJson: String): Boolean
+    external fun nConnectVectorPaths(handle: Long, index: Int, a: Int, b: Int, tolJson: String?): Boolean
+    external fun nSetVectorWidths(handle: Long, index: Int, id: Int, widthsJson: String): Boolean
+    external fun nSetLayerBubble(handle: Long, index: Int, json: String?): Boolean
 }

@@ -55,12 +55,27 @@ fun v2LayerMetas(es: EngineSurface): Map<Int, Map<String, String>> {
         for (i in 0 until arr.length()) {
             val e = arr.optJSONObject(i) ?: continue
             val s = e.optJSONObject("self") ?: e
-            val meta = s.optJSONObject("meta") ?: continue
+            val meta = s.optJSONObject("meta")
             val m = mutableMapOf<String, String>()
-            val keys = meta.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                m[k] = meta.optString(k, "")
+            if (meta != null) {
+                val keys = meta.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    m[k] = meta.optString(k, "")
+                }
+            }
+            // T2 §5: the dedicated bubble fiche (nSetLayerBubble) is
+            // projected onto the legacy meta keys so V+2 readers
+            // (parseBubbleMeta) keep working on new files (same attr
+            // names — the engine already migrates old files the other
+            // way on load).
+            val b = s.optJSONObject("bubble")
+            if (b != null && !m.containsKey("x-openclip-bubble")) {
+                m["x-openclip-bubble"] = b.optString("shape", "")
+                m["x-openclip-bubble-frame"] = b.optString("frame", "")
+                m["x-openclip-bubble-tail"] = b.optString("tail", "")
+                m["x-openclip-bubble-text"] =
+                    b.optInt("textLayer", -1).toString()
             }
             out[i] = m
         }
@@ -155,52 +170,22 @@ fun commitPanelRect(
     return layer
 }
 
-/** Direct bubble commit: closed frame path + tail triangle + meta. */
+/** Direct bubble commit (T2 §5 — ARCHITECTURE.md §T2): the V+2 vector
+ * paths + meta convention is REPLACED by the dedicated bubble layer
+ * fiche (nSetLayerBubble, composite-time, meta, not in undo). The
+ * signature is kept so existing callers keep working. */
 fun commitBubble(es: EngineSurface, fiche: BubbleFiche): Int {
     val layer = es.addVectorLayer("Bubble")
+    if (layer < 0) return -1
+    val tail = "${fiche.tailBase.first},${fiche.tailBase.second}," +
+        "${fiche.tailTip.first},${fiche.tailTip.second}"
     val f = fiche.frame
-    val framePts: List<Pair<Float, Float>> = if (fiche.shape == "rounded") {
-        // Rounded-rectangle octagon (clean-room approx, no asset).
-        val (x, y, w, h) = listOf(f[0], f[1], f[2], f[3])
-        val c = minOf(w, h) * 0.18f
-        listOf(
-            Pair(x + c, y), Pair(x + w - c, y),
-            Pair(x + w, y + c), Pair(x + w, y + h - c),
-            Pair(x + w - c, y + h), Pair(x + c, y + h),
-            Pair(x, y + h - c), Pair(x, y + c)
-        )
-    } else {
-        // 32-gon ellipse.
-        val (x, y, w, h) = listOf(f[0], f[1], f[2], f[3])
-        val cx = x + w / 2f
-        val cy = y + h / 2f
-        (0 until 32).map { i ->
-            val a = i * 2f * PI.toFloat() / 32f
-            Pair(cx + w / 2f * cos(a), cy + h / 2f * sin(a))
-        }
-    }
-    val tail = listOf(
-        fiche.tailBase,
-        fiche.tailTip,
-        Pair(
-            fiche.tailBase.first + (fiche.tailTip.first - fiche.tailBase.first) * 0.4f,
-            fiche.tailBase.second + (fiche.tailTip.second - fiche.tailBase.second) * 0.4f
-        )
-    )
-    val okFrame = es.appendVectorPath(
-        layer,
-        SpeedBurst.pathJson(
-            (framePts + framePts[0]).map { (x, y) -> Triple(x, y, 1f) }
-        )
-    )
-    if (okFrame < 0) return -1
-    es.appendVectorPath(
-        layer,
-        SpeedBurst.pathJson(
-            (tail + tail[0]).map { (x, y) -> Triple(x, y, 1f) }
-        )
-    )
-    for ((k, v) in fiche.toMeta()) es.setLayerMeta(layer, k, v)
+    val json = "{\"shape\":\"${fiche.shape}\"," +
+        "\"frame\":\"${f[0]},${f[1]},${f[2]},${f[3]}\"," +
+        "\"tail\":\"$tail\",\"fill\":\"#FFFFFF\"," +
+        "\"stroke\":\"#000000\",\"strokeW\":4," +
+        "\"textLayer\":${fiche.textLayer}}"
+    if (!es.setLayerBubble(layer, json)) return -1
     return layer
 }
 
@@ -208,6 +193,32 @@ fun commitBubble(es: EngineSurface, fiche: BubbleFiche): Int {
  * draw path like the ants). Returns the polylines for the probe. */
 fun refreshPanelOverlay(es: EngineSurface): List<List<Pair<Float, Float>>> {
     val polys = mutableListOf<List<Pair<Float, Float>>>()
+    // T2 §5: dedicated bubble fiches (composite-time balloons) also
+    // project their frame into the overlay (legacy meta bubbles below
+    // keep working through parseBubbleMeta).
+    try {
+        val st = JSONObject(es.layerState())
+        val arr = st.optJSONArray("layers")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val e = arr.optJSONObject(i) ?: continue
+                val s = e.optJSONObject("self") ?: e
+                val b = s.optJSONObject("bubble") ?: continue
+                val f = b.optString("frame", "").split(",")
+                    .mapNotNull { it.trim().toFloatOrNull() }
+                if (f.size != 4) continue
+                val cx = f[0] + f[2] / 2f
+                val cy = f[1] + f[3] / 2f
+                polys.add(
+                    (0 until 24).map { k ->
+                        val a = k * 2f * PI.toFloat() / 24f
+                        Pair(cx + f[2] / 2f * cos(a), cy + f[3] / 2f * sin(a))
+                    }
+                )
+            }
+        }
+    } catch (_: Exception) {
+    }
     for ((_, meta) in v2LayerMetas(es)) {
         parsePanelMeta(meta)?.let { p ->
             if (p.shape == "poly") polys.add(p.poly + p.poly[0])
@@ -1598,8 +1609,26 @@ fun SvgPanel(
                             else p.widths.sum() / p.widths.size
                             Pair(p.pts, meanW)
                         }
-                        val svg = SvgExport.serialize(
-                            surface.canvasWidth(), surface.canvasHeight(), serial
+                        // T2 §4: exact per-path color + linecap (the
+                        // styles ride the same V2Bezier read — tip and
+                        // color default through the tolerant parser).
+                        val styled = T2Vector.readPaths(
+                            surface.vectorPaths(layer)
+                        )
+                        val strokes = serial.mapIndexed { i, (pts, meanW) ->
+                            val st = styled.getOrNull(i)
+                            SvgExport.Stroke(
+                                pts, meanW,
+                                colorHex = st?.colorHex ?: "#000000",
+                                linecap = if (st?.tip == "flat") "butt" else "round"
+                            )
+                        }
+                        val svg = SvgExport.serializeStyled(
+                            surface.canvasWidth(), surface.canvasHeight(),
+                            if (strokes.size == serial.size) strokes
+                            else serial.map { (pts, meanW) ->
+                                SvgExport.Stroke(pts, meanW)
+                            }
                         )
                         val out = try {
                             File.createTempFile("v2-", ".svg", cacheDir)

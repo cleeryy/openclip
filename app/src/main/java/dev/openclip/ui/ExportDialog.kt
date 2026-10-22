@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -33,7 +34,11 @@ fun ExportDialog(
     onDismiss: () -> Unit,
     onExport: (format: String, onResult: (Boolean) -> Unit) -> Unit,
     resultLine: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // T2 §5: editable-text inclusion (PSD only, default ON — TySh is
+    // written alongside the pixels; OFF flattens text to pixels).
+    includeText: Boolean = true,
+    onIncludeText: (Boolean) -> Unit = {}
 ) {
     var format by remember { mutableStateOf("ora") }
     var exporting by remember { mutableStateOf(false) }
@@ -70,6 +75,27 @@ fun ExportDialog(
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
+                if (format == "psd") {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = includeText,
+                            onCheckedChange = onIncludeText,
+                            modifier = Modifier.testTag("psd-text-include")
+                        )
+                        Text(
+                            stringResource(R.string.psd_text_include),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Text(
+                        stringResource(R.string.psd_text_note),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                }
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()

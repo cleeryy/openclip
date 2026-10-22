@@ -60,7 +60,30 @@ struct Layer {
     double textTracking = 0.0;  // x-openclip-tracking px
     std::string textColor;    // x-openclip-color #RRGGBB
     std::string textBox;      // x-openclip-box "x,y,w"
+    // T2 text extensions (ARCHITECTURE.md §T2 §1–§2, opaque keys like
+    // the V+1 fiche above): runs JSON, outline JSON, imported font
+    // file name (REPRO repli: bytes live app-side, absent = fallback),
+    // direction "h"|"v", hyphen flag ("1"|"" ).
+    std::string textRuns;     // x-openclip-text-runs
+    std::string textOutline;  // x-openclip-text-outline
+    std::string textFontFile;  // x-openclip-text-fontfile
+    std::string textDir;      // x-openclip-text-dir ("v" = vertical)
+    std::string textHyphen;   // x-openclip-text-hyphen ("1" = on)
     bool hasText() const { return !textContent.empty(); }
+
+    // T2 bubble fiche (ARCHITECTURE.md §T2 §5, opaque like M8/V+1):
+    // a layer carrying a bubble renders it at COMPOSITE time (never
+    // committed pixels). Empty shape = normal layer. Meta, NOT in
+    // undo (like nSetLayerMeta). Text link = top-level layer index
+    // (-1 = none), resolved app-side for inline re-edit.
+    std::string bubbleShape;  // "" | "ellipse" | "rounded"
+    std::string bubbleFrame;  // "x,y,w,h" px
+    std::string bubbleTail;   // "bx,by,tx,ty" (empty = no tail)
+    std::string bubbleFill;   // #RRGGBB, default #FFFFFF
+    std::string bubbleStroke;  // #RRGGBB, default #000000
+    float bubbleStrokeW = 4.0f;  // 1..32 px, centered on the edge
+    int bubbleTextLayer = -1;
+    bool hasBubble() const { return !bubbleShape.empty(); }
 
     // V+2: generic opaque fiche map (ARCHITECTURE.md "V+2 additions",
     // nSetLayerMeta). Keys are restricted shim-side to
@@ -75,6 +98,10 @@ struct Layer {
     // blend/opacity/mask/clip path as a normal raster layer.
     bool isVector = false;
     std::vector<VectorPath> vectorData;
+    // T2: set by the ORA writer (sibling within the 256 KiB cap) and
+    // by the ORA loader (sibling present and parsed); surfaced in
+    // nLayerState as "vectorStored" (the visible over-cap counter).
+    bool vectorStored = false;
 
     // Group support (M4, OpenRaster round trip).
     bool isGroup = false;

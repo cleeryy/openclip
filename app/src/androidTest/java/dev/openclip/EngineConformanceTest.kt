@@ -69,6 +69,14 @@ import dev.openclip.ui.SelectionTransform
 import dev.openclip.ui.SpeedBurst
 import dev.openclip.ui.SpeedFiche
 import dev.openclip.ui.SvgExport
+import dev.openclip.ui.T2Vector
+import dev.openclip.ui.T2VectorTool
+import dev.openclip.ui.BubbleLayer
+import dev.openclip.ui.FontRegistry
+import dev.openclip.ui.TextOutline
+import dev.openclip.ui.TextRun
+import dev.openclip.ui.hyphenate
+import dev.openclip.ui.textLayerIndexes
 import dev.openclip.ui.V2Bezier
 import dev.openclip.ui.V2CopyPaste
 import dev.openclip.ui.V2Pages
@@ -9593,5 +9601,502 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         assertTrue("mirror must select the background ($n)", n > s * s / 2)
         assertTrue("mirror must exclude the disc", n < s * s)
         assertTrue("mirror timing sanity (<5s, got ${dt}ms)", dt < 5000)
+    }
+
+    // T2 §2: hyphenation rules (fonction pure, FR + EN).
+    @Test
+    fun hyphenateFrRules() {
+        assertEquals(listOf(2, 5), hyphenate("papillon", "fr"))
+        assertTrue(hyphenate("rue", "fr").isEmpty())
+        assertTrue(hyphenate("a", "fr").isEmpty())
+    }
+
+    @Test
+    fun hyphenateEnRules() {
+        assertEquals(listOf(3), hyphenate("butter", "en"))
+        assertTrue(hyphenate("table", "en").isEmpty())
+        assertTrue(hyphenate("is", "en").isEmpty())
+    }
+
+    private fun inkCount(b: android.graphics.Bitmap): Int {
+        var n = 0
+        for (y in 0 until b.height step 2) {
+            for (x in 0 until b.width step 2) {
+                if (b.getPixel(x, y) != -1) n++
+            }
+        }
+        return n
+    }
+
+    // T2 §1: outline commit paints the glyph perimeter (more ink than
+    // the same fill alone).
+    @Test
+    fun textOutlineCommitsStroke() {
+        val id = openFreshDoc("t2-outline")
+        val es = freshSurface(id)
+        try {
+            val base = dev.openclip.ui.TextSpec(
+                text = "Ag", font = "sans-serif", sizePx = 96,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            val plain = commitTextSync(es, base)
+            val bp = pullFull(es)
+            val nPlain = inkCount(bp)
+            bp.recycle()
+            assertTrue(es.undo())
+            val out = base.copy(outline = TextOutline(6f, "#000000"))
+            commitTextSync(es, out)
+            val bo = pullFull(es)
+            val nOut = inkCount(bo)
+            bo.recycle()
+            assertTrue("outline must widen the glyph ($nPlain -> $nOut)", nOut > nPlain + 20)
+            val fiche = es.layerTextForTest(plain + 1)
+            assertNotNull(fiche)
+            assertNotNull(fiche!!.outline)
+            assertTrue(es.undo())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §1: two runs in two fonts/sizes lay out differently than one
+    // global run (non-trivialité).
+    @Test
+    fun textRunsCommitMixed() {
+        val id = openFreshDoc("t2-runs")
+        val es = freshSurface(id)
+        try {
+            val text = "ABCDEFGH"
+            val one = dev.openclip.ui.TextSpec(
+                text = text, font = "sans-serif", sizePx = 64,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            commitTextSync(es, one)
+            val n1 = inkCount(pullFull(es).also { })
+            assertTrue(es.undo())
+            val two = one.copy(
+                runs = listOf(
+                    TextRun(0, 4, "sans-serif", "bold", 96, "#000000"),
+                    TextRun(4, 4, "monospace", "regular", 48, "#000000")
+                )
+            )
+            commitTextSync(es, two)
+            val b2 = pullFull(es)
+            val n2 = inkCount(b2)
+            b2.recycle()
+            assertTrue("mixed runs must lay out differently ($n1 vs $n2)", n1 != n2)
+            assertTrue("mixed runs must carry ink ($n2)", n2 > 30)
+            assertTrue(es.undo())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §1: imported user font round-trips through fiche + reload.
+    @Test
+    fun fontImportRoundTrip() {
+        val id = openFreshDoc("t2-fontimport")
+        val es = freshSurface(id)
+        try {
+            composeRule.activityRule.scenario.onActivity { act ->
+                FontRegistry.dir = java.io.File(act.cacheDir, "fonts-t2")
+            }
+            val sys = java.io.File("/system/fonts").listFiles()
+                ?.firstOrNull { it.isFile && it.name.endsWith(".ttf") && it.length() in 1..(5L * 1024 * 1024) }
+            assertNotNull("emulator must expose a system ttf", sys)
+            val res = FontRegistry.importFrom(sys!!, sys.name)
+            assertTrue("import must succeed, got $res", res is FontRegistry.ImportResult.Ok)
+            val family = (res as FontRegistry.ImportResult.Ok).family
+            composeRule.waitForIdle()
+            val spec = dev.openclip.ui.TextSpec(
+                text = "Ag", font = family, sizePx = 72,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            val idx = commitTextSync(es, spec)
+            assertFalse("imported font must resolve", es.lastFontFallback)
+            val fiche = es.layerTextForTest(idx)
+            assertNotNull(fiche)
+            assertEquals(family, fiche!!.font)
+            assertTrue(es.undo())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §1: unknown font falls back to sans-serif + banner flag.
+    @Test
+    fun fontFallbackBanner() {
+        val id = openFreshDoc("t2-fontfallback")
+        val es = freshSurface(id)
+        try {
+            val spec = dev.openclip.ui.TextSpec(
+                text = "Ag", font = "NopeNotAFamily", sizePx = 72,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            commitTextSync(es, spec)
+            assertTrue("missing font must raise the fallback banner", es.lastFontFallback)
+            assertTrue(es.undo())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §2: inline commit = 1 undo step (typing is overlay-only).
+    @Test
+    fun inlineCommitIsOneUndo() {
+        val id = openFreshDoc("t2-inline")
+        val es = freshSurface(id)
+        try {
+            val before = bitmapPixels(pullFull(es))
+            val spec = dev.openclip.ui.TextSpec(
+                text = "Inline", font = "sans-serif", sizePx = 72,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            commitTextSync(es, spec)
+            val after = bitmapPixels(pullFull(es))
+            assertFalse("inline commit must change the composite", before.contentEquals(after))
+            assertTrue("commit must undo", es.undo())
+            val restored = bitmapPixels(pullFull(es))
+            assertTrue("1 undo must restore", before.contentEquals(restored))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §2: vertical text stacks columns (height > width of the ink).
+    @Test
+    fun verticalTextStacksColumns() {
+        val id = openFreshDoc("t2-vertical")
+        val es = freshSurface(id)
+        try {
+            val spec = dev.openclip.ui.TextSpec(
+                text = "ABCDE", font = "sans-serif", sizePx = 64,
+                boxX = 8f, boxY = 8f, boxW = 240f, dir = "v"
+            )
+            val vidx = commitTextSync(es, spec)
+            val b = pullFull(es)
+            try {
+                var x0 = b.width
+                var x1 = -1
+                var y0 = b.height
+                var y1 = -1
+                for (y in 0 until b.height step 2) {
+                    for (x in 0 until b.width step 2) {
+                        if (b.getPixel(x, y) != -1) {
+                            if (x < x0) x0 = x
+                            if (x > x1) x1 = x
+                            if (y < y0) y0 = y
+                            if (y > y1) y1 = y
+                        }
+                    }
+                }
+                assertTrue("vertical text must carry ink", x1 >= x0)
+                assertTrue(
+                    "columns must be taller than wide (${x1 - x0} x ${y1 - y0})",
+                    (y1 - y0) > (x1 - x0)
+                )
+            } finally {
+                b.recycle()
+            }
+            val fiche = es.layerTextForTest(vidx)
+            assertNotNull(fiche)
+            assertEquals("v", fiche!!.dir)
+            assertTrue(es.undo())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §3: retrace replaces geometry (style kept) + undo restores.
+    @Test
+    fun retraceReplacesAndUndo() {
+        val id = openFreshDoc("t2-retrace")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("vec")
+            assertTrue(layer >= 0)
+            val red = "{\"pts\":[{\"x\":10,\"y\":20,\"p\":1},{\"x\":50,\"y\":20,\"p\":1}],\"color\":\"#FF0000\"}"
+            assertTrue(es.appendVectorPath(layer, red) >= 0)
+            val before = bitmapPixels(pullFull(es))
+            val moved = "{\"pts\":[{\"x\":10,\"y\":60,\"p\":1},{\"x\":50,\"y\":60,\"p\":1}]}"
+            assertTrue("replace must succeed", es.replaceVectorPath(layer, 0, moved))
+            val mid = T2Vector.readPaths(es.vectorPaths(layer))
+            assertEquals(1, mid.size)
+            assertEquals(255, mid[0].colorHex.let {
+                Integer.parseInt(it.substring(1, 3), 16)
+            })
+            val after = bitmapPixels(pullFull(es))
+            assertFalse("geometry must move", before.contentEquals(after))
+            assertTrue("replace must undo", es.undoVectorPath(layer))
+            val restored = bitmapPixels(pullFull(es))
+            assertTrue("undo must restore", before.contentEquals(restored))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §3: connect merges two close paths.
+    @Test
+    fun connectMergesTwoPaths() {
+        val id = openFreshDoc("t2-connect")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("vec")
+            assertTrue(layer >= 0)
+            val a = "{\"pts\":[{\"x\":10,\"y\":32,\"p\":1},{\"x\":50,\"y\":32,\"p\":1}]}"
+            val b = "{\"pts\":[{\"x\":54,\"y\":32,\"p\":1},{\"x\":94,\"y\":32,\"p\":1}]}"
+            es.appendVectorPath(layer, a)
+            es.appendVectorPath(layer, b)
+            assertTrue("connect must succeed", es.connectVectorPaths(layer, 0, 1, 12f))
+            val paths = T2Vector.readPaths(es.vectorPaths(layer))
+            assertEquals("two paths must fuse", 1, paths.size)
+            assertTrue(es.undoVectorPath(layer))
+            assertEquals(2, T2Vector.readPaths(es.vectorPaths(layer)).size)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §3: thicken widens the rendering.
+    @Test
+    fun thickenWidensRendering() {
+        val id = openFreshDoc("t2-thicken")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("vec")
+            assertTrue(layer >= 0)
+            val a = "{\"pts\":[{\"x\":10,\"y\":64,\"p\":1},{\"x\":120,\"y\":64,\"p\":1}]}"
+            es.appendVectorPath(layer, a)
+            val n1 = inkCount(pullFull(es))
+            val paths = T2Vector.readPaths(es.vectorPaths(layer))
+            assertEquals(1, paths.size)
+            val wide = paths[0].widths.map { it * 2f }
+            assertTrue("widths must pose", es.setVectorWidths(layer, 0, wide))
+            val n2 = inkCount(pullFull(es))
+            assertTrue("thicken must widen ($n1 -> $n2)", n2 > n1)
+            assertTrue(es.undoVectorPath(layer))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §3: trajectories overlay follows the view (probe + matrix).
+    @Test
+    fun trajectoriesOverlayFollowsView() {
+        val id = openFreshDoc("t2-traj")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("vec")
+            assertTrue(layer >= 0)
+            val a = "{\"pts\":[{\"x\":20,\"y\":40,\"p\":1},{\"x\":100,\"y\":40,\"p\":1}]}"
+            es.appendVectorPath(layer, a)
+            composeRule.activityRule.scenario.onActivity {
+                es.refreshTrajectories(layer)
+            }
+            composeRule.waitForIdle()
+            Thread.sleep(300)
+            val polys = es.vectorOverlayForTest()
+            assertTrue("trajectories must list the path", polys.isNotEmpty())
+            val (sx1, sy1) = es.engineToScreen(polys[0][0].first, polys[0][0].second)
+            composeRule.activityRule.scenario.onActivity {
+                es.setViewForTest(2f, 0f)
+            }
+            composeRule.waitForIdle()
+            Thread.sleep(300)
+            val (sx2, sy2) = es.engineToScreen(polys[0][0].first, polys[0][0].second)
+            assertFalse(
+                "zoom must move the overlay point",
+                sx1 == sx2 && sy1 == sy2
+            )
+            composeRule.activityRule.scenario.onActivity {
+                es.setViewForTest(1f, 0f)
+                es.refreshTrajectories(-1)
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §4: styled append round-trips tip/size/color through the getter.
+    @Test
+    fun vectorStyleAppendRoundTrip() {
+        val id = openFreshDoc("t2-vstyle")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("vec")
+            assertTrue(layer >= 0)
+            val styled = T2Vector.styledJson(
+                listOf(Triple(10f, 20f, 1f), Triple(60f, 20f, 1f)),
+                dev.openclip.ui.VectorStyle("flat", 2f, "#FF0000")
+            )
+            assertTrue(es.appendVectorPath(layer, styled) >= 0)
+            val paths = T2Vector.readPaths(es.vectorPaths(layer))
+            assertEquals(1, paths.size)
+            assertEquals("flat", paths[0].tip)
+            assertEquals("#FF0000", paths[0].colorHex)
+            assertTrue(paths[0].sizeMul > 1.9f && paths[0].sizeMul < 2.1f)
+            assertTrue(es.undoVectorPath(layer))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §4: vertex toggle stores corners (engine raster is
+    // corner-agnostic — densification is app-side, documented).
+    @Test
+    fun vectorCornerTogglesSmooth() {
+        val id = openFreshDoc("t2-corner")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("vec")
+            assertTrue(layer >= 0)
+            val a = "{\"pts\":[{\"x\":10,\"y\":20,\"p\":1},{\"x\":50,\"y\":20,\"p\":1},{\"x\":50,\"y\":60,\"p\":1}]}"
+            es.appendVectorPath(layer, a)
+            val before = bitmapPixels(pullFull(es))
+            val paths = T2Vector.readPaths(es.vectorPaths(layer))
+            val n = paths[0].pts.size
+            val corners = List(n) { i -> if (i == 1) 1 else 0 }
+            val sb = StringBuilder("{\"pts\":[")
+            paths[0].pts.forEachIndexed { i, (x, y, pr) ->
+                if (i > 0) sb.append(',')
+                sb.append("{\"x\":$x,\"y\":$y,\"p\":$pr}")
+            }
+            sb.append("],\"corners\":[")
+            corners.forEachIndexed { i, c ->
+                if (i > 0) sb.append(',')
+                sb.append(c)
+            }
+            sb.append("]}")
+            assertTrue("corner toggle must pose", es.replaceVectorPath(layer, 0, sb.toString()))
+            val back = T2Vector.readPaths(es.vectorPaths(layer))
+            assertEquals(1, back[0].corners.getOrNull(1))
+            val after = bitmapPixels(pullFull(es))
+            assertTrue("corners are raster-neutral engine-side", before.contentEquals(after))
+            assertTrue(es.undoVectorPath(layer))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §4: ORA reload keeps every vector path (the hole is closed).
+    @Test
+    fun vectorOraKeepsPaths() {
+        val id = openFreshDoc("t2-vecora")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("vec")
+            assertTrue(layer >= 0)
+            val a = "{\"pts\":[{\"x\":10,\"y\":20,\"p\":1},{\"x\":50,\"y\":20,\"p\":1}],\"color\":\"#00FF00\"}"
+            val b = "{\"pts\":[{\"x\":10,\"y\":60,\"p\":1},{\"x\":50,\"y\":60,\"p\":1}]}"
+            es.appendVectorPath(layer, a)
+            es.appendVectorPath(layer, b)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val ora = java.io.File(dir, "t2-vecora.ora")
+            assertTrue(awaitBool { cb -> es.saveTo(ora.absolutePath, "ora", cb) })
+            assertTrue(awaitBool { cb -> es.loadFrom(ora.absolutePath, cb) })
+            val paths = T2Vector.readPaths(es.vectorPaths(layer))
+            assertEquals("both paths must survive reload", 2, paths.size)
+            assertEquals("#00FF00", paths[0].colorHex)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §4: SVG export uses the exact path color + linecap.
+    @Test
+    fun svgUsesPathColor() {
+        val strokes = listOf(
+            SvgExport.Stroke(
+                listOf(Triple(0f, 0f, 1f), Triple(10f, 0f, 1f)),
+                4f, "#FF0000", "butt"
+            )
+        )
+        val svg = SvgExport.serializeStyled(128, 128, strokes)
+        assertTrue("stroke must carry the path color", svg.contains("stroke=\"#FF0000\""))
+        assertTrue("flat tip must map to butt", svg.contains("stroke-linecap=\"butt\""))
+    }
+
+    // T2 §5: PSD export of a text layer carries 8BPS + TySh + layers.
+    @Test
+    fun psdTextLayerOpens() {
+        val id = openFreshDoc("t2-psdtext")
+        val es = freshSurface(id)
+        try {
+            val spec = dev.openclip.ui.TextSpec(
+                text = "Hi", font = "serif", sizePx = 48,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            commitTextSync(es, spec)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val psd = java.io.File(dir, "t2-text.psd")
+            assertTrue(awaitBool { cb -> es.saveTo(psd.absolutePath, "psd", cb) })
+            val bytes = psd.readBytes()
+            assertTrue("PSD magic", bytes.size > 30 && String(bytes.sliceArray(0..3)) == "8BPS")
+            val raw = String(bytes)
+            assertTrue("TySh tag must be present", raw.contains("TySh"))
+            assertTrue("text must be present", raw.contains("serif"))
+            assertTrue("approx counter readable", es.psdApproxCount() >= 0)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §5: bubble frame moves the composite with 0 committed pixels
+    // (fiche = meta, engine undo stays empty).
+    @Test
+    fun bubbleLayerDragMoves() {
+        val id = openFreshDoc("t2-bubbledrag")
+        val es = freshSurface(id)
+        try {
+            val layer = es.addVectorLayer("Bubble")
+            assertTrue(layer >= 0)
+            val f1 = BubbleLayer(
+                "ellipse", floatArrayOf(8f, 8f, 48f, 32f), "32,40,50,60",
+                "#FFFFFF", "#000000", 4f, -1
+            )
+            assertTrue(es.setLayerBubble(layer, f1.toJson()))
+            val p1 = bitmapPixels(pullFull(es))
+            val f2 = f1.copy(frame = floatArrayOf(60f, 60f, 48f, 32f))
+            assertTrue(es.setLayerBubble(layer, f2.toJson()))
+            val p2 = bitmapPixels(pullFull(es))
+            assertFalse("frame must move the balloon", p1.contentEquals(p2))
+            assertFalse("bubble fiche must not arm engine undo", es.undo())
+            val back = es.bubbleFicheForTest(layer)
+            assertNotNull(back)
+            assertEquals("ellipse", back!!.shape)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T2 §5: bubble + linked text survive ORA reload with the same index.
+    @Test
+    fun bubbleTextLinkRoundTrip() {
+        val id = openFreshDoc("t2-bubblelink")
+        val es = freshSurface(id)
+        try {
+            val spec = dev.openclip.ui.TextSpec(
+                text = "Boom", font = "sans-serif", sizePx = 48,
+                boxX = 8f, boxY = 8f, boxW = 240f
+            )
+            val tidx = commitTextSync(es, spec)
+            val layer = es.addVectorLayer("Bubble")
+            assertTrue(layer >= 0)
+            val fiche = BubbleLayer(
+                "rounded", floatArrayOf(8f, 40f, 120f, 60f), "",
+                "#FFF8E0", "#201808", 3f, tidx
+            )
+            assertTrue(es.setLayerBubble(layer, fiche.toJson()))
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val ora = java.io.File(dir, "t2-bubblelink.ora")
+            assertTrue(awaitBool { cb -> es.saveTo(ora.absolutePath, "ora", cb) })
+            assertTrue(awaitBool { cb -> es.loadFrom(ora.absolutePath, cb) })
+            val back = es.bubbleFicheForTest(layer)
+            assertNotNull("bubble fiche must survive reload", back)
+            assertEquals(tidx, back!!.textLayer)
+            assertEquals("#FFF8E0", back.fill)
+        } finally {
+            closeFreshDoc(id)
+        }
     }
 }

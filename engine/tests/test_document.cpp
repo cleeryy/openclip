@@ -309,7 +309,7 @@ TEST(meta_ora_roundtrip_verbatim) {
             c.layer(0).surface.set(x, y, Pixel{7, 7, 7, 255});
     c.layer(0).meta["x-openclip-panel"] = "rect:1,2,5,6";
     c.layer(0).meta["x-openclip-panel-order"] = "3";
-    c.layer(0).meta["x-openclip-bubble"] = "ellipse";
+    c.layer(0).meta["x-openclip-speed"] = "1,2,3,4,5,6";
     const std::string path = "/tmp/oc_meta.ora";
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
@@ -319,6 +319,227 @@ TEST(meta_ora_roundtrip_verbatim) {
     CHECK_EQ(d.layerCount(), 1u);
     CHECK_EQ(d.layer(0).meta["x-openclip-panel"], std::string("rect:1,2,5,6"));
     CHECK_EQ(d.layer(0).meta["x-openclip-panel-order"], std::string("3"));
-    CHECK_EQ(d.layer(0).meta["x-openclip-bubble"], std::string("ellipse"));
+    CHECK_EQ(d.layer(0).meta["x-openclip-speed"], std::string("1,2,3,4,5,6"));
     CHECK(compositeEquals(c, d));  // fiches never touch pixels
+}
+
+// ---- T2 §1: fiche texte etendue (ARCHITECTURE.md §T2 §1) ----
+
+TEST(text_runs_round_trip) {
+    Canvas c(64, 64);
+    c.addLayer("t");
+    Layer& l = c.layer(0);
+    l.textContent = "Hello brave new world";
+    l.textFont = "serif";
+    l.textSizePx = 24;
+    l.textStyle = "bold";
+    l.textRuns =
+        "[{\"start\":0,\"len\":5,\"font\":\"serif\",\"style\":\"bold\","
+        "\"size\":24,\"color\":\"#FF0000\"},{\"start\":6,\"len\":5,"
+        "\"font\":\"monospace\",\"style\":\"regular\",\"size\":20,"
+        "\"color\":\"#0000FF\"}]";
+    l.textOutline = "{\"w\":2,\"color\":\"#000000\"}";
+    l.textFontFile = "LibreCaslon.ttf";
+    l.textDir = "v";
+    l.textHyphen = "1";
+    const std::string path = "/tmp/oc_textruns.ora";
+    std::string err;
+    CHECK(openclip::saveOra(c, path, err));
+    Canvas d;
+    CHECK(openclip::loadOra(d, path, err));
+    std::remove(path.c_str());
+    const Layer& q = d.layer(0);
+    CHECK_EQ(q.textContent, l.textContent);
+    CHECK_EQ(q.textRuns, l.textRuns);
+    CHECK_EQ(q.textOutline, l.textOutline);
+    CHECK_EQ(q.textFontFile, l.textFontFile);
+    CHECK_EQ(q.textDir, std::string("v"));
+    CHECK_EQ(q.textHyphen, std::string("1"));
+    CHECK(compositeEquals(c, d));  // fiches never touch pixels
+}
+
+TEST(text_runs_malformed_ignored) {
+    Canvas c(64, 64);
+    c.addLayer("t");
+    Layer& l = c.layer(0);
+    l.textContent = "Hello world, this is long enough";
+    l.textRuns = "[{\"start\":999,\"len\":5},not-json";
+    l.textDir = "sideways";  // unknown direction refused
+    const std::string path = "/tmp/oc_textbad.ora";
+    std::string err;
+    CHECK(openclip::saveOra(c, path, err));
+    Canvas d;
+    CHECK(openclip::loadOra(d, path, err));  // never a broken layer
+    std::remove(path.c_str());
+    CHECK_EQ(d.layer(0).textContent, l.textContent);
+    CHECK(d.layer(0).textDir.empty());  // bad dir falls back to default
+    CHECK(compositeEquals(c, d));
+}
+
+TEST(text_fontfile_missing_fallback) {
+    // The REPRO repli (ARCHITECTURE.md §T2): fontfile is a recorded
+    // NAME only — reload without the file keeps a normal layer with
+    // intact pixels (the app substitutes sans-serif + banner).
+    Canvas c(32, 32);
+    c.addLayer("t");
+    Layer& l = c.layer(0);
+    l.textContent = "Missing font";
+    l.textFont = "SomeImportedFont";
+    l.textFontFile = "SomeImportedFont.ttf";
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            l.surface.set(x, y, Pixel{9, 9, 9, 255});
+    const std::string path = "/tmp/oc_textfont.ora";
+    std::string err;
+    CHECK(openclip::saveOra(c, path, err));
+    Canvas d;
+    CHECK(openclip::loadOra(d, path, err));
+    std::remove(path.c_str());
+    CHECK_EQ(d.layer(0).textFontFile, std::string("SomeImportedFont.ttf"));
+    CHECK(compositeEquals(c, d));  // pixels always kept
+}
+
+TEST(text_outline_opaque) {
+    // The contour is opaque fiche data: composite ignores it.
+    Canvas c(32, 32);
+    c.addLayer("t");
+    c.layer(0).textContent = "Outline";
+    c.layer(0).textOutline = "{\"w\":8,\"color\":\"#FF0000\"}";
+    Canvas e(32, 32);
+    e.addLayer("t");
+    e.layer(0).textContent = "Outline";
+    CHECK(compositeEquals(c, e));
+}
+
+// ---- T2 §5: PSD TySh + calque phylactere (ARCHITECTURE.md §T2 §5) ----
+
+TEST(psd_type_tool_present) {
+    Canvas c(32, 32);
+    c.addLayer("title");
+    Layer& l = c.layer(0);
+    l.textContent = "Hi";
+    l.textFont = "serif";
+    l.textSizePx = 24;
+    l.textColor = "#FF0000";
+    l.textBox = "2,4,28";
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            l.surface.set(x, y, Pixel{1, 2, 3, 255});
+    const std::string path = "/tmp/oc_tysh.psd";
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 0);  // single run = exact, not approximated
+    // Raw scan: TySh tag + UTF-16BE text present in the file.
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    CHECK(f != nullptr);
+    std::vector<std::uint8_t> d;
+    if (f) {
+        std::fseek(f, 0, SEEK_END);
+        const long n = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        d.resize(static_cast<std::size_t>(n));
+        CHECK(std::fread(d.data(), 1, d.size(), f) == d.size());
+        std::fclose(f);
+    }
+    const std::string raw(d.begin(), d.end());
+    CHECK(raw.find("TySh") != std::string::npos);
+    CHECK(raw.find("serif") != std::string::npos);
+    bool found = false;  // "Hi" as UTF-16BE (00 48 00 69)
+    for (std::size_t i = 0; i + 3 < d.size(); ++i)
+        if (d[i] == 0 && d[i + 1] == 'H' && d[i + 2] == 0 &&
+            d[i + 3] == 'i') {
+            found = true;
+            break;
+        }
+    CHECK(found);
+    std::remove(path.c_str());
+}
+
+TEST(psd_runs_flatten_counted) {
+    Canvas c(32, 32);
+    c.addLayer("mixed");
+    Layer& l = c.layer(0);
+    l.textContent = "Hello brave";
+    l.textRuns =
+        "[{\"start\":0,\"len\":5,\"style\":\"bold\"},{\"start\":6,\"len\":5,"
+        "\"style\":\"italic\"}]";
+    const std::string path = "/tmp/oc_tyruns.psd";
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 1);  // runs > 1 flatten onto the base style + count
+    std::remove(path.c_str());
+}
+
+TEST(bubble_composite_paints) {
+    Canvas c(64, 64);
+    c.addLayer("bubble");
+    Layer& l = c.layer(0);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            l.surface.set(x, y, Pixel{10, 20, 30, 255});
+    l.bubbleShape = "ellipse";
+    l.bubbleFrame = "8,8,48,32";
+    l.bubbleFill = "#FFFFFF";
+    l.bubbleStroke = "#000000";
+    l.bubbleStrokeW = 4.0f;
+    Surface out;
+    c.composite(out);
+    const Pixel mid = out.get(32, 24);  // deep inside the balloon
+    CHECK(mid.a == 255 && mid.r > 200 && mid.g > 200 && mid.b > 200);
+    const Pixel far = out.get(2, 60);  // outside: layer pixels intact
+    CHECK_EQ(far.r, 10);
+    CHECK_EQ(far.g, 20);
+    CHECK_EQ(far.b, 30);
+}
+
+TEST(bubble_null_clears) {
+    Canvas c(64, 64);
+    c.addLayer("b");
+    Layer& l = c.layer(0);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            l.surface.set(x, y, Pixel{10, 20, 30, 255});
+    l.bubbleShape = "rounded";
+    l.bubbleFrame = "8,8,48,32";
+    Surface with;
+    c.composite(with);
+    CHECK(with.get(32, 24).r > 200);
+    l.bubbleShape.clear();  // null/empty = normal layer again
+    l.bubbleFrame.clear();
+    Surface without;
+    c.composite(without);
+    CHECK_EQ(without.get(32, 24).r, 10);  // back to raw pixels
+}
+
+TEST(bubble_ora_round_trip) {
+    Canvas c(64, 64);
+    c.addLayer("b");
+    Layer& l = c.layer(0);
+    l.bubbleShape = "rounded";
+    l.bubbleFrame = "8,8,48,32";
+    l.bubbleTail = "32,40,50,60";
+    l.bubbleFill = "#FFF8E0";
+    l.bubbleStroke = "#201808";
+    l.bubbleStrokeW = 3.0f;
+    l.bubbleTextLayer = 2;
+    const std::string path = "/tmp/oc_bubble.ora";
+    std::string err;
+    CHECK(openclip::saveOra(c, path, err));
+    Canvas d;
+    CHECK(openclip::loadOra(d, path, err));
+    std::remove(path.c_str());
+    const Layer& q = d.layer(0);
+    CHECK_EQ(q.bubbleShape, std::string("rounded"));
+    CHECK_EQ(q.bubbleFrame, std::string("8,8,48,32"));
+    CHECK_EQ(q.bubbleTail, std::string("32,40,50,60"));
+    CHECK_EQ(q.bubbleFill, std::string("#FFF8E0"));
+    CHECK_EQ(q.bubbleStroke, std::string("#201808"));
+    CHECK(q.bubbleStrokeW == 3.0f);
+    CHECK_EQ(q.bubbleTextLayer, 2);
+    Surface a, b;
+    c.composite(a);
+    d.composite(b);
+    CHECK(a.bytes() == b.bytes());  // balloon re-renders identically
 }

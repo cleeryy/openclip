@@ -820,6 +820,84 @@ class EngineSurface @JvmOverloads constructor(
             .also { if (it) needsComposite = true } else false
     }
 
+    // T2 indexed vector ops (ARCHITECTURE.md §T2 §3): snapshot-first
+    // (1 undo step each), false + layer intact on bad input.
+    fun replaceVectorPath(index: Int, id: Int, pathJson: String): Boolean =
+        synchronized(engineLock) {
+            if (handle != 0L) EngineHost.nReplaceVectorPath(handle, index, id, pathJson)
+                .also { if (it) needsComposite = true } else false
+        }
+
+    fun connectVectorPaths(index: Int, a: Int, b: Int, tol: Float): Boolean =
+        synchronized(engineLock) {
+            if (handle != 0L) EngineHost.nConnectVectorPaths(
+                handle, index, a, b,
+                String.format(java.util.Locale.US, "{\"tol\":%.1f}", tol)
+            ).also { if (it) needsComposite = true } else false
+        }
+
+    fun setVectorWidths(index: Int, id: Int, widths: List<Float>): Boolean =
+        synchronized(engineLock) {
+            if (handle == 0L) return false
+            val sb = StringBuilder("{\"widths\":[")
+            widths.forEachIndexed { i, w ->
+                if (i > 0) sb.append(',')
+                sb.append(String.format(java.util.Locale.US, "%.2f", w))
+            }
+            sb.append("]}")
+            EngineHost.nSetVectorWidths(handle, index, id, sb.toString())
+                .also { if (it) needsComposite = true }
+        }
+
+    // T2 bubble fiche (ARCHITECTURE.md §T2 §5): null clears (normal
+    // layer again); meta, NOT in undo. Renders at composite time.
+    fun setLayerBubble(index: Int, json: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetLayerBubble(handle, index, json)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    /** Bubble fiche mirror for panels/tests (null = normal layer). */
+    fun bubbleFicheForTest(index: Int): BubbleLayer? {
+        return try {
+            val st = JSONObject(layerState())
+            val arr = st.optJSONArray("layers") ?: return null
+            val e = arr.optJSONObject(index) ?: return null
+            val s = e.optJSONObject("self") ?: e
+            val b = s.optJSONObject("bubble")
+            // Legacy V+2 fallback: meta keys (same attr names — old
+            // files parse into the new fiche engine-side, but a live
+            // old session may still carry them in meta).
+                ?: s.optJSONObject("meta")?.let { m ->
+                    if (m.has("x-openclip-bubble")) JSONObject().apply {
+                        put("shape", m.optString("x-openclip-bubble", ""))
+                        put("frame", m.optString("x-openclip-bubble-frame", ""))
+                        put("tail", m.optString("x-openclip-bubble-tail", ""))
+                        put("fill", "#FFFFFF")
+                        put("stroke", "#000000")
+                        put("strokeW", 4.0)
+                        put("textLayer", m.optInt("x-openclip-bubble-text", -1))
+                    } else null
+                } ?: return null
+            BubbleLayer(
+                shape = b.optString("shape", ""),
+                frame = b.optString("frame", "").split(",")
+                    .mapNotNull { it.toFloatOrNull() }.toFloatArray(),
+                tail = b.optString("tail", ""),
+                fill = b.optString("fill", "#FFFFFF"),
+                stroke = b.optString("stroke", "#000000"),
+                strokeW = b.optDouble("strokeW", 4.0).toFloat(),
+                textLayer = b.optInt("textLayer", -1)
+            ).takeIf { it.shape == "ellipse" || it.shape == "rounded" }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Trajectories overlay probe (engine coords, follows the view
+     * matrix at draw time like the ants — ARCHITECTURE.md §T2 §3). */
+    fun vectorOverlayForTest(): List<List<Pair<Float, Float>>> =
+        trajectoryPolys.toList()
+
     fun setRulers(kindsJson: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetRulers(handle, kindsJson) else false
     }
@@ -1173,6 +1251,22 @@ class EngineSurface @JvmOverloads constructor(
     private var vecEraseActive = false
     private var vecEraseIndex = -1
     private val vecErasePts = mutableListOf<Pair<Float, Float>>()
+    // T2 §3: armed vector sub-tool (null = ink/eraser as usual). While
+    // armed on a vector layer, strokes are captured (never ink) and
+    // resolved on UP: retrace / thicken / connect (1 undo each).
+    @Volatile var vectorTool: T2VectorTool? = null
+    @Volatile var vectorThickenSign: Float = 1f // +inflate | −deflate
+    @Volatile var vectorConnectTol: Float = 12f
+    @Volatile var vectorToolWidth: Float = 24f // falloff sigma px
+    /** (tool, ok) after each captured gesture (posted on UI thread). */
+    var onVectorToolDone: ((String, Boolean) -> Unit)? = null
+    private var vecToolActive = false
+    private var vecToolIndex = -1
+    private val vecToolPts = mutableListOf<Triple<Float, Float, Float>>()
+    // T2 §3 trajectories overlay (overlay-only, never engine pixels):
+    // centerlines of every path of the armed layer.
+    @Volatile var trajectoriesLayer: Int = -1
+    @Volatile private var trajectoryPolys: List<List<Pair<Float, Float>>> = emptyList()
     @Volatile private var strokePointerId = -1
     @Volatile private var strokeOpenUi = false
     private var downTimeMs = 0L
@@ -1933,6 +2027,14 @@ class EngineSurface @JvmOverloads constructor(
                         vecErasePts.clear()
                         needsComposite = true
                     }
+                    if (vecToolActive && (navigating || rollbackOpen)) {
+                        // T2: a captured tool gesture never started ink
+                        // — just drop the capture, nothing to roll back.
+                        vecToolActive = false
+                        vecToolIndex = -1
+                        vecToolPts.clear()
+                        needsComposite = true
+                    }
                     rollbackOpen = false
                     if (!navigating) {
                     for (pt in drained) {
@@ -1944,7 +2046,12 @@ class EngineSurface @JvmOverloads constructor(
                             m != null && !m.contains(pt.x, pt.y)
                         }
                         if (gatedOut) {
-                            if (vecEraseActive) {
+                            if (vecToolActive) {
+                                vecToolActive = false
+                                vecToolIndex = -1
+                                vecToolPts.clear()
+                                needsComposite = true
+                            } else if (vecEraseActive) {
                                 vecEraseActive = false
                                 vecEraseIndex = -1
                                 vecErasePts.clear()
@@ -1958,11 +2065,27 @@ class EngineSurface @JvmOverloads constructor(
                         }
                         when (pt.action) {
                             MotionEvent.ACTION_DOWN -> {
+                                // T2 §3: an armed vector tool captures the
+                                // gesture on a vector layer (never ink);
+                                // resolved on UP (1 undo step per op).
+                                val toolIdx =
+                                    if (vectorTool != null) activeVectorLayer()
+                                    else -1
                                 // Slice 5: eraser on a vector layer routes
                                 // to the real vector eraser (path removal),
                                 // never to raster stamps.
                                 val vIdx = if (brushIsEraser) activeVectorLayer() else -1
-                                if (vIdx >= 0) {
+                                if (toolIdx >= 0 && vectorTool != null) {
+                                    vecToolActive = true
+                                    vecToolIndex = toolIdx
+                                    vecToolPts.clear()
+                                    vecToolPts.add(
+                                        Triple(pt.x, pt.y, pt.pressure)
+                                    )
+                                    lastStrokeLatencyMs =
+                                        SystemClock.uptimeMillis() - pt.t
+                                    showHud(pt.pressure)
+                                } else if (vIdx >= 0) {
                                     vecEraseActive = true
                                     vecEraseIndex = vIdx
                                     vecErasePts.clear()
@@ -1990,7 +2113,12 @@ class EngineSurface @JvmOverloads constructor(
                                 }
                             }
                             MotionEvent.ACTION_MOVE -> {
-                                if (vecEraseActive) {
+                                if (vecToolActive) {
+                                    vecToolPts.add(
+                                        Triple(pt.x, pt.y, pt.pressure)
+                                    )
+                                    showHud(pt.pressure)
+                                } else if (vecEraseActive) {
                                     vecErasePts.add(Pair(pt.x, pt.y))
                                     showHud(pt.pressure)
                                 } else if (strokeId == 0L) {
@@ -2007,7 +2135,13 @@ class EngineSurface @JvmOverloads constructor(
                                 needsComposite = true
                             }
                             MotionEvent.ACTION_UP -> {
-                                if (vecEraseActive) {
+                                if (vecToolActive) {
+                                    vecToolPts.add(
+                                        Triple(pt.x, pt.y, pt.pressure)
+                                    )
+                                    finishVectorTool()
+                                    notifyStrokeChanged()
+                                } else if (vecEraseActive) {
                                     vecErasePts.add(Pair(pt.x, pt.y))
                                     fireVectorErase()
                                     vecEraseActive = false
@@ -2188,6 +2322,7 @@ class EngineSurface @JvmOverloads constructor(
                     drawCursorRing(c, dst, ang)
                     drawSelectionOverlay(c, dst, ang)
                     drawV2Overlays(c, dst, ang)
+                    drawTrajectories(c, dst, ang)
                 } finally {
                     holder.unlockCanvasAndPost(c)
                 }
@@ -2336,6 +2471,96 @@ class EngineSurface @JvmOverloads constructor(
             EngineHost.nVectorEraser(handle, vecEraseIndex, true, sb.toString())
         } catch (_: Exception) {
         }
+    }
+
+    // T2 §3: resolve a captured tool gesture (render thread, engine
+    // lock held — reentrant, like fireVectorErase above). Nearest-path
+    // lookup reads nVectorPaths fresh (no id caching across gestures —
+    // ARCHITECTURE.md §T2); stale ids = false + intact (tested).
+    private fun finishVectorTool() {
+        val pts = vecToolPts.toList()
+        val idx = vecToolIndex
+        val mode = vectorTool
+        vecToolActive = false
+        vecToolIndex = -1
+        vecToolPts.clear()
+        needsComposite = true
+        if (mode == null || idx < 0 || pts.size < 2 || handle == 0L) {
+            val cb = onVectorToolDone
+            if (cb != null) post { cb(mode?.name ?: "NONE", false) }
+            return
+        }
+        var ok = false
+        var label = mode.name
+        try {
+            val paths = T2Vector.readPaths(vectorPaths(idx))
+            when (mode) {
+                T2VectorTool.RETRACE -> {
+                    val id = T2Vector.nearestPath(paths, pts.first())
+                    if (id >= 0) {
+                        ok = EngineHost.nReplaceVectorPath(
+                            handle, idx, id, T2Vector.captureJson(pts)
+                        )
+                    } else {
+                        label = "RETRACE_FAR"
+                    }
+                }
+                T2VectorTool.THICKEN -> {
+                    val id = T2Vector.nearestPath(paths, pts.first())
+                    if (id >= 0 && id < paths.size) {
+                        val widths = T2Vector.falloffWidths(
+                            paths[id], pts, vectorToolWidth, vectorThickenSign
+                        )
+                        val sb = StringBuilder("{\"widths\":[")
+                        widths.forEachIndexed { i, w ->
+                            if (i > 0) sb.append(',')
+                            sb.append(
+                                String.format(java.util.Locale.US, "%.2f", w)
+                            )
+                        }
+                        sb.append("]}")
+                        ok = EngineHost.nSetVectorWidths(
+                            handle, idx, id, sb.toString()
+                        )
+                    } else {
+                        label = "THICKEN_FAR"
+                    }
+                }
+                T2VectorTool.CONNECT -> {
+                    val a = T2Vector.nearestEndpoint(paths, pts.first())
+                    val b = T2Vector.nearestEndpoint(paths, pts.last())
+                    ok = if (a != null && b != null) {
+                        EngineHost.nConnectVectorPaths(
+                            handle, idx, a.first, b.first,
+                            String.format(
+                                java.util.Locale.US, "{\"tol\":%.1f}",
+                                vectorConnectTol
+                            )
+                        )
+                    } else {
+                        label = "CONNECT_FAR"
+                        false
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            ok = false
+        }
+        if (trajectoriesLayer == idx) refreshTrajectories(idx)
+        val cb = onVectorToolDone
+        if (cb != null) post { cb(label, ok) }
+    }
+
+    /** Rebuild the trajectories overlay for a layer (overlay-only). */
+    fun refreshTrajectories(layer: Int) {
+        trajectoriesLayer = layer
+        trajectoryPolys = try {
+            if (layer < 0 || handle == 0L) emptyList()
+            else T2Vector.trajectoryPolys(T2Vector.readPaths(vectorPaths(layer)))
+        } catch (_: Exception) {
+            emptyList()
+        }
+        needsComposite = true
     }
 
     // ---- V+1 selection + text (app-side only, no new engine pixels
@@ -3140,6 +3365,20 @@ class EngineSurface @JvmOverloads constructor(
         isAntiAlias = true
     }
 
+    // T2 §3 trajectories (centerlines + vertices — maison rose,
+    // overlay-only, suit la matrice de vue comme les fourmis).
+    private val trajLinePaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        color = 0xFFE08AB0.toInt()
+        isAntiAlias = true
+    }
+    private val trajDotPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = 0xFFE08AB0.toInt()
+        isAntiAlias = true
+    }
+
     private fun drawV2Overlays(
         c: android.graphics.Canvas,
         dst: RectF,
@@ -3161,6 +3400,32 @@ class EngineSurface @JvmOverloads constructor(
             }
             path.close()
             c.drawPath(path, v2Paint)
+        }
+        c.restore()
+    }
+
+    /** T2 §3 trajectories overlay (never engine pixels). */
+    private fun drawTrajectories(
+        c: android.graphics.Canvas,
+        dst: RectF,
+        ang: Float
+    ) {
+        val polys = trajectoryPolys
+        if (polys.isEmpty()) return
+        val s = fitScale(width, height) * viewScaleMul
+        if (s <= 1e-6f) return
+        c.save()
+        if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+        for (poly in polys) {
+            if (poly.size < 2) continue
+            val path = android.graphics.Path()
+            for ((i, e) in poly.withIndex()) {
+                val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
+                val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+                if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
+                c.drawCircle(sx, sy, 3f, trajDotPaint)
+            }
+            c.drawPath(path, trajLinePaint)
         }
         c.restore()
     }

@@ -42,6 +42,150 @@ void wr16(std::vector<std::uint8_t>& o, std::uint16_t v) {
     o.push_back(v & 0xff);
 }
 
+void wr32(std::vector<std::uint8_t>& o, std::uint32_t v);  // defined below
+
+// T2: minimal UTF-8 -> UTF-16BE transcode (BMP direct, astral via
+// surrogate pairs, malformed bytes -> U+FFFD). Honest subset for the
+// TySh text payload.
+void utf8ToUtf16Be(const std::string& in, std::vector<std::uint8_t>& out) {
+    std::size_t i = 0;
+    while (i < in.size()) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        std::uint32_t cp = 0xFFFD;
+        std::size_t adv = 1;
+        if (c < 0x80) {
+            cp = c;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < in.size()) {
+            cp = ((c & 0x1F) << 6) |
+                 (static_cast<unsigned char>(in[i + 1]) & 0x3F);
+            adv = 2;
+            if (cp < 0x80) cp = 0xFFFD;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < in.size()) {
+            cp = ((c & 0x0F) << 12) |
+                 ((static_cast<unsigned char>(in[i + 1]) & 0x3F) << 6) |
+                 (static_cast<unsigned char>(in[i + 2]) & 0x3F);
+            adv = 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < in.size()) {
+            cp = ((c & 0x07) << 18) |
+                 ((static_cast<unsigned char>(in[i + 1]) & 0x3F) << 12) |
+                 ((static_cast<unsigned char>(in[i + 2]) & 0x3F) << 6) |
+                 (static_cast<unsigned char>(in[i + 3]) & 0x3F);
+            adv = 4;
+        }
+        i += adv;
+        if (cp > 0x10FFFF) cp = 0xFFFD;
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            const std::uint16_t hi =
+                static_cast<std::uint16_t>(0xD800 + (cp >> 10));
+            const std::uint16_t lo =
+                static_cast<std::uint16_t>(0xDC00 + (cp & 0x3FF));
+            out.push_back((hi >> 8) & 0xff);
+            out.push_back(hi & 0xff);
+            out.push_back((lo >> 8) & 0xff);
+            out.push_back(lo & 0xff);
+        } else {
+            out.push_back((cp >> 8) & 0xff);
+            out.push_back(cp & 0xff);
+        }
+    }
+}
+
+// T2 TySh subset block payload (ARCHITECTURE.md §T2 §5, documented
+// minimal): version u16=1, Pascal font name, u16 size px, 4 straight
+// bytes color+0, u16 unit count + UTF-16BE text, 4 big-endian floats
+// frame (x,y,w,h parsed from textBox "x,y,w", h=0 when absent).
+std::vector<std::uint8_t> buildTypeToolPayload(const Layer& l) {
+    std::vector<std::uint8_t> p;
+    wr16(p, 1);  // subset version
+    const std::string font =
+        l.textFont.empty() ? "sans-serif" : l.textFont.substr(0, 63);
+    p.push_back(static_cast<std::uint8_t>(font.size() & 0xff));
+    p.insert(p.end(), font.begin(), font.end());
+    if ((1 + font.size()) & 1) p.push_back(0);  // even pad
+    const int sz = l.textSizePx >= 1 ? l.textSizePx : 0;
+    wr16(p, static_cast<std::uint16_t>(sz > 65535 ? 65535 : sz));
+    auto hexByte = [](const std::string& s, std::size_t at) -> int {
+        auto hx = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        if (at + 1 >= s.size()) return -1;
+        const int hi = hx(s[at]), lo = hx(s[at + 1]);
+        return (hi < 0 || lo < 0) ? -1 : hi * 16 + lo;
+    };
+    std::string hc = l.textColor;
+    if (!hc.empty() && hc[0] == '#') hc = hc.substr(1);
+    int cr = 0x14, cg = 0x14, cb = 0x14;
+    if (hc.size() == 6) {
+        const int a = hexByte(hc, 0), b = hexByte(hc, 2), c2 = hexByte(hc, 4);
+        if (a >= 0 && b >= 0 && c2 >= 0) {
+            cr = a;
+            cg = b;
+            cb = c2;
+        }
+    }
+    p.push_back(static_cast<std::uint8_t>(cr));
+    p.push_back(static_cast<std::uint8_t>(cg));
+    p.push_back(static_cast<std::uint8_t>(cb));
+    p.push_back(0);
+    std::vector<std::uint8_t> u16;
+    utf8ToUtf16Be(l.textContent.substr(0, 2048), u16);
+    const std::size_t units = u16.size() / 2;
+    wr16(p, static_cast<std::uint16_t>(units > 65535 ? 65535 : units));
+    p.insert(p.end(), u16.begin(),
+             u16.begin() +
+                 (units > 65535 ? 65535 * 2 : u16.size()));
+    float fx = 0, fy = 0, fw = 0, fh = 0;
+    {
+        float v[3] = {0, 0, 0};
+        int n = 0;
+        std::size_t pos = 0;
+        while (n < 3 && pos < l.textBox.size()) {
+            while (pos < l.textBox.size() &&
+                   (l.textBox[pos] == ' ' || l.textBox[pos] == ','))
+                ++pos;
+            if (pos >= l.textBox.size()) break;
+            char* e = nullptr;
+            v[n++] = std::strtof(l.textBox.c_str() + pos, &e);
+            if (e == l.textBox.c_str() + pos) break;
+            pos = static_cast<std::size_t>(e - l.textBox.c_str());
+        }
+        if (n == 3) {
+            fx = v[0];
+            fy = v[1];
+            fw = v[2];
+        }
+    }
+    auto wrF = [&](float f) {
+        std::uint32_t u = 0;
+        std::memcpy(&u, &f, 4);
+        p.push_back((u >> 24) & 0xff);
+        p.push_back((u >> 16) & 0xff);
+        p.push_back((u >> 8) & 0xff);
+        p.push_back(u & 0xff);
+    };
+    wrF(fx);
+    wrF(fy);
+    wrF(fw);
+    wrF(fh);
+    return p;
+}
+
+// Full tagged block: '8BIM' + 'TySh' + even-padded size + payload.
+std::vector<std::uint8_t> buildTypeToolBlock(const Layer& l) {
+    std::vector<std::uint8_t> b;
+    b.insert(b.end(), {'8', 'B', 'I', 'M'});
+    b.insert(b.end(), {'T', 'y', 'S', 'h'});
+    const std::vector<std::uint8_t> p = buildTypeToolPayload(l);
+    wr32(b, static_cast<std::uint32_t>(p.size()));
+    b.insert(b.end(), p.begin(), p.end());
+    if (p.size() & 1) b.push_back(0);  // even pad
+    return b;
+}
+
 void wr32(std::vector<std::uint8_t>& o, std::uint32_t v) {
     o.push_back((v >> 24) & 0xff);
     o.push_back((v >> 16) & 0xff);
@@ -242,6 +386,7 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
         const char* key;       // 4-char blend key
         const std::vector<std::uint8_t>* planes[4];  // R,G,B,A straight
         std::vector<std::uint8_t> owned[4];  // filled for merged base
+        std::vector<std::uint8_t> tagged;   // T2: TySh block or empty
     };
     auto blendKey = [](BlendMode m, bool& mapped) -> const char* {
         mapped = true;
@@ -270,8 +415,12 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
     bool needBase = false;
     for (std::size_t i = 0; i < c.layerCount(); ++i) {
         const Layer& l = c.layer(i);
+        // T2: bubble layers are non-eligible (flattened + counted, the
+        // V+2 §5.5 rule); text layers stay eligible (fiche is
+        // pixel-neutral) with a TySh subset block (see below).
         const bool eligible = !l.isGroup && !l.hasMask && !l.clipped &&
-                              l.adjustType.empty() && !l.isVector;
+                              l.adjustType.empty() && !l.isVector &&
+                              l.bubbleShape.empty();
         if (!eligible) {
             needBase = true;
             ++approx;  // merged into the base record (visible count)
@@ -314,6 +463,18 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
             }
         }
         for (int k = 0; k < 4; ++k) r.planes[k] = &r.owned[k];
+        // T2 TySh subset (ARCHITECTURE.md §T2 §5): one tagged block per
+        // eligible text layer — font name, size, color, frame, UTF-16BE
+        // string — IN ADDITION to the pixels. runs > 1 flatten onto
+        // the base style + approx +1 (heuristic: the opaque runs
+        // string holding more than one run object; documented).
+        if (l.hasText()) {
+            int runs = 0;
+            for (char ch : l.textRuns)
+                if (ch == '{') ++runs;
+            if (runs > 1) ++approx;
+            r.tagged = buildTypeToolBlock(l);
+        }
         recs.push_back(std::move(r));
     }
     if (needBase) {
@@ -322,7 +483,8 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
         for (std::size_t i = 0; i < c.layerCount(); ++i) {
             const Layer& l = c.layer(i);
             const bool eligible = !l.isGroup && !l.hasMask && !l.clipped &&
-                                  l.adjustType.empty() && !l.isVector;
+                                  l.adjustType.empty() && !l.isVector &&
+                                  l.bubbleShape.empty();
             if (!eligible) base.adoptLayer(l);
         }
         Surface bcomp;
@@ -408,6 +570,10 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
         extra.push_back(static_cast<std::uint8_t>(nm.size() & 0xff));
         extra.insert(extra.end(), nm.begin(), nm.end());
         if (((1 + nm.size()) & 1) != 0) extra.push_back(0);  // even pad
+        // T2 TySh subset (text layers only; readers without text
+        // support skip tagged blocks and see the pixels, as today).
+        if (!r.tagged.empty())
+            extra.insert(extra.end(), r.tagged.begin(), r.tagged.end());
         wr32(layerInfo, static_cast<std::uint32_t>(extra.size()));
         layerInfo.insert(layerInfo.end(), extra.begin(), extra.end());
         // Channel image data (raw, planar, straight).

@@ -58,6 +58,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -124,8 +125,16 @@ import dev.openclip.ui.PresetGallery
 import dev.openclip.ui.ReferencePanel
 import dev.openclip.ui.StudioMenu
 import dev.openclip.ui.StudioMenuItem
+import dev.openclip.ui.BubblePanel
+import dev.openclip.ui.FontRegistry
+import dev.openclip.ui.InlineTextBox
+import dev.openclip.ui.clearTextFiches
+import dev.openclip.ui.restoreTextFiches
+import dev.openclip.ui.stashTextFiches
 import dev.openclip.ui.TextPanel
 import dev.openclip.ui.TextSpec
+import dev.openclip.ui.VectorOpsPanel
+import dev.openclip.ui.VectorStylePanel
 import dev.openclip.ui.RecomposeTestHooks
 import dev.openclip.ui.UndoAvailability
 import dev.openclip.ui.scrollFade
@@ -278,6 +287,12 @@ class MainActivity : ComponentActivity() {
         val showExport = remember { mutableStateOf(false) }
         val exportFormat = remember { mutableStateOf("ora") }
         val ctx = LocalContext.current
+        // T2 §1: user font library lives in filesDir/fonts (session
+        // setup, once per composition root — rescan on import).
+        remember(FontRegistry) {
+            FontRegistry.dir = java.io.File(ctx.filesDir, "fonts")
+            FontRegistry.rescan()
+        }
         val clipAudio = remember { ClipAudio() }
         val audioName = remember { mutableStateOf<String?>(null) }
         val exporting = remember { mutableStateOf(false) }
@@ -354,6 +369,11 @@ class MainActivity : ComponentActivity() {
         val textAnchor = remember { mutableStateOf<Pair<Float, Float>?>(null) }
         val textEditLayer = remember { mutableStateOf(-1) }
         val textInitial = remember { mutableStateOf(TextSpec(text = "")) }
+        // T2: inline canvas editor (Valider = commit, Réglages = panel),
+        // font library liveness, PSD text inclusion.
+        val showInline = remember { mutableStateOf(false) }
+        val fontsTick = remember { mutableStateOf(0) }
+        val includeText = remember { mutableStateOf(true) }
         // V+1: one-shot eraser migration dialog (persisted in prefs).
         val eraserNoteShown = remember { mutableStateOf(false) }
         val showEraserNote = remember { mutableStateOf(false) }
@@ -592,7 +612,16 @@ class MainActivity : ComponentActivity() {
                 val dst = java.io.File(
                     ctx.cacheDir, "export${System.currentTimeMillis()}$ext"
                 )
+                // T2 §5: OFF = text flattened to pixels (fiches stashed,
+                // cleared, save, restored in finally — meta-only, the
+                // pixels and undo stacks are untouched).
+                val stashed = if (fmt == "psd" && !includeText.value) {
+                    val m = stashTextFiches(surface)
+                    clearTextFiches(surface)
+                    m
+                } else null
                 surface.saveTo(dst.absolutePath, fmt) { ok ->
+                    if (stashed != null) restoreTextFiches(surface, stashed)
                     if (ok) {
                         copyFromTo(ctx, dst, uri)
                         dst.delete()
@@ -652,6 +681,34 @@ class MainActivity : ComponentActivity() {
                     refModelName.value = null
                     status.value = ctx.getString(R.string.ref_failed)
                 }
+            }
+        }
+
+        // T2 §1: user font import (SAF font/* -> fonts/ library;
+        // libre files only — confirmed by the user at import, origin
+        // logged like third_party/README.md; honest refusals, no crash).
+        val openFont = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                val name = queryDisplayName(ctx, uri) ?: "font.ttf"
+                val dst = java.io.File(
+                    ctx.cacheDir, "font-${System.currentTimeMillis()}-$name"
+                )
+                copyTo(ctx, uri, dst)
+                when (val r = FontRegistry.importFrom(dst, name)) {
+                    is FontRegistry.ImportResult.Ok -> {
+                        status.value = ctx.getString(R.string.import_ok) + " " + r.family
+                        fontsTick.value++
+                    }
+                    is FontRegistry.ImportResult.Refused -> {
+                        status.value = ctx.getString(
+                            if (r.reason == "too_large") R.string.font_too_large
+                            else R.string.import_failed
+                        )
+                    }
+                }
+                dst.delete()
             }
         }
 
@@ -901,6 +958,27 @@ class MainActivity : ComponentActivity() {
             refreshKey.value++
         }
 
+        // T2 §1–§2: shared text commit outcome (inline + panel).
+        fun textCommitDone(surf: EngineSurface, ok: Boolean) {
+            status.value = if (ok) {
+                ctx.getString(R.string.text_committed)
+            } else {
+                ctx.getString(R.string.filter_failed)
+            }
+            if (ok) {
+                val aid = activeDocId.value
+                if (aid != null) {
+                    docRegistry.markDirty(aid, true)
+                }
+            }
+            if (surf.lastFontFallback) {
+                status.value = ctx.getString(
+                    R.string.text_font_fallback
+                )
+            }
+            refreshKey.value++
+        }
+
         fun wireSurface(cv: EngineSurface, docId: String) {
             cv.navigateMode = navMode.value
             cv.edgeBottomEnabled = compact
@@ -914,6 +992,9 @@ class MainActivity : ComponentActivity() {
                     ""
                 }
             }
+            // T2 §2: inline canvas editor (anchored to the text
+            // frame, follows the view); the TextPanel stays for
+            // settings (runs, outline, vertical, hyphen).
             cv.onTextAnchor = { ex, ey ->
                 textAnchor.value = Pair(ex, ey)
                 textEditLayer.value = -1
@@ -923,15 +1004,15 @@ class MainActivity : ComponentActivity() {
                     boxY = ey.coerceIn(0f, cv.canvasHeight().toFloat()),
                     boxW = (cv.canvasWidth() - ex).coerceAtLeast(64f)
                 )
-                showTextPanel.value = true
+                showInline.value = true
             }
             cv.onTextDoubleTap = { layer ->
                 val fiche = cv.layerTextForTest(layer)
                 if (fiche != null) {
-                    textAnchor.value = null
+                    textAnchor.value = Pair(fiche.boxX, fiche.boxY)
                     textEditLayer.value = layer
                     textInitial.value = fiche
-                    showTextPanel.value = true
+                    showInline.value = true
                 }
             }
             cv.onGestureUndo = {
@@ -2199,6 +2280,44 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.align(Alignment.TopEnd)
                         )
                     }
+                    // T2 §2: inline text field (anchored to the text
+                    // frame in canvas-box coords = engineToScreen space;
+                    // follows pan/pinch/rotate via view ticks; Valider =
+                    // 1-undo commit, Réglages = full panel, Échap = drop).
+                    if (showInline.value) {
+                        val surf = activeSurface()
+                        val anchor = textAnchor.value
+                        if (surf != null && anchor != null) {
+                            key(fontsTick.value + viewZoomTick.value + loupeTick.value) {
+                                InlineTextBox(
+                                    surface = surf,
+                                    anchor = anchor,
+                                    initial = textInitial.value,
+                                    onCommit = { text ->
+                                        showInline.value = false
+                                        val layer = textEditLayer.value
+                                        val spec =
+                                            textInitial.value.copy(text = text)
+                                        val done: (Boolean) -> Unit = { ok ->
+                                            textCommitDone(surf, ok)
+                                        }
+                                        if (layer >= 0) surf.reeditText(
+                                            layer, spec, done
+                                        )
+                                        else surf.commitText(spec, done)
+                                    },
+                                    onSettings = {
+                                        showInline.value = false
+                                        showTextPanel.value = true
+                                    },
+                                    onDismiss = { showInline.value = false },
+                                    modifier = Modifier.align(Alignment.TopStart)
+                                )
+                            }
+                        } else {
+                            showInline.value = false
+                        }
+                    }
                     // V+1: the raster eraser is a real dest-out erase
                     // (alpha-erase) — the honest banner is gone. A
                     // one-shot migration note announces the new
@@ -2421,6 +2540,26 @@ class MainActivity : ComponentActivity() {
                                     onExportFile = { f, mime ->
                                         offerExportFile(f, mime)
                                     },
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                // T2 text + vector avancé (spec
+                                // docs/t2-text-vector.md): style par
+                                // tracé, retracer/connecter/épaisseur +
+                                // trajectoires, sommets, bulle dédiée.
+                                VectorStylePanel(
+                                    surface = surface,
+                                    inkHex = inkHex,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                VectorOpsPanel(
+                                    surface = surface,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                BubblePanel(
+                                    surface = surface,
                                     onStatus = { status.value = it },
                                     modifier = Modifier.fillMaxWidth()
                                 )
@@ -2775,36 +2914,24 @@ class MainActivity : ComponentActivity() {
                 if (showTextPanel.value) {
                     val surf = activeSurface()
                     if (surf != null) {
+                        key(fontsTick.value) {
                         TextPanel(
                             initial = textInitial.value,
                             inkHex = inkHex,
+                            fonts = FontRegistry.families(),
+                            onImportFont = { openFont.launch(arrayOf("font/*")) },
                             onCommit = { spec ->
                                 showTextPanel.value = false
                                 val layer = textEditLayer.value
                                 val done: (Boolean) -> Unit = { ok ->
-                                    status.value = if (ok) {
-                                        ctx.getString(R.string.text_committed)
-                                    } else {
-                                        ctx.getString(R.string.filter_failed)
-                                    }
-                                    if (ok) {
-                                        val aid = activeDocId.value
-                                        if (aid != null) {
-                                            docRegistry.markDirty(aid, true)
-                                        }
-                                    }
-                                    if (surf.lastFontFallback) {
-                                        status.value = ctx.getString(
-                                            R.string.text_font_fallback
-                                        )
-                                    }
-                                    refreshKey.value++
+                                    textCommitDone(surf, ok)
                                 }
                                 if (layer >= 0) surf.reeditText(layer, spec, done)
                                 else surf.commitText(spec, done)
                             },
                             onDismiss = { showTextPanel.value = false }
                         )
+                        }
                     } else {
                         showTextPanel.value = false
                     }
@@ -2819,7 +2946,9 @@ class MainActivity : ComponentActivity() {
                                 "calque-${System.currentTimeMillis()}"
                             )
                         },
-                        resultLine = status.value
+                        resultLine = status.value,
+                        includeText = includeText.value,
+                        onIncludeText = { includeText.value = it }
                     )
                 }
             }

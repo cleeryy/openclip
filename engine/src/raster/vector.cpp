@@ -4,6 +4,7 @@
 // (clean-room, no SVG dependency).
 #include "openclip/vector.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 
@@ -37,6 +38,115 @@ bool parseDoubleList(const std::string& json, std::size_t from,
     if (endp == p) return false;
     out = v;
     return true;
+}
+
+// T2: extract a top-level or style-wrapped string key ("tip", "color").
+// Looks for "style":{...} first, then the top level; M3 rule.
+bool styleStr(const std::string& json, const char* key, std::string& out) {
+    const std::string pat = std::string("\"") + key + "\"";
+    const std::size_t st = json.find("\"style\"");
+    if (st != std::string::npos) {
+        const std::size_t so = json.find('{', st + 7);
+        if (so != std::string::npos) {
+            // Bound the style object (brace-depth walk): only keys
+            // strictly inside it count as style keys.
+            int dep = 0;
+            std::size_t se = std::string::npos;
+            bool inStr = false;
+            for (std::size_t k = so;
+                 k < std::min(json.size(), so + 4096); ++k) {
+                const char c = json[k];
+                if (c == '"' && (k == 0 || json[k - 1] != '\\'))
+                    inStr = !inStr;
+                if (inStr) continue;
+                if (c == '{') ++dep;
+                if (c == '}') {
+                    --dep;
+                    if (dep == 0) {
+                        se = k;
+                        break;
+                    }
+                }
+            }
+            const std::size_t at = json.find(pat, so);
+            if (at != std::string::npos && se != std::string::npos &&
+                at < se) {
+                const std::size_t colon = json.find(':', at + pat.size());
+                if (colon != std::string::npos && colon < se) {
+                    const std::size_t q1 = json.find('"', colon + 1);
+                    if (q1 != std::string::npos && q1 < se) {
+                        const std::size_t q2 = json.find('"', q1 + 1);
+                        if (q2 != std::string::npos && q2 < se) {
+                            out = json.substr(q1 + 1, q2 - q1 - 1);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const std::size_t at = json.find(pat);
+    if (at == std::string::npos) return false;
+    const std::size_t colon = json.find(':', at + pat.size());
+    if (colon == std::string::npos) return false;
+    const std::size_t q1 = json.find('"', colon + 1);
+    if (q1 == std::string::npos) return false;
+    const std::size_t q2 = json.find('"', q1 + 1);
+    if (q2 == std::string::npos) return false;
+    out = json.substr(q1 + 1, q2 - q1 - 1);
+    return true;
+}
+
+bool styleNum(const std::string& json, const char* key, double& out) {
+    const std::string pat = std::string("\"") + key + "\"";
+    const std::size_t at = json.find(pat);
+    if (at == std::string::npos) {
+        // Try inside "style".
+        const std::size_t st = json.find("\"style\"");
+        if (st == std::string::npos) return false;
+        const std::size_t at2 = json.find(pat, st);
+        if (at2 == std::string::npos) return false;
+        return parseDoubleList(json, at2, key, out);
+    }
+    return parseDoubleList(json, at, key, out);
+}
+
+// Parse "#RRGGBB" (tolerant: leading '#', short "#RGB" expanded).
+// False = unparsable (caller keeps session ink).
+bool parseHexColor(const std::string& s, std::uint8_t& r, std::uint8_t& g,
+                   std::uint8_t& b) {
+    std::string h = s;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    if (h.size() == 3) {
+        int v[3];
+        for (int i = 0; i < 3; ++i) {
+            v[i] = hex(h[i]);
+            if (v[i] < 0) return false;
+        }
+        r = static_cast<std::uint8_t>(v[0] * 17);
+        g = static_cast<std::uint8_t>(v[1] * 17);
+        b = static_cast<std::uint8_t>(v[2] * 17);
+        return true;
+    }
+    if (h.size() == 6 || h.size() == 8) {
+        int v[3] = {0, 0, 0};
+        for (int i = 0; i < 3; ++i) {
+            const int hi = hex(h[i * 2]), lo = hex(h[i * 2 + 1]);
+            if (hi < 0 || lo < 0) return false;
+            v[i] = hi * 16 + lo;
+        }
+        r = static_cast<std::uint8_t>(v[0]);
+        g = static_cast<std::uint8_t>(v[1]);
+        b = static_cast<std::uint8_t>(v[2]);
+        return true;
+    }
+    return false;
 }
 
 // Squared distance between segments ab and cd (2D).
@@ -168,6 +278,66 @@ bool parseVectorPathJson(const std::string& pathJson, float curveExp,
             p.widthProfile.push_back(widthAt(pr, curveExp));
         }
     }
+    // T2 style keys (M3 rule — unknown ignored, bad = defaults).
+    std::string tip;
+    if (styleStr(pathJson, "tip", tip))
+        p.tip = (tip == "flat") ? "flat" : "round";
+    double sz = 1.0;
+    if (styleNum(pathJson, "size", sz))
+        p.sizeMul = (sz >= 0.25 && sz <= 4.0) ? static_cast<float>(sz)
+                                             : 1.0f;
+    std::string col;
+    if (styleStr(pathJson, "color", col)) {
+        std::uint8_t cr = 0, cg = 0, cb = 0;
+        if (parseHexColor(col, cr, cg, cb)) {
+            p.r = cr;
+            p.g = cg;
+            p.b = cb;
+        }
+    }
+    // Corners: "corners":[0/1...] sized to the RAW points when present
+    // (resampling below spreads each raw corner over its span).
+    std::vector<char> rawCorners;
+    {
+        const std::size_t at = pathJson.find("\"corners\"");
+        if (at != std::string::npos) {
+            const std::size_t ob = pathJson.find('[', at);
+            const std::size_t cb =
+                (ob == std::string::npos)
+                    ? std::string::npos
+                    : pathJson.find(']', ob);
+            if (ob != std::string::npos && cb != std::string::npos) {
+                const std::string arr = pathJson.substr(ob + 1, cb - ob - 1);
+                std::size_t q = 0;
+                while (q < arr.size() && rawCorners.size() < raw.size()) {
+                    while (q < arr.size() &&
+                           arr[q] != '0' && arr[q] != '1')
+                        ++q;
+                    if (q >= arr.size()) break;
+                    rawCorners.push_back(arr[q] == '1' ? 1 : 0);
+                    ++q;
+                }
+            }
+        }
+    }
+    p.corners.assign(p.pts.size(), 0);
+    if (rawCorners.size() == raw.size() && raw.size() > 1) {
+        // Spread: resampled point k of span i inherits raw corner i+1
+        // (span starts inherit the span start, endpoints exact).
+        p.corners[0] = rawCorners[0];
+        std::size_t dst = 1;
+        for (std::size_t i = 1; i < raw.size() && dst < p.pts.size();
+             ++i) {
+            const float dx = raw[i].x - raw[i - 1].x;
+            const float dy = raw[i].y - raw[i - 1].y;
+            int n = static_cast<int>(std::ceil(
+                std::sqrt(dx * dx + dy * dy) / kStep));
+            if (n < 1) n = 1;
+            if (n > 4096) n = 4096;
+            for (int k = 1; k <= n && dst < p.pts.size(); ++k, ++dst)
+                p.corners[dst] = rawCorners[i];
+        }
+    }
     path = std::move(p);
     return true;
 }
@@ -228,18 +398,206 @@ bool undoVectorPath(Canvas& canvas, VectorHistory& history, std::size_t li) {
     return true;
 }
 
-void rasterizeVectorPaths(const std::vector<VectorPath>& paths, Surface& out,
-                          std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+// Resample an already-parsed polyline to ~8px steps (shared by the
+// connect op: seam-joined raw points go through the same M6 grid).
+void resampleRaw(const std::vector<Vec2>& raw, const std::vector<float>& rawW,
+                 VectorPath& out) {
+    out.pts.clear();
+    out.widthProfile.clear();
+    if (raw.empty()) return;
+    constexpr float kStep = 8.0f;
+    out.pts.push_back(raw[0]);
+    out.widthProfile.push_back(rawW.empty() ? 8.0f : rawW[0]);
+    for (std::size_t i = 1; i < raw.size(); ++i) {
+        const float dx = raw[i].x - raw[i - 1].x;
+        const float dy = raw[i].y - raw[i - 1].y;
+        const float dist = std::sqrt(dx * dx + dy * dy);
+        int n = static_cast<int>(std::ceil(dist / kStep));
+        if (n < 1) n = 1;
+        if (n > 4096) n = 4096;
+        const float w0 = (i - 1 < rawW.size()) ? rawW[i - 1] : 8.0f;
+        const float w1 = (i < rawW.size()) ? rawW[i] : 8.0f;
+        for (int k = 1; k <= n; ++k) {
+            const float t = static_cast<float>(k) / n;
+            out.pts.push_back(
+                Vec2{raw[i - 1].x + dx * t, raw[i - 1].y + dy * t});
+            out.widthProfile.push_back(w0 + (w1 - w0) * t);
+        }
+    }
+}
+
+bool replaceVectorPath(Canvas& canvas, VectorHistory& history, std::size_t li,
+                       std::size_t id, const std::string& pathJson,
+                       float curveExp, std::string& error) {
+    if (li >= canvas.layerCount()) {
+        error = "vector: bad layer";
+        return false;
+    }
+    std::vector<VectorPath>& v = canvas.layer(li).vectorData;
+    if (id >= v.size()) {
+        error = "vector: bad id";
+        return false;
+    }
+    VectorPath p;
+    if (!parseVectorPathJson(pathJson, curveExp, "stroke", p, error))
+        return false;
+    // Keep the old style unless the JSON re-applies it (M3 keys).
+    const VectorPath& old = v[id];
+    std::string tip;
+    const bool hasTip = styleStr(pathJson, "tip", tip);
+    double sz = 1.0;
+    const bool hasSize = styleNum(pathJson, "size", sz);
+    std::string col;
+    const bool hasColor = styleStr(pathJson, "color", col);
+    if (!hasTip) p.tip = old.tip;
+    if (!hasSize) p.sizeMul = old.sizeMul;
+    if (!hasColor) {
+        p.r = old.r;
+        p.g = old.g;
+        p.b = old.b;
+    }
+    p.kind = old.kind;  // replace never converts ink<->eraser
+    if (p.corners.size() != p.pts.size()) p.corners.assign(p.pts.size(), 0);
+    history.push(v);
+    v[id] = std::move(p);
+    return true;
+}
+
+bool connectVectorPaths(Canvas& canvas, VectorHistory& history, std::size_t li,
+                        std::size_t a, std::size_t b, float tol,
+                        std::string& error) {
+    if (li >= canvas.layerCount()) {
+        error = "vector: bad layer";
+        return false;
+    }
+    std::vector<VectorPath>& v = canvas.layer(li).vectorData;
+    if (a >= v.size() || b >= v.size() || a == b) {
+        error = "vector: bad id";
+        return false;
+    }
+    if (!(tol > 0)) tol = 12.0f;
+    const VectorPath& pa = v[a];
+    const VectorPath& pb = v[b];
+    if (pa.pts.empty() || pb.pts.empty()) {
+        error = "vector: empty path";
+        return false;
+    }
+    const Vec2 endsA[2] = {pa.pts.front(), pa.pts.back()};
+    const Vec2 endsB[2] = {pb.pts.front(), pb.pts.back()};
+    // Seam-minimizing orientation: pick the closest endpoint pair.
+    float best = -1;
+    int bestA = 1, bestB = 0;  // default: a.end -> b.start
+    for (int i = 0; i < 2; ++i)
+        for (int j = 0; j < 2; ++j) {
+            const float dx = endsA[i].x - endsB[j].x;
+            const float dy = endsA[i].y - endsB[j].y;
+            const float d2 = dx * dx + dy * dy;
+            if (best < 0 || d2 < best) {
+                best = d2;
+                bestA = i;
+                bestB = j;
+            }
+        }
+    if (best < 0 || std::sqrt(best) > tol) {
+        error = "vector: endpoints too far";
+        return false;
+    }
+    // Raw chains (un-resample: width = profile, pressure inverted
+    // through widthAt — resampleRaw re-lays the M6 grid below).
+    auto rawOf = [](const VectorPath& p, bool rev, std::vector<Vec2>& pts,
+                    std::vector<float>& w) {
+        pts.clear();
+        w.clear();
+        if (!rev) {
+            pts = p.pts;
+            w = p.widthProfile;
+        } else {
+            pts.assign(p.pts.rbegin(), p.pts.rend());
+            w.assign(p.widthProfile.rbegin(), p.widthProfile.rend());
+        }
+    };
+    std::vector<Vec2> ra, rb;
+    std::vector<float> wa, wb;
+    rawOf(pa, bestA == 0, ra, wa);
+    rawOf(pb, bestB == 1, rb, wb);
+    ra.insert(ra.end(), rb.begin(), rb.end());
+    wa.insert(wa.end(), wb.begin(), wb.end());
+    VectorPath joined;
+    joined.kind = pa.kind;
+    joined.tip = pa.tip;
+    joined.sizeMul = pa.sizeMul;
+    joined.r = pa.r;
+    joined.g = pa.g;
+    joined.b = pa.b;
+    resampleRaw(ra, wa, joined);
+    joined.corners.assign(joined.pts.size(), 0);
+    history.push(v);
+    v[a] = std::move(joined);
+    // Erasing b shifts later siblings down (positional ids, documented).
+    v.erase(v.begin() + static_cast<long>(b));
+    return true;
+}
+
+bool setVectorWidths(Canvas& canvas, VectorHistory& history, std::size_t li,
+                     std::size_t id, const std::vector<float>& widths,
+                     std::string& error) {
+    if (li >= canvas.layerCount()) {
+        error = "vector: bad layer";
+        return false;
+    }
+    std::vector<VectorPath>& v = canvas.layer(li).vectorData;
+    if (id >= v.size()) {
+        error = "vector: bad id";
+        return false;
+    }
+    VectorPath& p = v[id];
+    if (widths.size() != p.pts.size() || p.pts.empty()) {
+        error = "vector: widths size mismatch";
+        return false;
+    }
+    history.push(v);
+    p.widthProfile = widths;
+    for (float& w : p.widthProfile) {
+        if (!(w >= 0.5f)) w = 0.5f;
+        if (w > 128.0f) w = 128.0f;
+    }
+    return true;
+}
+
+// Square stamp (flat tip): same hard coverage as the disc, square
+// footprint (corners, not demi-discs at path ends).
+void stampSquare(Surface& out, float cx, float cy, float half,
+                 std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+    if (half < 0.5f) half = 0.5f;
+    const int x0 = static_cast<int>(std::floor(cx - half));
+    const int x1 = static_cast<int>(std::ceil(cx + half));
+    const int y0 = static_cast<int>(std::floor(cy - half));
+    const int y1 = static_cast<int>(std::ceil(cy + half));
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) out.set(x, y, Pixel{r, g, b, 255});
+}
+
+void rasterizeVectorPaths(const std::vector<VectorPath>& paths,
+                          Surface& out) {
     out.clear();
     constexpr float kSpacing = 2.0f;
     for (const auto& p : paths) {
         if (p.pts.empty()) continue;
         const bool eraser = (p.kind == "eraser-stroke");
+        const bool flat = (!eraser && p.tip == "flat");
+        const float mul =
+            (p.sizeMul >= 0.25f && p.sizeMul <= 4.0f) ? p.sizeMul : 1.0f;
+        auto stamp = [&](float x, float y, float w) {
+            if (flat)
+                stampSquare(out, x, y, w * 0.5f * mul, p.r, p.g, p.b);
+            else
+                stampDisc(out, x, y, w * 0.5f * mul, p.r, p.g, p.b);
+        };
         if (p.pts.size() == 1) {
             const float w = p.widthProfile.empty() ? 8.0f : p.widthProfile[0];
             if (eraser) {
                 // Destination-out single stamp: clear the disc.
-                const float rad = std::max(0.5f, w * 0.5f);
+                const float rad = std::max(0.5f, w * 0.5f * mul);
                 const int x0 = static_cast<int>(std::floor(p.pts[0].x - rad));
                 const int x1 = static_cast<int>(std::ceil(p.pts[0].x + rad));
                 const int y0 = static_cast<int>(std::floor(p.pts[0].y - rad));
@@ -252,7 +610,7 @@ void rasterizeVectorPaths(const std::vector<VectorPath>& paths, Surface& out,
                             out.set(x, y, Pixel{0, 0, 0, 0});
                     }
             } else {
-                stampDisc(out, p.pts[0].x, p.pts[0].y, w * 0.5f, r, g, b);
+                stamp(p.pts[0].x, p.pts[0].y, w);
             }
             continue;
         }
@@ -274,7 +632,7 @@ void rasterizeVectorPaths(const std::vector<VectorPath>& paths, Surface& out,
                 const float x = a.x + dx * t, y = a.y + dy * t;
                 const float w = wa + (wb - wa) * t;
                 if (eraser) {
-                    const float rad = std::max(0.5f, w * 0.5f);
+                    const float rad = std::max(0.5f, w * 0.5f * mul);
                     const int x0 = static_cast<int>(std::floor(x - rad));
                     const int x1 = static_cast<int>(std::ceil(x + rad));
                     const int y0 = static_cast<int>(std::floor(y - rad));
@@ -287,7 +645,7 @@ void rasterizeVectorPaths(const std::vector<VectorPath>& paths, Surface& out,
                                 out.set(xx, yy, Pixel{0, 0, 0, 0});
                         }
                 } else {
-                    stampDisc(out, x, y, w * 0.5f, r, g, b);
+                    stamp(x, y, w);
                 }
             }
         }

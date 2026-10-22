@@ -622,6 +622,123 @@ undo empties the layer and the original only comes back via an
 app-side re-commit — documented deviation from the "1 undo"
 shorthand, surfaced honestly in the UI).
 
+T2 additions (decided 2026-10-22, text + advanced vector round —
+spec docs/t2-text-vector.md; delivery order §4 → §3 → §1+§2 → §5):
+
+- Conventions (all 5 items): M3 alpha contract holds (rgb <= alpha;
+  only text commits and bubble fill touch alpha BY DESIGN); pixel
+  writes = full-layer tile snapshots (1 step); vector ops = full
+  VectorHistory snapshot (1 step); fiches are opaque (engine stores,
+  round-trips, never interprets); overlay-only UI (inline field,
+  trajectories, handles, bubble tail) never enters engine pixels;
+  engine coords everywhere (screenToEngine); targets >= 48dp.
+- §4 style per path + vertices (0 new symbol): VectorPath grows
+  `tip` ("round"|"flat", default round), `sizeMul` (0.25..4, default
+  1, multiplies the pressure width profile at raster time),
+  `r,g,b` ink (default session ink — the M6 "black per layer" ends
+  here), `corners` (1 = hard vertex, cuts the app-side Catmull-Rom
+  densification segment; smooth by default). parseVectorPathJson
+  reads the new keys (M3 rule: unknown ignored, bad tip = round,
+  out-of-range size = 1, unparsable color = session ink);
+  rasterizeVectorPaths loses its r,g,b params and paints per-path
+  ink (`flat` = square stamps, same AA); eraser-stroke ignores
+  color (dest-out, documented). nVectorPaths getter returns the new
+  fields (tip/size/color/corners) read-only. nAppendVectorPath JSON
+  grows the same optional keys; the §3 replace op accepts an
+  optional `style:{...}` to re-apply style. nLayerState gains
+  per-layer `"vectorPaths":N` (live path count) and
+  `"vectorStored":bool` (sibling present and within cap — the
+  visible 256 KiB counter, `.clip`-palier-b pattern).
+- §4 ORA vector sibling (0 new symbol): every vector layer writes
+  `data/vectorNNN.json`
+  (`{"paths":[{pts,widths,tip,size,color,corners,kind}]}`) + attr
+  `x-openclip-vector="data/vectorNNN.json"`, IN ADDITION to the
+  (empty) PNG (third-party readers: PNG + ignored attr). Missing /
+  unreadable sibling at load = PNG alone as a NORMAL raster layer
+  (isVector cleared, never a broken layer). Over 256 KiB per layer
+  = PNG alone + vectorStored false (visible counter, never
+  silent). nLayerState itself is unchanged in shape (only the two
+  vector keys above).
+- §3 retrace / width / connect (THREE new symbols, below):
+  indexed ops on vectorData (VectorHistory snapshot first, 1 step):
+  - `nReplaceVectorPath(handle, index, id, pathJson): Boolean` —
+    replaces path id's geometry (resampled ~8px like the append
+    path, same curve exponent as the session), KEEPS tip/size/
+    color/corners unless pathJson carries an optional
+    `style:{tip?,size?,color?}`. False + layer intact on bad
+    id/malformed JSON. `id` = positional index in vectorData
+    (documented): the app re-reads nVectorPaths before every op
+    (no id caching across gestures); stale id = false (tested).
+  - `nConnectVectorPaths(handle, index, a, b, tolJson): Boolean` —
+    fuses paths a+b when an endpoint pair is within tol (default
+    12px, optional JSON `{"tol":..}` or bare number, M3 rule):
+    concatenates in the seam-minimizing orientation, resamples,
+    removes b. False + both intact when too far apart.
+  - `nSetVectorWidths(handle, index, id, widthsJson): Boolean` —
+    replaces path id's width profile (`{"widths":[...]}` or bare
+    array; size must equal pts size, values clamped 0.5..128px).
+    The falloff gesture math is app-side; the engine poses.
+  Review note (spec §7): a single generic `nVectorOp(handle, json)`
+  was considered and DECLINED (same clause as T1 §8): explicit
+  names keep check_jni_symbols.sh and per-op tests readable. The
+  4-symbol T2 budget below is the cap.
+- §1 runs/outline/fonts + §2 inline/vertical/hyphen (0 new
+  symbol): nSetLayerText JSON grows opaque keys (M3 rule):
+  `outline:{w:0..8,color:"#RRGGBB"}` (absent = off),
+  `runs:[{start,len,font,style,size,color}]` (absent/empty = the
+  global style, byte-identical round trip; out-of-range runs =
+  global style, pixels intact),
+  `fontfile` (imported file name — REPRO `repli` below),
+  `dir:"h"|"v"` (default h), `hyphen:bool` (default false).
+  Layout stays app-side (maison line engine: per-run measure via
+  Paint.getTextWidths, word split, pure function, StaticLayout
+  replaced) + `hyphenate(word, lang)` rule-based from scratch
+  (consonant break, never after 1st / before last 2 letters,
+  words <= 5 untouched, documented approximate). Outline =
+  STROKE pass under the fill pass in the same blit commit
+  (1 undo). Vertical = columns top→bottom, right→left, latin
+  pivoted 90° (honest simplified tategaki). ORA attrs `x-openclip-text-runs|outline|fontfile|
+  dir|hyphen` (same clean degrade); nLayerState "text" object
+  grows the same keys.
+- §1 font REPRO repli (documented here BEFORE code per the frozen
+  rule): user fonts are NOT embedded in the ORA (no new byte
+  channel, keeps the 4-symbol cap): `fontfile` records the name,
+  the bytes live app-side (`fonts/` cache); reload without the
+  file = sans-serif + `font_substituted` banner (V+1 §2.4
+  pattern), pixels always kept. Embedding stays FUTURE work.
+- §5 PSD text + bubble layer (ONE new symbol, below): savePsd
+  writes a minimal TypeToolObjectSetting subset per ELIGIBLE text
+  layer (font name, size, color, frame, UTF-16BE string with u16
+  length prefix; key `TySh` as an 8BIM tagged block in the layer
+  extra data) IN ADDITION to the pixels (readers without text
+  support see pixels, as today). runs > 1 flatten onto the base
+  style + approx +1 (heuristic: the opaque runs string holding
+  more than one run object; documented). Non-eligible text
+  (masked/clipped/group/vector) merges into the base record as
+  today. `nPsdApproxCount` counts the flattenings (existing
+  channel, 0 new symbol).
+  - `nSetLayerBubble(handle, index, json|null): Boolean` — bubble
+    fiche on any layer (null/empty clears, normal layer again).
+    JSON `{shape:"ellipse"|"rounded", frame:[x,y,w,h],
+    tail:[bx,by,tx,ty]?, fill:"#FFFFFF", stroke:"#000000",
+    strokeW:4, textLayer:-1}` (M3 rule). Meta, NOT in undo
+    (like nSetLayerMeta and V+2 holds — dragging the tail is not
+    a stroke). Composite-time render via the from-scratch
+    `openclip/bubble.h::renderBubble` kernel (ellipse/rounded
+    body + triangular tail, fill + centered stroke, 4x4 coverage
+    AA, premultiplied-safe): stampShape (T1) operates on an
+    active layer with undo and a mask contract, not on a
+    composite-time temp — hence a dedicated pure kernel reusing
+    the same supersampling PATTERN (documented here, no silent
+    duplication). ORA attrs `x-openclip-bubble|frame|tail|fill|
+    stroke|strokew|text` (same clean degrade); nLayerState gains
+    `"bubble"` (badge `o`, panel). Bubble layers are PSD
+    non-eligible (flattened + counted, V+2 §5.5 rule).
+- T2 JNI budget: EXACTLY 4 new symbols (this section documents
+  all four BEFORE code): nReplaceVectorPath, nConnectVectorPaths,
+  nSetVectorWidths, nSetLayerBubble. Everything else is JSON
+  growth on existing symbols.
+
 V+3 additions (decided 2026-10-20, confort-pro round —
 spec docs/v3-confort.md; 8/11 items are 0-JNI app-side, only §1.1,
 §2b, §5, §6.1 and §8.1 touch the engine, and of those only §5 adds

@@ -24,6 +24,7 @@ SRCS = src/raster/surface.cpp \
        src/paint/fill.cpp \
        src/paint/gradient.cpp \
        src/paint/shapes.cpp \
+       src/paint/bubble.cpp \
        src/ref/ref.cpp
 
 TEST_SRCS = tests/main.cpp \
