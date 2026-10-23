@@ -162,6 +162,85 @@ private val FILTERS = listOf(
             FilterParam.Num("level", 0f, 255f, 128f, int = true),
             FilterParam.Toggle("dither", false)
         )
+    ),
+    // T4 §2 pack créatif (registre moteur, 0 JNI — mêmes règles :
+    // clés inconnues ignorées, défauts moteur, alpha intact sauf
+    // ombre portée compositée derrière par design).
+    FilterSpec(
+        "glow", R.string.filter_glow,
+        listOf(
+            FilterParam.Num("radius", 1f, 64f, 8f),
+            FilterParam.Num("amount", 0f, 2f, 0.6f),
+            FilterParam.Text("tint", "#FFFFFF")
+        )
+    ),
+    FilterSpec(
+        "dropShadow", R.string.filter_drop_shadow,
+        listOf(
+            FilterParam.Num("dx", -64f, 64f, 8f),
+            FilterParam.Num("dy", -64f, 64f, 8f),
+            FilterParam.Num("radius", 0f, 64f, 6f),
+            FilterParam.Text("color", "#000000"),
+            FilterParam.Num("opacity", 0f, 1f, 0.5f)
+        )
+    ),
+    FilterSpec(
+        "crystallize", R.string.filter_crystallize,
+        listOf(
+            FilterParam.Num("cell", 3f, 64f, 16f, int = true)
+        )
+    ),
+    FilterSpec(
+        "normalMap", R.string.filter_normal_map,
+        listOf(
+            FilterParam.Num("strength", 0f, 4f, 1f)
+        )
+    ),
+    FilterSpec(
+        "retro", R.string.filter_retro,
+        listOf(
+            FilterParam.Num("warmth", 0f, 1f, 0.5f),
+            FilterParam.Num("grain", 0f, 64f, 10f, int = true),
+            FilterParam.Num("vignette", 0f, 1f, 0.3f),
+            FilterParam.Num("fade", 0f, 1f, 0.2f)
+        )
+    ),
+    FilterSpec(
+        "pencil", R.string.filter_pencil,
+        listOf(
+            FilterParam.Num("strength", 0f, 1f, 0.7f)
+        )
+    ),
+    FilterSpec(
+        "perlinClouds", R.string.filter_perlin_clouds,
+        listOf(
+            FilterParam.Num("scale", 1f, 16f, 6f, int = true),
+            FilterParam.Num("octaves", 1f, 6f, 4f, int = true),
+            FilterParam.Num("seed", 0f, 9999f, 0f, int = true),
+            FilterParam.Choice("mode", listOf("mix", "overwrite"), "mix")
+        )
+    ),
+    // T4 §3 objectif/fisheye/panorama (registre moteur, 0 JNI).
+    FilterSpec(
+        "lensBlur", R.string.filter_lens_blur,
+        listOf(
+            FilterParam.Num("radius", 1f, 64f, 8f, int = true),
+            FilterParam.Num("highlights", 0f, 1f, 0.5f)
+        )
+    ),
+    FilterSpec(
+        "fisheyeFilter", R.string.filter_fisheye,
+        listOf(
+            FilterParam.Num("amount", -1f, 1f, 0.5f),
+            FilterParam.Toggle("keepSize", true)
+        )
+    ),
+    FilterSpec(
+        "panoramaRemap", R.string.filter_panorama,
+        listOf(
+            FilterParam.Choice("mode", listOf("cyl", "rect"), "cyl"),
+            FilterParam.Num("fov", 60f, 180f, 120f, int = true)
+        )
     )
 )
 

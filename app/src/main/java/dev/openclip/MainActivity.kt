@@ -120,6 +120,8 @@ import dev.openclip.ui.NavigatorPanel
 import dev.openclip.ui.PagesPanel
 import dev.openclip.ui.SvgPanel
 import dev.openclip.ui.TransformPanel
+import dev.openclip.ui.WarpPanel
+import dev.openclip.ui.SmartShapePanel
 import dev.openclip.ui.WebtoonPanel
 import dev.openclip.ui.MaterialsRow
 import dev.openclip.ui.PinnedBrushBar
@@ -327,6 +329,7 @@ class MainActivity : ComponentActivity() {
         val clipFps = remember { mutableStateOf(12f) }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
         val refModelName = remember { mutableStateOf<String?>(null) }
+        val refGlbPath = remember { mutableStateOf<String?>(null) }
         val showWebdav = remember { mutableStateOf(false) }
         val webdavUrl = remember { mutableStateOf("") }
 
@@ -705,6 +708,7 @@ class MainActivity : ComponentActivity() {
                 val edges = surface.loadGlbReference(dst.absolutePath)
                 if (edges > 0) {
                     refModelName.value = name
+                    refGlbPath.value = dst.absolutePath
                     surface.setRefVisible(true)
                     status.value = ctx.getString(R.string.ref_loaded, edges)
                 } else {
@@ -2549,6 +2553,10 @@ class MainActivity : ComponentActivity() {
                                     surface = surface,
                                     onImportGlb = { openGlb.launch(arrayOf("*/*")) },
                                     modelName = refModelName.value,
+                                    docKey = activeDocId.value ?: "solo",
+                                    inkHex = brushPrefs.toolColor,
+                                    glbCachePath = refGlbPath.value,
+                                    onStatus = { status.value = it },
                                     modifier = Modifier.fillMaxWidth()
                                 )
                                 MaterialsRow(
@@ -2572,6 +2580,17 @@ class MainActivity : ComponentActivity() {
                                 TransformPanel(
                                     surface = surface,
                                     cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                WarpPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                SmartShapePanel(
+                                    surface = surface,
                                     onStatus = { status.value = it },
                                     modifier = Modifier.fillMaxWidth()
                                 )

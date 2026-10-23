@@ -614,6 +614,608 @@ static bool fColorBalance(const std::vector<std::uint8_t>& in,
     return true;
 }
 
+// T4 hex color "#RRGGBB" -> rgb bytes. False on malformed input.
+static bool parseHex6(const std::string& s, std::uint8_t rgb[3]) {
+    if (s.size() != 7 || s[0] != '#') return false;
+    auto hex = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    };
+    int v[6];
+    for (int k = 0; k < 6; ++k) {
+        v[k] = hex(s[1 + k]);
+        if (v[k] < 0) return false;
+    }
+    rgb[0] = static_cast<std::uint8_t>(v[0] * 16 + v[1]);
+    rgb[1] = static_cast<std::uint8_t>(v[2] * 16 + v[3]);
+    rgb[2] = static_cast<std::uint8_t>(v[4] * 16 + v[5]);
+    return true;
+}
+
+// T4 glow (ARCHITECTURE.md "T4 additions" §2, clean-room): threshold
+// the highlights (luma > 0.7), blur them with the existing separable
+// gaussian, tint, screen over the source. amount 0 = byte-identical.
+static bool fGlow(const std::vector<std::uint8_t>& in, int w, int h,
+                  double radius, double amount, const std::string& tintStr,
+                  std::vector<std::uint8_t>& out, std::string& error) {
+    if (!(radius >= 1.0) || radius > 64.0) {
+        error = "glow: radius must be in [1,64]";
+        return false;
+    }
+    if (!(amount >= 0.0) || amount > 2.0) {
+        error = "glow: amount must be in [0,2]";
+        return false;
+    }
+    std::uint8_t tint[3] = {255, 255, 255};
+    if (!tintStr.empty() && !parseHex6(tintStr, tint)) {
+        error = "glow: tint must be \"#RRGGBB\"";
+        return false;
+    }
+    out = in;
+    if (amount <= 0.0) return true;
+    std::vector<float> bl;
+    blurSeparable(in, w, h, radius, bl);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i4 = (static_cast<std::size_t>(y) * w + x) * 4;
+            const std::size_t i3 = (static_cast<std::size_t>(y) * w + x) * 3;
+            const double lum =
+                0.299 * in[i4] + 0.587 * in[i4 + 1] + 0.114 * in[i4 + 2];
+            if (lum <= 0.7 * 255.0) continue;
+            for (int c = 0; c < 3; ++c) {
+                const double g =
+                    bl[i3 + c] * tint[c] / 255.0 * amount;
+                // screen: 255-(255-src)(255-glow)/255
+                out[i4 + c] = clamp255(
+                    255.0 - (255.0 - in[i4 + c]) * (255.0 - g) / 255.0);
+            }
+        }
+    return true;
+}
+
+// T4 drop shadow (§2): the layer's alpha silhouette shifted by
+// (dx,dy), blurred, tinted, composited BEHIND the source. The only
+// pack filter reading alpha — and, by design, the only one writing
+// it too: where the source is transparent the shadow lands with its
+// own composited alpha (source-over of shadow color under source).
+// radius 0 = hard shadow.
+static bool fDropShadow(const std::vector<std::uint8_t>& in, int w, int h,
+                        double dxD, double dyD, double radius,
+                        const std::string& colorStr, double opacity,
+                        std::vector<std::uint8_t>& out, std::string& error) {
+    const long dx = std::lround(dxD), dy = std::lround(dyD);
+    if (dx < -64 || dx > 64 || dy < -64 || dy > 64) {
+        error = "dropShadow: dx/dy must be in [-64,64]";
+        return false;
+    }
+    if (!(radius >= 0.0) || radius > 64.0) {
+        error = "dropShadow: radius must be in [0,64]";
+        return false;
+    }
+    if (!(opacity >= 0.0) || opacity > 1.0) {
+        error = "dropShadow: opacity must be in [0,1]";
+        return false;
+    }
+    std::uint8_t col[3] = {0, 0, 0};
+    if (!colorStr.empty() && !parseHex6(colorStr, col)) {
+        error = "dropShadow: color must be \"#RRGGBB\"";
+        return false;
+    }
+    out = in;
+    if (opacity <= 0.0) return true;
+    // Shifted silhouette (alpha/255), then separable blur on the
+    // single channel (radius 0 = copy).
+    std::vector<float> sil(static_cast<std::size_t>(w) * h, 0.0f);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const int sx = x - static_cast<int>(dx);
+            const int sy = y - static_cast<int>(dy);
+            if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+            sil[(static_cast<std::size_t>(y) * w + x)] =
+                in[(static_cast<std::size_t>(sy) * w + sx) * 4 + 3] / 255.0f;
+        }
+    if (radius > 0.0) {
+        int half = 1;
+        const std::vector<double> k = gaussKernel(radius, half);
+        std::vector<float> tmp(sil.size(), 0.0f), row(sil.size(), 0.0f);
+        auto at = [&](const std::vector<float>& b, int x, int y) {
+            return b[static_cast<std::size_t>(clampI(y, 0, h - 1)) * w +
+                     clampI(x, 0, w - 1)];
+        };
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                double acc = k[0] * at(sil, x, y);
+                for (int i = 1; i <= half; ++i)
+                    acc += k[i] * (at(sil, x - i, y) + at(sil, x + i, y));
+                tmp[static_cast<std::size_t>(y) * w + x] =
+                    static_cast<float>(acc);
+            }
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                double acc = k[0] * at(tmp, x, y);
+                for (int i = 1; i <= half; ++i)
+                    acc += k[i] * (at(tmp, x, y - i) + at(tmp, x, y + i));
+                row[static_cast<std::size_t>(y) * w + x] =
+                    static_cast<float>(acc);
+            }
+        sil.swap(row);
+    }
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            const double sa =
+                sil[static_cast<std::size_t>(y) * w + x] * opacity;
+            if (sa <= 0.0) continue;
+            const double da = in[i + 3] / 255.0;
+            const double oa = da + sa * (1.0 - da);
+            if (oa <= 0.0) continue;
+            for (int c = 0; c < 3; ++c) {
+                // Shadow UNDER source: src over shadow, premultiplied.
+                // Opaque source pixels stay byte-identical.
+                out[i + c] =
+                    clamp255(in[i + c] + col[c] * sa * (1.0 - da));
+            }
+            out[i + 3] = clamp255(oa * 255.0);
+        }
+    return true;
+}
+
+// T4 crystallize (§2): flat-top hexagonal tiling (axial rounding —
+// the signature look vs square mosaic). Each cell takes its center
+// pixel color. cell = hex size (center to corner) in px.
+static bool fCrystallize(const std::vector<std::uint8_t>& in, int w, int h,
+                         double cellD, std::vector<std::uint8_t>& out,
+                         std::string& error) {
+    const long cell = std::lround(cellD);
+    if (cell < 3 || cell > 64) {
+        error = "crystallize: cell must be in [3,64]";
+        return false;
+    }
+    const double s = static_cast<double>(cell);
+    const double sq3 = std::sqrt(3.0);
+    out = in;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            // Pixel -> axial (flat-top): q = 2x/3s, r = (-x/3 + y√3/3)/s.
+            const double q = (2.0 * x / 3.0) / s;
+            const double r = (-x / 3.0 + y * sq3 / 3.0) / s;
+            // Cube rounding.
+            double cx = q, cz = r, cy = -cx - cz;
+            double rx = std::round(cx), ry = std::round(cy),
+                   rz = std::round(cz);
+            const double dx = std::fabs(rx - cx), dy = std::fabs(ry - cy),
+                         dz = std::fabs(rz - cz);
+            long aq = std::lround(rx), ar = std::lround(rz);
+            if (dx > dy && dx > dz) {
+                aq = std::lround(-ry - rz);
+            } else if (dy > dz) {
+                ar = std::lround(-rx - rz);
+                aq = std::lround(rx);
+            }
+            // Axial -> center pixel (flat-top layout).
+            const int ccx = static_cast<int>(
+                std::lround(s * 3.0 / 2.0 * aq));
+            const int ccy = static_cast<int>(
+                std::lround(s * sq3 * (ar + aq / 2.0)));
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            for (int c = 0; c < 3; ++c)
+                out[i + c] = pxAt(in, w, h, ccx, ccy, c);
+        }
+    return true;
+}
+
+// T4 normal map (§2): height = straight (unpremultiplied) Rec.601
+// luma — translucent edges must not skew the Sobel — 3x3 Sobel to
+// normal RGB ((n*0.5+0.5)*255, B up). Flat = uniform #8080FF.
+static bool fNormalMap(const std::vector<std::uint8_t>& in, int w, int h,
+                       double strength, std::vector<std::uint8_t>& out,
+                       std::string& error) {
+    if (!(strength >= 0.0) || strength > 4.0) {
+        error = "normalMap: strength must be in [0,4]";
+        return false;
+    }
+    out = in;
+    if (strength <= 0.0) return true;  // byte-identical no-op
+    auto height = [&](int x, int y) -> double {
+        x = clampI(x, 0, w - 1);
+        y = clampI(y, 0, h - 1);
+        const std::size_t i =
+            (static_cast<std::size_t>(y) * w + x) * 4;
+        const double a = in[i + 3];
+        const double un = (a <= 0.0) ? 0.0 : 255.0 / a;
+        return 0.299 * in[i] * un + 0.587 * in[i + 1] * un +
+               0.114 * in[i + 2] * un;
+    };
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            const double dx = (height(x + 1, y - 1) + 2 * height(x + 1, y) +
+                               height(x + 1, y + 1) - height(x - 1, y - 1) -
+                               2 * height(x - 1, y) - height(x - 1, y + 1)) /
+                              (4.0 * 255.0);
+            const double dy = (height(x - 1, y + 1) + 2 * height(x, y + 1) +
+                               height(x + 1, y + 1) - height(x - 1, y - 1) -
+                               2 * height(x, y - 1) - height(x + 1, y - 1)) /
+                              (4.0 * 255.0);
+            double nx = -dx * strength, ny = -dy * strength, nz = 1.0;
+            const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            nx /= len;
+            ny /= len;
+            nz /= len;
+            out[i] = clamp255((nx * 0.5 + 0.5) * 255.0);
+            out[i + 1] = clamp255((ny * 0.5 + 0.5) * 255.0);
+            out[i + 2] = clamp255((nz * 0.5 + 0.5) * 255.0);
+        }
+    return true;
+}
+
+// T4 Perlin gradient noise (§2 perlinClouds + pencil paper grain,
+// clean-room): quintic fade, LCG-shuffled permutation of `seed`.
+struct Perlin2D {
+    int p[512];
+    explicit Perlin2D(std::uint32_t seed = 0) {
+        int perm[256];
+        for (int i = 0; i < 256; ++i) perm[i] = i;
+        std::uint32_t st = seed ? seed : 0x9E3779B9u;
+        for (int i = 255; i > 0; --i) {
+            st = st * 1664525u + 1013904223u;
+            const int j = static_cast<int>((st >> 16) % (i + 1));
+            const int t = perm[i];
+            perm[i] = perm[j];
+            perm[j] = t;
+        }
+        for (int i = 0; i < 512; ++i) p[i] = perm[i & 255];
+    }
+    static double fade(double t) {
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    }
+    static double grad(int h, double x, double y) {
+        switch (h & 7) {
+            case 0: return x + y;
+            case 1: return x - y;
+            case 2: return -x + y;
+            case 3: return -x - y;
+            case 4: return x;
+            case 5: return -x;
+            case 6: return y;
+            default: return -y;
+        }
+    }
+    double noise(double x, double y) const {
+        const int X = static_cast<int>(std::floor(x)) & 255;
+        const int Y = static_cast<int>(std::floor(y)) & 255;
+        x -= std::floor(x);
+        y -= std::floor(y);
+        const double u = fade(x), v = fade(y);
+        const int aa = p[X] + Y, ab = p[X] + Y + 1;
+        const int ba = p[X + 1] + Y, bb = p[X + 1] + Y + 1;
+        const double x1 =
+            grad(p[aa & 511], x, y) * (1 - u) + grad(p[ba & 511], x - 1, y) * u;
+        const double x2 = grad(p[ab & 511], x, y - 1) * (1 - u) +
+                          grad(p[bb & 511], x - 1, y - 1) * u;
+        return (x1 * (1 - v) + x2 * v) * 0.7071;  // ~[-1,1]
+    }
+    double fbm(double x, double y, int octaves) const {
+        double sum = 0, amp = 0.5, norm = 0, fx = x, fy = y;
+        for (int o = 0; o < octaves; ++o) {
+            sum += amp * noise(fx, fy);
+            norm += amp;
+            amp *= 0.5;
+            fx *= 2.0;
+            fy *= 2.0;
+        }
+        return norm > 0 ? sum / norm : 0;
+    }
+};
+
+// T4 retro (§2): warm lift (blacks lifted, whites compressed), LCG
+// grain (same fixed seed as addNoise: reproducible), smooth radial
+// vignette, black fade. All zero = byte-identical.
+static bool fRetro(const std::vector<std::uint8_t>& in, int w, int h,
+                   double warmth, double grainD, double vignette,
+                   double fade, std::vector<std::uint8_t>& out,
+                   std::string& error) {
+    if (!(warmth >= 0.0) || warmth > 1.0) {
+        error = "retro: warmth must be in [0,1]";
+        return false;
+    }
+    const long grain = std::lround(grainD);
+    if (grain < 0 || grain > 64) {
+        error = "retro: grain must be in [0,64]";
+        return false;
+    }
+    if (!(vignette >= 0.0) || vignette > 1.0) {
+        error = "retro: vignette must be in [0,1]";
+        return false;
+    }
+    if (!(fade >= 0.0) || fade > 1.0) {
+        error = "retro: fade must be in [0,1]";
+        return false;
+    }
+    out = in;
+    if (warmth <= 0.0 && grain == 0 && vignette <= 0.0 && fade <= 0.0)
+        return true;
+    std::uint32_t st = 0;  // same fixed seed as addNoise
+    auto next = [&](int span) -> int {
+        st = st * 1664525u + 1013904223u;
+        return span <= 1 ? 0
+                         : static_cast<int>((st >> 16) % span) - span / 2;
+    };
+    const int gspan = static_cast<int>(2 * grain + 1);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            const double lum = (0.299 * in[i] + 0.587 * in[i + 1] +
+                                0.114 * in[i + 2]) /
+                               255.0;
+            double r = in[i], g = in[i + 1], b = in[i + 2];
+            // Warm lift + white compression + black fade.
+            r += warmth * 24.0 * (1.0 - lum) + fade * 30.0 * (1.0 - lum);
+            g += warmth * 10.0 * (1.0 - lum) + fade * 26.0 * (1.0 - lum);
+            b += fade * 22.0 * (1.0 - lum) - warmth * 8.0 * (1.0 - lum);
+            r -= warmth * 14.0 * lum;
+            g -= warmth * 10.0 * lum;
+            b -= warmth * 6.0 * lum;
+            // Grain (per channel, filmic).
+            if (grain > 0) {
+                r += next(gspan);
+                g += next(gspan);
+                b += next(gspan);
+            }
+            // Smooth radial vignette (cosine falloff, like bulge §1).
+            if (vignette > 0.0) {
+                const double nx = (2.0 * x / (w > 1 ? w - 1 : 1)) - 1.0;
+                const double ny = (2.0 * y / (h > 1 ? h - 1 : 1)) - 1.0;
+                double d = (nx * nx + ny * ny) / 2.0;  // 0 center .. 1 edge
+                if (d < 0) d = 0;
+                if (d > 1) d = 1;
+                const double f =
+                    1.0 - vignette * 0.55 * (1.0 - std::cos(d * 1.5707963));
+                r *= f;
+                g *= f;
+                b *= f;
+            }
+            out[i] = clamp255(r);
+            out[i + 1] = clamp255(g);
+            out[i + 2] = clamp255(b);
+        }
+    return true;
+}
+
+// T4 pencil (§2): luma → inverted Sobel edges × fine procedural
+// paper grain (single-octave gradient noise, fixed seed), warm
+// near-monochrome output. strength 0 = byte-identical no-op.
+static bool fPencil(const std::vector<std::uint8_t>& in, int w, int h,
+                    double strength, std::vector<std::uint8_t>& out,
+                    std::string& error) {
+    if (!(strength >= 0.0) || strength > 1.0) {
+        error = "pencil: strength must be in [0,1]";
+        return false;
+    }
+    out = in;
+    if (strength <= 0.0) return true;
+    Perlin2D perl(0xC1A0u);
+    auto lumAt = [&](int x, int y) -> double {
+        x = clampI(x, 0, w - 1);
+        y = clampI(y, 0, h - 1);
+        const std::size_t i =
+            (static_cast<std::size_t>(y) * w + x) * 4;
+        return 0.299 * in[i] + 0.587 * in[i + 1] + 0.114 * in[i + 2];
+    };
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            const double dx =
+                (lumAt(x + 1, y - 1) + 2 * lumAt(x + 1, y) +
+                 lumAt(x + 1, y + 1) - lumAt(x - 1, y - 1) -
+                 2 * lumAt(x - 1, y) - lumAt(x - 1, y + 1)) /
+                1020.0;
+            const double dy =
+                (lumAt(x - 1, y + 1) + 2 * lumAt(x, y + 1) +
+                 lumAt(x + 1, y + 1) - lumAt(x - 1, y - 1) -
+                 2 * lumAt(x, y - 1) - lumAt(x + 1, y - 1)) /
+                1020.0;
+            double edge = std::sqrt(dx * dx + dy * dy);
+            if (edge > 1.0) edge = 1.0;
+            // Fine paper grain from single-octave gradient noise.
+            const double n = perl.noise(x * 0.35, y * 0.35);  // ~[-1,1]
+            const double paper = 0.92 + 0.08 * n;
+            const double ink = (255.0 * (1.0 - edge * strength)) * paper;
+            out[i] = clamp255(ink);
+            out[i + 1] = clamp255(ink * 0.96);
+            out[i + 2] = clamp255(ink * 0.88);
+        }
+    return true;
+}
+
+// T4 perlinClouds (§2): fBm gradient noise; mix = screen at 50% over
+// source, overwrite = full-layer grayscale fill (nApplyTone pattern).
+static bool fPerlin(const std::vector<std::uint8_t>& in, int w, int h,
+                    double scaleD, double octD, double seedD,
+                    const std::string& mode,
+                    std::vector<std::uint8_t>& out, std::string& error) {
+    const long scale = std::lround(scaleD);
+    const long oct = std::lround(octD);
+    if (scale < 1 || scale > 16) {
+        error = "perlinClouds: scale must be in [1,16]";
+        return false;
+    }
+    if (oct < 1 || oct > 6) {
+        error = "perlinClouds: octaves must be in [1,6]";
+        return false;
+    }
+    if (mode != "mix" && mode != "overwrite") {
+        error = "perlinClouds: mode must be \"mix\"|\"overwrite\"";
+        return false;
+    }
+    Perlin2D perl(static_cast<std::uint32_t>(std::lround(seedD)) ^
+                  0x9E3779B9u);
+    const double span = static_cast<double>(w > h ? w : h);
+    out = in;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            const double n = perl.fbm(x / span * scale, y / span * scale,
+                                      static_cast<int>(oct));  // ~[-1,1]
+            const double c = clamp255((n * 0.5 + 0.5) * 255.0);
+            if (mode == "overwrite") {
+                out[i] = out[i + 1] = out[i + 2] =
+                    static_cast<std::uint8_t>(c);
+            } else {
+                for (int ch = 0; ch < 3; ++ch) {
+                    const double s = in[i + ch];
+                    const double scr =
+                        255.0 - (255.0 - s) * (255.0 - c) / 255.0;
+                    out[i + ch] = clamp255((s + scr) / 2.0);
+                }
+            }
+        }
+    return true;
+}
+
+// Bilinear RGB sample, clamp-to-edge (shared by the §3 remap filters).
+static void sampleBilinearRGB(const std::vector<std::uint8_t>& in, int w,
+                              int h, double x, double y, double rgb[3]) {
+    int x0 = static_cast<int>(std::floor(x));
+    int y0 = static_cast<int>(std::floor(y));
+    const double fx = x - x0, fy = y - y0;
+    int x1 = x0 + 1, y1 = y0 + 1;
+    x0 = clampI(x0, 0, w - 1);
+    y0 = clampI(y0, 0, h - 1);
+    x1 = clampI(x1, 0, w - 1);
+    y1 = clampI(y1, 0, h - 1);
+    const std::uint8_t* a = &in[(static_cast<std::size_t>(y0) * w + x0) * 4];
+    const std::uint8_t* b = &in[(static_cast<std::size_t>(y0) * w + x1) * 4];
+    const std::uint8_t* c = &in[(static_cast<std::size_t>(y1) * w + x0) * 4];
+    const std::uint8_t* d = &in[(static_cast<std::size_t>(y1) * w + x1) * 4];
+    for (int k = 0; k < 3; ++k)
+        rgb[k] = a[k] * (1 - fx) * (1 - fy) + b[k] * fx * (1 - fy) +
+                 c[k] * (1 - fx) * fy + d[k] * fx * fy;
+}
+
+// T4 lensBlur (§3): uniform-disk kernel (bokeh approximation, NOT
+// gaussian). highlights spares bright luma (partial screen gain).
+// radius 1 ≈ identity on flat areas (locked: uniform surface test).
+static bool fLensBlur(const std::vector<std::uint8_t>& in, int w, int h,
+                      double radiusD, double highlights,
+                      std::vector<std::uint8_t>& out, std::string& error) {
+    const long radius = std::lround(radiusD);
+    if (radius < 1 || radius > 64) {
+        error = "lensBlur: radius must be in [1,64]";
+        return false;
+    }
+    if (!(highlights >= 0.0) || highlights > 1.0) {
+        error = "lensBlur: highlights must be in [0,1]";
+        return false;
+    }
+    out = in;
+    if (radius <= 1 && highlights <= 0.0) return true;
+    const double r2 = static_cast<double>(radius * radius);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            double acc[3] = {0, 0, 0};
+            long n = 0;
+            for (long oy = -radius; oy <= radius; ++oy)
+                for (long ox = -radius; ox <= radius; ++ox) {
+                    if (ox * ox + oy * oy > r2) continue;
+                    for (int c = 0; c < 3; ++c)
+                        acc[c] += pxAt(in, w, h, x + static_cast<int>(ox),
+                                       y + static_cast<int>(oy), c);
+                    ++n;
+                }
+            for (int c = 0; c < 3; ++c) {
+                double v = n > 0 ? acc[c] / n : in[i + c];
+                if (highlights > 0.0) {
+                    const double lum =
+                        (0.299 * in[i] + 0.587 * in[i + 1] +
+                         0.114 * in[i + 2]) / 255.0;
+                    double hi = (lum - 0.7) / 0.3;
+                    if (hi < 0) hi = 0;
+                    if (hi > 1) hi = 1;
+                    v += highlights * hi * (255.0 - v) * 0.5;
+                }
+                out[i + c] = clamp255(v);
+            }
+        }
+    return true;
+}
+
+// T4 fisheyeFilter (§3): radial remap r' = r*(1+k*r²) on the
+// normalized radius (same formula as the M9 camera, k = amount —
+// dimensionless here, documented). Negative = pincushion.
+// keepSize crops to canvas (clamp-to-edge fill, announced).
+// amount 0 = byte-identical.
+static bool fFisheye(const std::vector<std::uint8_t>& in, int w, int h,
+                     double amount, double keepD,
+                     std::vector<std::uint8_t>& out, std::string& error) {
+    if (!(amount >= -1.0) || amount > 1.0) {
+        error = "fisheyeFilter: amount must be in [-1,1]";
+        return false;
+    }
+    out = in;
+    if (amount == 0.0) return true;
+    (void)keepD;  // keepSize: single behavior (crop + clamp), announced
+    const double cx = (w - 1) / 2.0, cy = (h - 1) / 2.0;
+    const double R = std::sqrt(cx * cx + cy * cy);  // half diagonal
+    if (!(R > 0.0)) return true;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const double dx = (x - cx) / R, dy = (y - cy) / R;
+            const double rn = std::sqrt(dx * dx + dy * dy);
+            const double s = 1.0 + amount * rn * rn;
+            const double sx = cx + dx * s * R, sy = cy + dy * s * R;
+            double rgb[3];
+            sampleBilinearRGB(in, w, h, sx, sy, rgb);
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            for (int c = 0; c < 3; ++c) out[i + c] = clamp255(rgb[c]);
+        }
+    return true;
+}
+
+// T4 panoramaRemap (§3): cyl = cylindrical projection (straightens
+// wide bands, edges stretched + clamped), rect = inverse. No
+// stitching (FUTURE, honest note in the spec).
+static bool fPanorama(const std::vector<std::uint8_t>& in, int w, int h,
+                      const std::string& mode, double fovD,
+                      std::vector<std::uint8_t>& out, std::string& error) {
+    if (mode != "cyl" && mode != "rect") {
+        error = "panoramaRemap: mode must be \"cyl\"|\"rect\"";
+        return false;
+    }
+    if (!(fovD >= 60.0) || fovD > 180.0) {
+        error = "panoramaRemap: fov must be in [60,180]";
+        return false;
+    }
+    out = in;
+    const double half = (fovD * 3.141592653589793 / 180.0) / 2.0;
+    const double tmax = std::tan(half);
+    if (!(tmax > 0.0)) return false;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const double u =
+                (w > 1) ? (x / (w - 1.0) - 0.5) : 0.0;  // -0.5..0.5
+            double su;
+            if (mode == "cyl") {
+                // Destination cylindrical: sample the rectilinear
+                // source at tan(theta)/tan(half).
+                su = std::tan(u * 2.0 * half) / tmax / 2.0 + 0.5;
+            } else {
+                // Inverse: destination rectilinear from cylindrical.
+                const double th = std::atan(u * 2.0 * tmax) / (2.0 * half);
+                su = th + 0.5;
+            }
+            const double sx = su * (w - 1.0);
+            double rgb[3];
+            sampleBilinearRGB(in, w, h, sx, y, rgb);
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            for (int c = 0; c < 3; ++c) out[i + c] = clamp255(rgb[c]);
+        }
+    return true;
+}
+
 // Ordered Bayer 8x8 (0..63) — same table as the V+2 GIF writer
 // (clean-room from scratch, duplicated here: single-header rule, no
 // cross-io dependency from the filter kernel).
@@ -659,7 +1261,10 @@ bool canApply(const std::string& name) {
 std::vector<std::string> filterNames() {
     return {"gaussianBlur", "sharpen", "motionBlur", "radialBlur", "posterize",
             "levels", "chromaticAberration", "addNoise", "mosaic",
-            "gradientMap", "denoise", "unsharp", "colorBalance", "threshold"};
+            "gradientMap", "denoise", "unsharp", "colorBalance", "threshold",
+            "glow", "dropShadow", "crystallize", "normalMap", "retro",
+            "pencil", "perlinClouds", "lensBlur", "fisheyeFilter",
+            "panoramaRemap"};
 }
 
 bool applyFilter(Surface& s, const std::string& name,
@@ -774,11 +1379,96 @@ bool applyFilter(Surface& s, const std::string& name,
             if (jsonNum(paramsJson, "dither", d)) dither = d;
         }
         ok = fThreshold(in, w, h, level, dither != 0.0, out);
+    } else if (name == "glow") {
+        double radius = 8.0, amount = 0.6;
+        std::string tint = "#FFFFFF";
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "radius", d)) radius = d;
+            if (jsonNum(paramsJson, "amount", d)) amount = d;
+            std::string sv;
+            if (jsonStr(paramsJson, "tint", sv)) tint = sv;
+        }
+        ok = fGlow(in, w, h, radius, amount, tint, out, error);
+    } else if (name == "dropShadow") {
+        double dx = 8.0, dy = 8.0, radius = 6.0, opacity = 0.5;
+        std::string color = "#000000";
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "dx", d)) dx = d;
+            if (jsonNum(paramsJson, "dy", d)) dy = d;
+            if (jsonNum(paramsJson, "radius", d)) radius = d;
+            if (jsonNum(paramsJson, "opacity", d)) opacity = d;
+            std::string sv;
+            if (jsonStr(paramsJson, "color", sv)) color = sv;
+        }
+        ok = fDropShadow(in, w, h, dx, dy, radius, color, opacity, out,
+                         error);
+    } else if (name == "crystallize") {
+        double cell = 16.0;
+        if (!paramsJson.empty() && jsonNum(paramsJson, "cell", d)) cell = d;
+        ok = fCrystallize(in, w, h, cell, out, error);
+    } else if (name == "normalMap") {
+        double strength = 1.0;
+        if (!paramsJson.empty() && jsonNum(paramsJson, "strength", d))
+            strength = d;
+        ok = fNormalMap(in, w, h, strength, out, error);
+    } else if (name == "retro") {
+        double warmth = 0.5, grain = 10.0, vignette = 0.3, fade = 0.2;
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "warmth", d)) warmth = d;
+            if (jsonNum(paramsJson, "grain", d)) grain = d;
+            if (jsonNum(paramsJson, "vignette", d)) vignette = d;
+            if (jsonNum(paramsJson, "fade", d)) fade = d;
+        }
+        ok = fRetro(in, w, h, warmth, grain, vignette, fade, out, error);
+    } else if (name == "pencil") {
+        double strength = 0.7;
+        if (!paramsJson.empty() && jsonNum(paramsJson, "strength", d))
+            strength = d;
+        ok = fPencil(in, w, h, strength, out, error);
+    } else if (name == "perlinClouds") {
+        double scale = 6.0, octaves = 4.0, seed = 0.0;
+        std::string mode = "mix";
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "scale", d)) scale = d;
+            if (jsonNum(paramsJson, "octaves", d)) octaves = d;
+            if (jsonNum(paramsJson, "seed", d)) seed = d;
+            std::string sv;
+            if (jsonStr(paramsJson, "mode", sv)) mode = sv;
+        }
+        ok = fPerlin(in, w, h, scale, octaves, seed, mode, out, error);
+    } else if (name == "lensBlur") {
+        double radius = 8.0, highlights = 0.5;
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "radius", d)) radius = d;
+            if (jsonNum(paramsJson, "highlights", d)) highlights = d;
+        }
+        ok = fLensBlur(in, w, h, radius, highlights, out, error);
+    } else if (name == "fisheyeFilter") {
+        double amount = 0.5, keepSize = 1.0;
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "amount", d)) amount = d;
+            if (jsonNum(paramsJson, "keepSize", d)) keepSize = d;
+        }
+        ok = fFisheye(in, w, h, amount, keepSize, out, error);
+    } else if (name == "panoramaRemap") {
+        double fov = 120.0;
+        std::string mode = "cyl";
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "fov", d)) fov = d;
+            std::string sv;
+            if (jsonStr(paramsJson, "mode", sv)) mode = sv;
+        }
+        ok = fPanorama(in, w, h, mode, fov, out, error);
     }
     if (!ok) return false;  // surface untouched
     // Alpha contract: never modify alpha; clamp RGB to [0, alpha].
+    // EXCEPTION (T4 §2, documented): dropShadow composites a shadow
+    // layer BEHIND the source, so its alpha lands in `out` too —
+    // copy it, then clamp RGB to the NEW alpha.
     std::vector<std::uint8_t>& dst = s.bytes();
+    const bool shadowAlpha = (name == "dropShadow");
     for (std::size_t i = 0; i + 3 < dst.size() && i + 3 < out.size(); i += 4) {
+        if (shadowAlpha) dst[i + 3] = out[i + 3];
         const std::uint8_t a = dst[i + 3];
         dst[i] = out[i] > a ? a : out[i];
         dst[i + 1] = out[i + 1] > a ? a : out[i + 1];

@@ -66,10 +66,20 @@ TEST(filters_registry_known) {
     CHECK(canApply("unsharp"));  // T1
     CHECK(canApply("colorBalance"));  // T1
     CHECK(canApply("threshold"));  // T1
+    CHECK(canApply("glow"));  // T4 §2
+    CHECK(canApply("dropShadow"));  // T4 §2
+    CHECK(canApply("crystallize"));  // T4 §2
+    CHECK(canApply("normalMap"));  // T4 §2
+    CHECK(canApply("retro"));  // T4 §2
+    CHECK(canApply("pencil"));  // T4 §2
+    CHECK(canApply("perlinClouds"));  // T4 §2
+    CHECK(canApply("lensBlur"));  // T4 §3
+    CHECK(canApply("fisheyeFilter"));  // T4 §3
+    CHECK(canApply("panoramaRemap"));  // T4 §3
     CHECK(!canApply("nope"));
     CHECK(!canApply("GaussianBlur"));
     CHECK(!canApply(""));
-    CHECK_EQ(openclip::filterNames().size(), (std::size_t)14);
+    CHECK_EQ(openclip::filterNames().size(), (std::size_t)24);
 }
 
 TEST(filters_unknown_no_side_effects) {
@@ -518,4 +528,239 @@ TEST(filters_threshold_dither_bounded) {
     CHECK(seenBlack && seenWhite);  // dither actually mixed
     const double mean = sum / 1024.0;
     CHECK(std::fabs(mean - 128.0) <= 25.5);  // +/-10%
+}
+
+// --- T4 creative pack (§2) + lens pack (§3) ---
+// Pattern per filter: neutral params = byte-identical; invalid params
+// = false + intact; one invariant proving the effect.
+
+namespace {
+
+bool applyOk(Surface& s, const char* name, const char* params) {
+    std::string err;
+    return openclip::applyFilter(s, name, params, err);
+}
+
+bool applyFailsIntact(Surface& s, const char* name, const char* params) {
+    const auto before = s.bytes();
+    std::string err;
+    const bool ok = openclip::applyFilter(s, name, params, err);
+    return !ok && !err.empty() && s.bytes() == before;
+}
+
+}  // namespace
+
+TEST(filters_glow_neutral_highlights_invalid) {
+    Surface s = solid(24, 24, 200, 210, 220, 255);
+    const auto before = s.bytes();
+    CHECK(applyOk(s, "glow", "{\"radius\":8,\"amount\":0}"));
+    CHECK(s.bytes() == before);  // amount 0 = byte-identical
+    CHECK(applyFailsIntact(s, "glow", "{\"radius\":0}"));
+    CHECK(applyFailsIntact(s, "glow", "{\"amount\":3}"));
+    CHECK(applyFailsIntact(s, "glow", "{\"tint\":\"red\"}"));
+    // White highlights bloom: a white field gains nothing to screen
+    // (already 255), but a bright gray field brightens.
+    Surface g = solid(24, 24, 190, 190, 190, 255);
+    CHECK(applyOk(g, "glow",
+                  "{\"radius\":2,\"amount\":1,\"tint\":\"#FFFFFF\"}"));
+    CHECK(g.get(12, 12).r > 190);
+    // Dark field untouched by the highlight gate.
+    Surface d = solid(24, 24, 40, 40, 40, 255);
+    const auto dbefore = d.bytes();
+    CHECK(applyOk(d, "glow", "{\"radius\":2,\"amount\":1}"));
+    CHECK(d.bytes() == dbefore);
+}
+
+TEST(filters_dropshadow_behind_opaque_intact_invalid) {
+    // Opaque source: shadow lands nowhere, source byte-identical.
+    Surface s = solid(24, 24, 100, 120, 140, 255);
+    const auto before = s.bytes();
+    CHECK(applyOk(s, "dropShadow",
+                  "{\"dx\":4,\"dy\":4,\"radius\":2}"));
+    CHECK(s.bytes() == before);
+    CHECK(applyFailsIntact(s, "dropShadow", "{\"dx\":100}"));
+    CHECK(applyFailsIntact(s, "dropShadow", "{\"opacity\":2}"));
+    CHECK(applyFailsIntact(s, "dropShadow", "{\"color\":\"#zzzzzz\"}"));
+    // Translucent canvas with one opaque dot: shadow appears offset.
+    Surface t(24, 24);
+    t.set(6, 6, Pixel{255, 0, 0, 255});
+    CHECK(applyOk(t, "dropShadow",
+                  "{\"dx\":4,\"dy\":0,\"radius\":0,\"color\":\"#000000\","
+                  "\"opacity\":1}"));
+    const Pixel sh = t.get(10, 6);
+    CHECK(sh.a > 0);  // shadow alpha landed (documented exception)
+    CHECK(sh.r == 0 && sh.g == 0 && sh.b == 0);
+    CHECK_EQ(t.get(6, 6).r, 255);  // source itself intact
+    CHECK_EQ(t.get(6, 6).a, 255);
+}
+
+TEST(filters_crystallize_cell64_flats_invalid) {
+    // cell 64 on uniform field = flats (each cell = center = same).
+    Surface s = solid(32, 32, 90, 100, 110, 255);
+    const auto before = s.bytes();
+    CHECK(applyOk(s, "crystallize", "{\"cell\":64}"));
+    CHECK(s.bytes() == before);
+    CHECK(applyFailsIntact(s, "crystallize", "{\"cell\":2}"));
+    CHECK(applyFailsIntact(s, "crystallize", "{\"cell\":65}"));
+    // Deterministic: same input twice = same output.
+    Surface a(32, 32), b(32, 32);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) {
+            Pixel p{static_cast<std::uint8_t>((x * 7) & 255),
+                    static_cast<std::uint8_t>((y * 13) & 255),
+                    static_cast<std::uint8_t>((x + y) & 255), 255};
+            a.set(x, y, p);
+            b.set(x, y, p);
+        }
+    CHECK(applyOk(a, "crystallize", "{\"cell\":8}"));
+    CHECK(applyOk(b, "crystallize", "{\"cell\":8}"));
+    CHECK(a.bytes() == b.bytes());
+}
+
+TEST(filters_normalmap_uniform_blue_invalid) {
+    // Flat gray -> uniform #8080FF (Sobel sees nothing).
+    Surface s = solid(16, 16, 120, 120, 120, 255);
+    CHECK(applyOk(s, "normalMap", "{\"strength\":1}"));
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) {
+            Pixel p = s.get(x, y);
+            CHECK_EQ(p.r, 128);
+            CHECK_EQ(p.g, 128);
+            CHECK_EQ(p.b, 255);
+        }
+    CHECK(applyFailsIntact(s, "normalMap", "{\"strength\":5}"));
+    // A step edge tilts normals away from flat.
+    Surface e = solid(16, 16, 50, 50, 50, 255);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 8; x < 16; ++x) e.set(x, y, Pixel{200, 200, 200, 255});
+    CHECK(applyOk(e, "normalMap", "{\"strength\":2}"));
+    CHECK(e.get(7, 8).r != 128 || e.get(7, 8).b != 255);
+}
+
+TEST(filters_retro_allzero_identical_invalid) {
+    Surface s = solid(24, 24, 110, 120, 130, 255);
+    const auto before = s.bytes();
+    CHECK(applyOk(
+        s, "retro",
+        "{\"warmth\":0,\"grain\":0,\"vignette\":0,\"fade\":0}"));
+    CHECK(s.bytes() == before);
+    CHECK(applyFailsIntact(s, "retro", "{\"warmth\":2}"));
+    CHECK(applyFailsIntact(s, "retro", "{\"grain\":65}"));
+    // Warmth lifts the blacks.
+    Surface d = solid(24, 24, 20, 20, 20, 255);
+    CHECK(applyOk(d, "retro",
+                  "{\"warmth\":1,\"grain\":0,\"vignette\":0,\"fade\":0}"));
+    CHECK(d.get(12, 12).r > 20);
+    // Reproducible grain: same call twice = same bytes.
+    Surface g1 = solid(24, 24, 100, 100, 100, 255);
+    Surface g2 = g1;
+    CHECK(applyOk(g1, "retro",
+                  "{\"warmth\":0,\"grain\":10,\"vignette\":0,\"fade\":0}"));
+    CHECK(applyOk(g2, "retro",
+                  "{\"warmth\":0,\"grain\":10,\"vignette\":0,\"fade\":0}"));
+    CHECK(g1.bytes() == g2.bytes());
+}
+
+TEST(filters_pencil_zero_noop_invalid_edge) {
+    Surface s = solid(24, 24, 110, 120, 130, 255);
+    const auto before = s.bytes();
+    CHECK(applyOk(s, "pencil", "{\"strength\":0}"));
+    CHECK(s.bytes() == before);
+    CHECK(applyFailsIntact(s, "pencil", "{\"strength\":1.5}"));
+    // A hard step edge darkens toward ink.
+    Surface e = solid(24, 24, 200, 200, 200, 255);
+    for (int y = 0; y < 24; ++y)
+        for (int x = 12; x < 24; ++x) e.set(x, y, Pixel{20, 20, 20, 255});
+    CHECK(applyOk(e, "pencil", "{\"strength\":1}"));
+    CHECK(e.get(11, 12).r < 200);  // edge pixel inked
+}
+
+TEST(filters_perlin_seed_modes_invalid) {
+    Surface s = solid(32, 32, 150, 150, 150, 255);
+    // Same seed = byte-identical; different seed = different.
+    Surface a = s, b = s, c = s;
+    CHECK(applyOk(a, "perlinClouds",
+                  "{\"scale\":4,\"octaves\":2,\"seed\":7}"));
+    CHECK(applyOk(b, "perlinClouds",
+                  "{\"scale\":4,\"octaves\":2,\"seed\":7}"));
+    CHECK(applyOk(c, "perlinClouds",
+                  "{\"scale\":4,\"octaves\":2,\"seed\":8}"));
+    CHECK(a.bytes() == b.bytes());
+    CHECK(!(a.bytes() == c.bytes()));
+    // Overwrite ignores the source (same output whatever the input).
+    Surface w1 = solid(16, 16, 10, 10, 10, 255);
+    Surface w2 = solid(16, 16, 240, 240, 240, 255);
+    CHECK(applyOk(w1, "perlinClouds",
+                  "{\"scale\":4,\"octaves\":2,\"seed\":3,"
+                  "\"mode\":\"overwrite\"}"));
+    CHECK(applyOk(w2, "perlinClouds",
+                  "{\"scale\":4,\"octaves\":2,\"seed\":3,"
+                  "\"mode\":\"overwrite\"}"));
+    CHECK(w1.bytes() == w2.bytes());
+    CHECK(applyFailsIntact(s, "perlinClouds", "{\"scale\":0}"));
+    CHECK(applyFailsIntact(s, "perlinClouds", "{\"octaves\":7}"));
+    CHECK(applyFailsIntact(s, "perlinClouds", "{\"mode\":\"stitch\"}"));
+}
+
+TEST(filters_lensblur_uniform_disk_differs_invalid) {
+    // Uniform surface: disk blur is the identity (locked).
+    Surface s = solid(24, 24, 100, 110, 120, 255);
+    const auto before = s.bytes();
+    CHECK(applyOk(s, "lensBlur", "{\"radius\":4,\"highlights\":0}"));
+    CHECK(s.bytes() == before);
+    CHECK(applyFailsIntact(s, "lensBlur", "{\"radius\":0}"));
+    CHECK(applyFailsIntact(s, "lensBlur", "{\"radius\":65}"));
+    // Disk != gaussian on a step edge: at least 1px differs.
+    Surface d1 = solid(24, 24, 30, 30, 30, 255);
+    Surface d2 = d1;
+    for (int y = 0; y < 24; ++y)
+        for (int x = 12; x < 24; ++x) {
+            d1.set(x, y, Pixel{220, 220, 220, 255});
+            d2.set(x, y, Pixel{220, 220, 220, 255});
+        }
+    CHECK(applyOk(d1, "lensBlur", "{\"radius\":6,\"highlights\":0}"));
+    CHECK(applyOk(d2, "gaussianBlur", "{\"radius\":1.2}"));
+    CHECK(!(d1.bytes() == d2.bytes()));
+}
+
+TEST(filters_fisheye_zero_identical_invalid_bulge) {
+    Surface s = solid(24, 24, 100, 110, 120, 255);
+    const auto before = s.bytes();
+    CHECK(applyOk(s, "fisheyeFilter", "{\"amount\":0}"));
+    CHECK(s.bytes() == before);
+    CHECK(applyFailsIntact(s, "fisheyeFilter", "{\"amount\":2}"));
+    // A grid center bloats outward with +0.5 (center pixel moves).
+    Surface g(25, 25);
+    for (int y = 0; y < 25; ++y)
+        for (int x = 0; x < 25; ++x)
+            g.set(x, y, Pixel{(x % 5 == 0 || y % 5 == 0) ? 0 : 255,
+                              (x % 5 == 0 || y % 5 == 0) ? 0 : 255,
+                              (x % 5 == 0 || y % 5 == 0) ? 0 : 255, 255});
+    const auto gbefore = g.bytes();
+    CHECK(applyOk(g, "fisheyeFilter", "{\"amount\":0.5}"));
+    CHECK(!(g.bytes() == gbefore));
+}
+
+TEST(filters_panorama_roundtrip_invalid) {
+    Surface s = solid(48, 24, 100, 110, 120, 255);
+    // Gradient band: cyl -> rect -> cyl ≈ identity within ±2 LSB.
+    Surface band(48, 24);
+    for (int y = 0; y < 24; ++y)
+        for (int x = 0; x < 48; ++x) {
+            const auto v = static_cast<std::uint8_t>(x * 255 / 47);
+            band.set(x, y, Pixel{v, v, v, 255});
+        }
+    Surface tmp = band;
+    CHECK(applyOk(tmp, "panoramaRemap",
+                  "{\"mode\":\"cyl\",\"fov\":120}"));
+    CHECK(applyOk(tmp, "panoramaRemap",
+                  "{\"mode\":\"rect\",\"fov\":120}"));
+    for (int y = 0; y < 24; ++y)
+        for (int x = 2; x < 46; ++x) {  // edges clamp, skip them
+            const int was = band.get(x, y).r;
+            const int now = tmp.get(x, y).r;
+            CHECK(std::abs(was - now) <= 2);
+        }
+    CHECK(applyFailsIntact(s, "panoramaRemap", "{\"mode\":\"cube\"}"));
+    CHECK(applyFailsIntact(s, "panoramaRemap", "{\"fov\":30}"));
 }

@@ -58,6 +58,8 @@
 #include "openclip/transform.h"
 #include "openclip/undo.h"
 #include "openclip/vector.h"
+#include "openclip/warp.h"
+#include "openclip/puppet.h"
 
 // M4: optional engine document API. When the parallel engine lane lands
 // engine/include/openclip/document.h, the shim prefers loadDocument /
@@ -159,6 +161,11 @@ struct Session {
     openclip::RefModel refModel;
     bool refLoaded = false;
     openclip::RefView refView;
+    // T4: multi-item decor scene (nSetRefScene). When sceneOn the
+    // scene renderer replaces the single M9 item (migration = 1-item
+    // scene, shared projection path).
+    openclip::RefScene refScene;
+    bool sceneOn = false;
     openclip::BrushParams brush;
     std::uint8_t r = 20, g = 20, b = 20;
     // M2 shim-side brush state (engine takes over when its M2 lane lands):
@@ -1205,6 +1212,234 @@ Java_dev_openclip_engine_EngineHost_nSetRefPose(JNIEnv* env, jclass,
     return JNI_TRUE;
 }
 
+// ---- T4 decor scene (ARCHITECTURE.md "T4 additions" §4) ----
+//
+// nSetRefScene(handle, json): {items:[{src, pos:[x,y,z],
+// rot:[x,y,z], scale, visible, wire?, flat?}...]} (0..8 items;
+// src = "file:<cache-path>" | "prim:cube|sphere|plane|cylinder").
+// Built into a temp scene, swapped on success (false + scene intact
+// on malformed JSON, > 8 items, bad src, unloadable file, or
+// non-positive scale). Session fiche hors undo (like pose V+3).
+// nPaintRefMap(handle, item, jsonDabs): stamps [{x,y,r,color,opacity}]
+// (engine-canvas coords) into the item's 1024² texture (created on
+// first dab; planar when the mesh has no UV). Meta-texture hors
+// undo; only the layer commit (nBlitPngIntoLayer) is undoable.
+namespace {
+bool refSceneBool(const std::string& obj, const char* key, bool def) {
+    const std::string q = std::string("\"") + key + "\"";
+    const std::size_t kp = obj.find(q);
+    if (kp == std::string::npos) return def;
+    const std::size_t c = obj.find(':', kp + q.size());
+    if (c == std::string::npos) return def;
+    std::size_t v = c + 1;
+    while (v < obj.size() &&
+           (obj[v] == ' ' || obj[v] == '\t')) ++v;
+    if (obj.compare(v, 4, "true") == 0) return true;
+    if (obj.compare(v, 5, "false") == 0) return false;
+    char* e = nullptr;
+    const double d = std::strtod(obj.c_str() + v, &e);
+    if (e == obj.c_str() + v) return def;
+    return d != 0.0;
+}
+
+bool refSceneNums(const std::string& obj, const char* key, double* out,
+                  int n) {
+    const std::string q = std::string("\"") + key + "\"";
+    const std::size_t kp = obj.find(q);
+    if (kp == std::string::npos) return false;
+    const std::size_t open = obj.find('[', kp + q.size());
+    if (open == std::string::npos) return false;
+    std::size_t p = open + 1;
+    for (int i = 0; i < n; ++i) {
+        while (p < obj.size() &&
+               (obj[p] == ' ' || obj[p] == '\t' || obj[p] == ',' ||
+                obj[p] == '\n' || obj[p] == '\r')) ++p;
+        if (p >= obj.size() || obj[p] == ']') return false;
+        char* e = nullptr;
+        const double d = std::strtod(obj.c_str() + p, &e);
+        if (e == obj.c_str() + p) return false;
+        out[i] = d;
+        p = static_cast<std::size_t>(e - obj.c_str());
+    }
+    return true;
+}
+
+bool refSceneStr(const std::string& obj, const char* key, std::string& out) {
+    const std::string q = std::string("\"") + key + "\"";
+    const std::size_t kp = obj.find(q);
+    if (kp == std::string::npos) return false;
+    const std::size_t c = obj.find(':', kp + q.size());
+    if (c == std::string::npos) return false;
+    std::size_t v = c + 1;
+    while (v < obj.size() &&
+           (obj[v] == ' ' || obj[v] == '\t')) ++v;
+    if (v >= obj.size() || obj[v] != '"') return false;
+    ++v;
+    std::string r;
+    while (v < obj.size() && obj[v] != '"') {
+        if (obj[v] == '\\' && v + 1 < obj.size()) {
+            ++v;
+            r.push_back(obj[v] == 'n' ? '\n' : obj[v]);
+        } else {
+            r.push_back(obj[v]);
+        }
+        ++v;
+    }
+    if (v >= obj.size()) return false;
+    out = r;
+    return true;
+}
+}  // namespace
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetRefScene(JNIEnv* env, jclass,
+                                                 jlong handle,
+                                                 jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !json) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    const std::size_t ik = j.find("\"items\"");
+    if (ik == std::string::npos) return JNI_FALSE;
+    const std::size_t open = j.find('[', ik + 7);
+    if (open == std::string::npos) return JNI_FALSE;
+    openclip::RefScene tmp;
+    std::size_t p = open + 1;
+    while (p < j.size()) {
+        while (p < j.size() &&
+               (j[p] == ' ' || j[p] == '\t' || j[p] == ',' ||
+                j[p] == '\n' || j[p] == '\r'))
+            ++p;
+        if (p >= j.size()) return JNI_FALSE;
+        if (j[p] == ']') break;
+        if (j[p] != '{') return JNI_FALSE;
+        // Match the closing brace (no nesting inside items).
+        const std::size_t cb = j.find('}', p + 1);
+        if (cb == std::string::npos) return JNI_FALSE;
+        const std::string obj = j.substr(p, cb - p + 1);
+        p = cb + 1;
+        if (tmp.items.size() >= 8) return JNI_FALSE;  // 9 items = false
+        openclip::RefSceneItem it;
+        std::string src;
+        if (!refSceneStr(obj, "src", src) || src.empty())
+            return JNI_FALSE;
+        it.src = src;
+        double pos[3] = {0, 0, 0}, rot[3] = {0, 0, 0};
+        if (obj.find("\"pos\"") != std::string::npos &&
+            !refSceneNums(obj, "pos", pos, 3))
+            return JNI_FALSE;
+        if (obj.find("\"rot\"") != std::string::npos &&
+            !refSceneNums(obj, "rot", rot, 3))
+            return JNI_FALSE;
+        const double scale = jsonNum(obj, "scale", 1.0);
+        if (!(scale > 0.0) || !(scale < 1e6)) return JNI_FALSE;
+        const bool visible = refSceneBool(obj, "visible", true);
+        const bool wire = refSceneBool(obj, "wire", true);
+        const bool flat = refSceneBool(obj, "flat", false);
+        std::string err;
+        if (src.compare(0, 5, "file:") == 0) {
+            openclip::RefModel m;
+            if (!openclip::loadRefModel(src.substr(5), m, err))
+                return JNI_FALSE;
+            it.model = std::move(m);
+            it.loaded = true;
+            it.hasUV = false;
+            for (std::size_t ui = 0; ui + 1 < it.model.uvs.size();
+                 ui += 2) {
+                const float u = it.model.uvs[ui];
+                const float vv = it.model.uvs[ui + 1];
+                if (u == u && vv == vv) {
+                    it.hasUV = true;
+                    break;
+                }
+            }
+        } else if (src.compare(0, 5, "prim:") == 0) {
+            if (!openclip::buildPrimitive(src.substr(5), it, err))
+                return JNI_FALSE;
+        } else {
+            return JNI_FALSE;
+        }
+        // Geometry loaders reset the item shell: apply the fiche
+        // AFTER the load (a primitive reset once wiped visible here).
+        for (int k = 0; k < 3; ++k) {
+            it.pos[k] = pos[k];
+            it.rot[k] = rot[k];
+        }
+        it.scale = scale;
+        it.visible = visible;
+        it.wire = wire;
+        it.flat = flat;
+        tmp.items.push_back(std::move(it));
+    }
+    s->refScene = std::move(tmp);
+    s->sceneOn = true;
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nPaintRefMap(JNIEnv* env, jclass,
+                                                 jlong handle, jint item,
+                                                 jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !json || !s->sceneOn) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    // Dabs: [{x,y,r,color:"#RRGGBB",opacity}]. color defaults to
+    // session ink? No — engine has no ink here; default black.
+    std::vector<openclip::RefDab> dabs;
+    std::size_t p = 0;
+    while (p < j.size()) {
+        const std::size_t ob = j.find('{', p);
+        if (ob == std::string::npos) break;
+        const std::size_t cb = j.find('}', ob + 1);
+        if (cb == std::string::npos) return JNI_FALSE;
+        const std::string obj = j.substr(ob, cb - ob + 1);
+        p = cb + 1;
+        openclip::RefDab d;
+        auto numIn = [&](const char* key, double& v) -> bool {
+            const std::string q = std::string("\"") + key + "\"";
+            const std::size_t kp = obj.find(q);
+            if (kp == std::string::npos) return false;
+            const std::size_t colon = obj.find(':', kp + q.size());
+            if (colon == std::string::npos) return false;
+            char* e = nullptr;
+            const double dd = std::strtod(obj.c_str() + colon + 1, &e);
+            if (e == obj.c_str() + colon + 1) return false;
+            v = dd;
+            return true;
+        };
+        double v = 0;
+        if (!numIn("x", v)) return JNI_FALSE;
+        d.x = v;
+        if (!numIn("y", v)) return JNI_FALSE;
+        d.y = v;
+        if (numIn("r", v)) d.r = v;
+        if (numIn("opacity", v)) d.opacity = v;
+        std::string col;
+        if (refSceneStr(obj, "color", col)) {
+            if (col.size() != 7 || col[0] != '#') return JNI_FALSE;
+            auto hex = [](char ch) -> int {
+                if (ch >= '0' && ch <= '9') return ch - '0';
+                if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+                if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+                return -1;
+            };
+            int hv[6];
+            for (int k = 0; k < 6; ++k) {
+                hv[k] = hex(col[1 + k]);
+                if (hv[k] < 0) return JNI_FALSE;
+            }
+            d.color[0] = static_cast<std::uint8_t>(hv[0] * 16 + hv[1]);
+            d.color[1] = static_cast<std::uint8_t>(hv[2] * 16 + hv[3]);
+            d.color[2] = static_cast<std::uint8_t>(hv[4] * 16 + hv[5]);
+        }
+        dabs.push_back(d);
+    }
+    const int w = cur(s).width(), h = cur(s).height();
+    return openclip::paintRefMap(s->refScene, s->refView, w, h, item,
+                                 dabs)
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
                                                  jfloat x, jfloat y,
@@ -1393,8 +1628,13 @@ Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
         }
     }
     // M9: reference wireframe draws OVER the frame (tracing aid; never
-    // in nFrameCompositeInto so thumbnails/export stay clean).
-    if (s->refLoaded && s->refView.visible) {
+    // in nFrameCompositeInto so thumbnails/export stay clean). T4: when
+    // a decor scene is set it replaces the single M9 item.
+    if (s->sceneOn) {
+        int drawnEdges = 0;
+        openclip::renderRefScene(s->refScene, s->refView, width, height, px,
+                                 drawnEdges);
+    } else if (s->refLoaded && s->refView.visible) {
         int drawnEdges = 0;
         openclip::renderRefEdges(s->refModel, s->refView, width, height, px,
                                  drawnEdges);
@@ -2640,6 +2880,65 @@ Java_dev_openclip_engine_EngineHost_nSelectionBlit(JNIEnv* env, jclass,
     spec.angleDeg = jsonNum(j, "angle", 0.0);
     spec.mode = jsonStr(j, "mode");
     if (spec.mode.empty()) spec.mode = "move";
+    // T4 warp modes (ARCHITECTURE.md "T4 additions" §1): persp/skew/
+    // bulge route to blitWarp (openclip/warp.h) instead of
+    // blitSelection. Quad/skew/bulge params parsed here (M3 rule for
+    // unknown keys; malformed geometry = false + intact).
+    openclip::WarpSpec wspec;
+    bool isWarp = false;
+    if (spec.mode == "persp" || spec.mode == "skew" ||
+        spec.mode == "bulge") {
+        isWarp = true;
+        wspec.mode = spec.mode;
+        if (spec.mode == "persp") {
+            const std::size_t qk = j.find("\"quad\"");
+            if (qk == std::string::npos) return JNI_FALSE;
+            const std::size_t open = j.find('[', qk + 6);
+            if (open == std::string::npos) return JNI_FALSE;
+            // Depth-tracking scan: the quad is nested [[x,y]x4], so a
+            // flat scan would stop at the first inner ']' (locked by
+            // the persp-shift emu test).
+            std::vector<double> vals;
+            std::size_t p = open + 1;
+            int depth = 1;
+            while (p < j.size() && depth > 0 && vals.size() < 8) {
+                const char c = j[p];
+                if (c == '[') {
+                    ++depth;
+                    ++p;
+                    continue;
+                }
+                if (c == ']') {
+                    --depth;
+                    ++p;
+                    continue;
+                }
+                if ((c >= '0' && c <= '9') || c == '-' || c == '.') {
+                    char* e = nullptr;
+                    const double v = std::strtod(j.c_str() + p, &e);
+                    if (e != j.c_str() + p) {
+                        vals.push_back(v);
+                        p = static_cast<std::size_t>(e - j.c_str());
+                        continue;
+                    }
+                }
+                ++p;
+            }
+            // Exactly 8 numbers (4 [x,y] pairs).
+            if (vals.size() != 8) return JNI_FALSE;
+            for (int k = 0; k < 4; ++k) {
+                wspec.quad[k][0] = vals[k * 2];
+                wspec.quad[k][1] = vals[k * 2 + 1];
+            }
+            wspec.quadSet = true;
+        } else if (spec.mode == "skew") {
+            wspec.ax = jsonNum(j, "ax", 0.0);
+            wspec.ay = jsonNum(j, "ay", 0.0);
+        } else {
+            wspec.amount = jsonNum(j, "amount", 0.0);
+            wspec.radius = jsonNum(j, "radius", 1.0);
+        }
+    }
     // Mesh mode: flat 18-number array after the "mesh" key.
     const std::size_t mk = j.find("\"mesh\"");
     if (mk != std::string::npos) {
@@ -2673,7 +2972,89 @@ Java_dev_openclip_engine_EngineHost_nSelectionBlit(JNIEnv* env, jclass,
         for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
             h.touchTile(cur(s), static_cast<std::size_t>(active), tx, ty);
     openclip::Surface out;
-    if (!openclip::blitSelection(out, ly.surface, s->selMask, spec)) {
+    if (isWarp) {
+        if (!openclip::blitWarp(out, ly.surface, s->selMask, wspec)) {
+            h.cancelStroke(cur(s));
+            return JNI_FALSE;
+        }
+    } else if (!openclip::blitSelection(out, ly.surface, s->selMask,
+                                        spec)) {
+        h.cancelStroke(cur(s));
+        return JNI_FALSE;
+    }
+    ly.surface.bytes().swap(out.bytes());
+    h.endStroke(cur(s));
+    return JNI_TRUE;
+}
+
+// ---- T4 puppet warp (ARCHITECTURE.md "T4 additions" §1) ----
+//
+// nPuppetWarp(handle, index, json): rigid-neighborhood MLS warp of the
+// whole ACTIVE raster layer (no mask needed — the puppet tab is a
+// whole-layer tab). json {pins:[{x,y,dx,dy}...], radius?} (radius
+// default = 25% of the diagonal, kernel-side). 0..64 pins; > 64 =
+// false + intact; off-canvas pins ignored kernel-side. Groups,
+// vector and adjustment layers refused (false). Full-layer tile
+// snapshots, 1 step (filter pattern).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nPuppetWarp(JNIEnv* env, jclass,
+                                                jlong handle, jint index,
+                                                jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !json) return JNI_FALSE;
+    std::size_t idx = 0;
+    if (!activePaintLayer(s, idx)) return JNI_FALSE;
+    if (static_cast<int>(idx) != index) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    // Pins: objects {x,y,dx,dy} inside the "pins" array. x and y are
+    // required per pin; dx/dy default to 0 (anchor-only pin).
+    std::vector<openclip::PuppetPin> pins;
+    const std::size_t pk = j.find("\"pins\"");
+    if (pk != std::string::npos) {
+        const std::size_t open = j.find('[', pk + 6);
+        if (open == std::string::npos) return JNI_FALSE;
+        std::size_t p = open + 1;
+        while (p < j.size() && pins.size() <= 64) {
+            const std::size_t ob = j.find('{', p);
+            if (ob == std::string::npos) break;
+            const std::size_t cb = j.find('}', ob + 1);
+            if (cb == std::string::npos) return JNI_FALSE;
+            const std::string obj = j.substr(ob, cb - ob + 1);
+            auto numIn = [&](const char* key, double& v) -> bool {
+                const std::string q = std::string("\"") + key + "\"";
+                const std::size_t kp = obj.find(q);
+                if (kp == std::string::npos) return false;
+                const std::size_t colon = obj.find(':', kp + q.size());
+                if (colon == std::string::npos) return false;
+                char* e = nullptr;
+                const double d =
+                    std::strtod(obj.c_str() + colon + 1, &e);
+                if (e == obj.c_str() + colon + 1) return false;
+                v = d;
+                return true;
+            };
+            openclip::PuppetPin pin;
+            double v = 0;
+            if (!numIn("x", v)) return JNI_FALSE;
+            pin.x = v;
+            if (!numIn("y", v)) return JNI_FALSE;
+            pin.y = v;
+            if (numIn("dx", v)) pin.dx = v;
+            if (numIn("dy", v)) pin.dy = v;
+            pins.push_back(pin);
+            p = cb + 1;
+            if (pins.size() > 64) return JNI_FALSE;
+        }
+    }
+    const double radius = jsonNum(j, "radius", -1.0);  // <=0 = kernel default
+    openclip::Layer& ly = cur(s).layer(idx);
+    openclip::History& h = hist(s);
+    h.beginStroke();
+    for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
+        for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
+            h.touchTile(cur(s), idx, tx, ty);
+    openclip::Surface out;
+    if (!openclip::puppetWarp(out, ly.surface, pins, radius)) {
         h.cancelStroke(cur(s));
         return JNI_FALSE;
     }

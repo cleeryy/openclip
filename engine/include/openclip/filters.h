@@ -16,7 +16,10 @@ class Surface;
 // "radialBlur", "posterize", "levels", "chromaticAberration", "addNoise",
 // "mosaic", "gradientMap", "denoise" (V+3 classic, median/bilateral 3x3),
 // T1: "unsharp" (parameterizable unsharp mask), "colorBalance" (3 zones
-// x 3 adversary axes), "threshold" (binary luma + optional Bayer).
+// x 3 adversary axes), "threshold" (binary luma + optional Bayer),
+// T4: "glow", "dropShadow", "crystallize", "normalMap", "retro",
+// "pencil", "perlinClouds" (§2 creative pack), "lensBlur",
+// "fisheyeFilter", "panoramaRemap" (§3 lens pack).
 bool canApply(const std::string& name);
 
 // Ordered registry names (same list as canApply accepts).
@@ -92,10 +95,54 @@ std::vector<std::string> filterNames();
 //                                             clamped [0,255]); dither!=0 =
 //                                             ordered Bayer-8 around level
 //                                             (mean-preserving +/-31.5)
+//   T4 creative pack (§2, ARCHITECTURE.md "T4 additions"):
+//   glow                {"radius":8, "amount":0.6, "tint":"#FFFFFF"}
+//                                             highlights (luma>0.7) blurred,
+//                                             tinted, screened over source;
+//                                             amount 0 = byte-identical
+//   dropShadow          {"dx":8, "dy":8, "radius":6, "color":"#000000",
+//                        "opacity":0.5}  alpha silhouette shifted, blurred,
+//                                             tinted, composited BEHIND the
+//                                             source (the only pack filter
+//                                             that also writes alpha, by
+//                                             design — the shadow lands on
+//                                             transparent pixels); radius 0
+//                                             = hard shadow
+//   crystallize         {"cell":16}  flat-top hexagonal tiling (axial
+//                                             rounding); each cell = its
+//                                             center pixel color
+//   normalMap           {"strength":1.0}  straight-luma Sobel 3x3 to
+//                                             normal RGB (B up); flat =
+//                                             uniform #8080FF
+//   retro               {"warmth":0.5, "grain":10, "vignette":0.3,
+//                        "fade":0.2}  warm lift + LCG grain (addNoise
+//                                             seed) + cosine vignette +
+//                                             black fade; all 0 = identical
+//   pencil              {"strength":0.7}  inverted Sobel edges × fine
+//                                             gradient-noise paper grain,
+//                                             warm near-monochrome;
+//                                             strength 0 = no-op
+//   perlinClouds        {"scale":6, "octaves":4, "seed":0,
+//                        "mode":"mix"}  gradient-noise fBm; mix =
+//                                             50% screen over source,
+//                                             overwrite = full-layer fill
+//   T4 lens pack (§3):
+//   lensBlur            {"radius":8, "highlights":0.5}  uniform-disk
+//                                             kernel (bokeh, NOT gaussian);
+//                                             radius 1 ≈ identity on flats
+//   fisheyeFilter       {"amount":0.5, "keepSize":1}  r'=r*(1+k*r^2)
+//                                             on normalized radius
+//                                             (k = amount, M9 formula);
+//                                             0 = byte-identical
+//   panoramaRemap       {"mode":"cyl", "fov":120}  cyl/rect cylindrical
+//                                             (un)projection; no stitching
 //
-// Alpha contract (M3): alpha bytes are NEVER modified by any filter; RGB
-// outputs are clamped to [0, alpha] afterwards so premultiplied (rgb <= a)
-// data stays valid. Dimensions are never changed.
+// Alpha contract (M3): alpha bytes are NEVER modified by any filter,
+// with ONE documented T4 exception — dropShadow composites a shadow
+// layer behind the source, so its composited alpha lands in `out`
+// and is copied over (shadow on transparent pixels needs alpha to
+// show). RGB outputs are clamped to [0, alpha] afterwards so
+// premultiplied (rgb <= a) data stays valid. Dimensions never change.
 bool applyFilter(Surface& s, const std::string& name,
                  const std::string& paramsJson, std::string& error);
 

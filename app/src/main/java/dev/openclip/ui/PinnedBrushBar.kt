@@ -115,6 +115,7 @@ fun PinnedBrushBar(
             ) {
                 PinnedCells(
                     prefs = prefs,
+                    surface = surface,
                     tight = true,
                     onTick = ::tick,
                     onEnd = ::end,
@@ -136,6 +137,7 @@ fun PinnedBrushBar(
             ) {
                 PinnedCells(
                     prefs = prefs,
+                    surface = surface,
                     tight = false,
                     onTick = ::tick,
                     onEnd = ::end,
@@ -150,6 +152,7 @@ fun PinnedBrushBar(
 @Composable
 private fun RowScope.PinnedCells(
     prefs: BrushPrefs,
+    surface: EngineSurface,
     tight: Boolean,
     onTick: (() -> Unit) -> Unit,
     onEnd: () -> Unit,
@@ -294,6 +297,30 @@ private fun RowScope.PinnedCells(
                 modifier = Modifier.fillMaxWidth()
             )
         }
+    }
+    // T4 §5 smart shape (default OFF — purists are never surprised):
+    // toggle arms the capture-all gesture classifier.
+    var smartOn by remember(surface) { mutableStateOf(surface.smartShapeArmed) }
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .height(48.dp)
+            .clickable {
+                smartOn = !smartOn
+                surface.smartShapeArmed = smartOn
+                onTap()
+            }
+            .testTag("pinned-smart")
+            .padding(horizontal = 4.dp)
+    ) {
+        Text(
+            stringResource(R.string.smart_shape_toggle),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (smartOn) Color(0xFF59D6E6) else Color(0xFFB8B8C8),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
+        )
     }
     Box(
         contentAlignment = Alignment.Center,

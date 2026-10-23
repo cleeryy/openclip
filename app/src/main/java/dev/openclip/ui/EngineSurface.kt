@@ -773,6 +773,31 @@ class EngineSurface @JvmOverloads constructor(
             .also { if (it) needsComposite = true } else false
     }
 
+    // T4 puppet warp (ARCHITECTURE.md "T4 additions" §1): whole-layer
+    // warp of the ACTIVE raster layer. 1 undo step (filter pattern).
+    fun puppetWarp(index: Int, json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nPuppetWarp(handle, index, json)
+            .also {
+                if (it) {
+                    needsComposite = true
+                    notifyStrokeChanged()
+                }
+            } else false
+    }
+
+    // T4 decor scene + 3D paint (ARCHITECTURE.md "T4 additions" §4):
+    // session fiches hors undo (like pose V+3); only the layer commit
+    // (blitPngIntoLayer) is undoable. Overlay refresh on change.
+    fun setRefScene(json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetRefScene(handle, json)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun paintRefMap(item: Int, jsonDabs: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nPaintRefMap(handle, item, jsonDabs)
+            .also { if (it) needsComposite = true } else false
+    }
+
     fun applyTone(name: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nApplyTone(handle, name)
             .also {
@@ -1343,6 +1368,36 @@ class EngineSurface @JvmOverloads constructor(
     private var vecToolActive = false
     private var vecToolIndex = -1
     private val vecToolPts = mutableListOf<Triple<Float, Float, Float>>()
+    // T4 §5 smart shape: armed capture (never ink until resolved).
+    // Toggle lives in the smart-shape UI (default OFF — purists are
+    // never surprised). Capture stores ENGINE coords + pressure; on UP
+    // the stroke classifies: confident → ghost overlay + validate
+    // (1 undo); weak → kept as-is (replayed as a normal stroke).
+    @Volatile var smartShapeArmed: Boolean = false
+    @Volatile var smartTolerance: Float = SmartShape.DEFAULT_TOLERANCE
+    @Volatile var smartAuto: Boolean = false
+    private var smartActive = false
+    private val smartPts = mutableListOf<Triple<Float, Float, Float>>()
+    /** Ghost overlay (engine coords) + original stroke, or null. */
+    @Volatile var smartGhostPoly: List<Pair<Float, Float>> = emptyList()
+    private var smartGhostFit: ShapeFit? = null
+    private var smartOrigPts: List<Triple<Float, Float, Float>> = emptyList()
+    /** (kind | "NONE" | "KEPT", shown) after each captured gesture. */
+    var onSmartGhost: ((String, Boolean) -> Unit)? = null
+    // T4 §4 3D paint: when armed, strokes paint the active scene
+    // item's texture (never layer pixels). Capture stores ENGINE
+    // coords; on UP the dabs go through nPaintRefMap (meta hors
+    // undo — only the layer commit is undoable).
+    @Volatile var refPaintArmed: Boolean = false
+    @Volatile var refPaintItem: Int = -1
+    @Volatile var refPaintColor: String = "#000000"
+    private var refPaintActive = false
+    private val refPaintPts = mutableListOf<Triple<Float, Float, Float>>()
+    /** Last sent dabs (replay unit for the decor.json dab log). */
+    @Volatile var refPaintLastDabs: String = ""
+    @Volatile var refPaintLastItem: Int = -1
+    /** (ok) after each paint gesture (posted on UI thread). */
+    var onRefPaintDone: ((Boolean) -> Unit)? = null
     // T2 §3 trajectories overlay (overlay-only, never engine pixels):
     // centerlines of every path of the armed layer.
     @Volatile var trajectoriesLayer: Int = -1
@@ -2115,6 +2170,18 @@ class EngineSurface @JvmOverloads constructor(
                         vecToolPts.clear()
                         needsComposite = true
                     }
+                    if (smartActive && (navigating || rollbackOpen)) {
+                        // T4 §5: same — a captured stroke never inked.
+                        smartActive = false
+                        smartPts.clear()
+                        needsComposite = true
+                    }
+                    if (refPaintActive && (navigating || rollbackOpen)) {
+                        // T4 §4: same — texture dabs, never ink.
+                        refPaintActive = false
+                        refPaintPts.clear()
+                        needsComposite = true
+                    }
                     rollbackOpen = false
                     if (!navigating) {
                     for (pt in drained) {
@@ -2130,6 +2197,14 @@ class EngineSurface @JvmOverloads constructor(
                                 vecToolActive = false
                                 vecToolIndex = -1
                                 vecToolPts.clear()
+                                needsComposite = true
+                            } else if (smartActive) {
+                                smartActive = false
+                                smartPts.clear()
+                                needsComposite = true
+                            } else if (refPaintActive) {
+                                refPaintActive = false
+                                refPaintPts.clear()
                                 needsComposite = true
                             } else if (vecEraseActive) {
                                 vecEraseActive = false
@@ -2162,6 +2237,27 @@ class EngineSurface @JvmOverloads constructor(
                                     vecToolPts.add(
                                         Triple(pt.x, pt.y, pt.pressure)
                                     )
+                                    lastStrokeLatencyMs =
+                                        SystemClock.uptimeMillis() - pt.t
+                                    showHud(pt.pressure)
+                                } else if (refPaintArmed && refPaintItem >= 0 && !brushIsEraser) {
+                                    // T4 §4: paint the scene texture
+                                    // (never ink); dabs resolve on UP.
+                                    refPaintActive = true
+                                    refPaintPts.clear()
+                                    refPaintPts.add(Triple(pt.x, pt.y, pt.pressure))
+                                    lastStrokeLatencyMs =
+                                        SystemClock.uptimeMillis() - pt.t
+                                    showHud(pt.pressure)
+                                } else if (smartShapeArmed && !brushIsEraser) {
+                                    smartActive = true
+                                    smartPts.clear()
+                                    smartPts.add(Triple(pt.x, pt.y, pt.pressure))
+                                    if (smartGhostPoly.isNotEmpty()) {
+                                        smartGhostPoly = emptyList()
+                                        smartGhostFit = null
+                                        smartOrigPts = emptyList()
+                                    }
                                     lastStrokeLatencyMs =
                                         SystemClock.uptimeMillis() - pt.t
                                     showHud(pt.pressure)
@@ -2198,6 +2294,12 @@ class EngineSurface @JvmOverloads constructor(
                                         Triple(pt.x, pt.y, pt.pressure)
                                     )
                                     showHud(pt.pressure)
+                                } else if (refPaintActive) {
+                                    refPaintPts.add(Triple(pt.x, pt.y, pt.pressure))
+                                    showHud(pt.pressure)
+                                } else if (smartActive) {
+                                    smartPts.add(Triple(pt.x, pt.y, pt.pressure))
+                                    showHud(pt.pressure)
                                 } else if (vecEraseActive) {
                                     vecErasePts.add(Pair(pt.x, pt.y))
                                     showHud(pt.pressure)
@@ -2220,6 +2322,14 @@ class EngineSurface @JvmOverloads constructor(
                                         Triple(pt.x, pt.y, pt.pressure)
                                     )
                                     finishVectorTool()
+                                    notifyStrokeChanged()
+                                } else if (smartActive) {
+                                    smartPts.add(Triple(pt.x, pt.y, pt.pressure))
+                                    finishSmartCapture()
+                                    notifyStrokeChanged()
+                                } else if (refPaintActive) {
+                                    refPaintPts.add(Triple(pt.x, pt.y, pt.pressure))
+                                    finishRefPaint()
                                     notifyStrokeChanged()
                                 } else if (vecEraseActive) {
                                     vecErasePts.add(Pair(pt.x, pt.y))
@@ -2403,6 +2513,7 @@ class EngineSurface @JvmOverloads constructor(
                     drawSelectionOverlay(c, dst, ang)
                     drawV2Overlays(c, dst, ang)
                     drawTrajectories(c, dst, ang)
+                    drawSmartGhost(c, dst, ang)
                 } finally {
                     holder.unlockCanvasAndPost(c)
                 }
@@ -2629,6 +2740,251 @@ class EngineSurface @JvmOverloads constructor(
         if (trajectoriesLayer == idx) refreshTrajectories(idx)
         val cb = onVectorToolDone
         if (cb != null) post { cb(label, ok) }
+    }
+
+    // T4 §5: resolve a captured smart-shape gesture (render thread).
+    // Confident → ghost overlay + validate (tap) or auto-commit;
+    // weak → the stroke is kept as-is (replayed as normal ink, the
+    // same pixels a direct stroke would have laid).
+    private fun finishSmartCapture() {
+        val pts = smartPts.toList()
+        smartActive = false
+        smartPts.clear()
+        needsComposite = true
+        val cb = onSmartGhost
+        if (pts.size < 2 || handle == 0L) {
+            if (cb != null) post { cb("NONE", false) }
+            return
+        }
+        val xy = pts.map { Pair(it.first, it.second) }
+        val fit = try {
+            SmartShape.classify(xy, smartTolerance)
+        } catch (_: Exception) {
+            null
+        }
+        if (fit == null) {
+            // Low confidence: keep the stroke (replay the capture).
+            replaySmartStroke(pts)
+            if (cb != null) post { cb("KEPT", false) }
+            return
+        }
+        smartGhostFit = fit
+        smartOrigPts = pts
+        smartGhostPoly = SmartShape.ghostPoly(fit)
+        if (smartAuto) {
+            val ok = commitSmartFit()
+            if (cb != null) post { cb(fit.kind, ok) }
+        } else {
+            if (cb != null) post { cb(fit.kind, true) }
+        }
+    }
+
+    /** Replay a captured stroke as normal ink (1 undo, low-confidence path). */
+    private fun replaySmartStroke(pts: List<Triple<Float, Float, Float>>) {
+        if (pts.isEmpty() || handle == 0L) return
+        val id = EngineHost.nStrokeBegin(handle, pts[0].first, pts[0].second, pts[0].third)
+        if (id == 0L) return
+        for (i in 1 until pts.size) {
+            EngineHost.nStrokeMove(handle, id, pts[i].first, pts[i].second, pts[i].third)
+        }
+        EngineHost.nStrokeEnd(handle, id)
+        needsComposite = true
+        notifyStrokeChanged()
+    }
+
+    /**
+     * Validate the ghost (tap on the pastille). Segment/ellipse/circle
+     * ride nAppendVectorPath T2 (stay editable — needs a vector layer);
+     * rect/triangle ride nStampShape T1 (pixels — needs a raster
+     * layer). Wrong layer = hint + original replayed (nothing lost).
+     * Each commit is 1 undo step.
+     */
+    fun confirmSmartShape(): Boolean {
+        val fit = smartGhostFit ?: return false
+        val ok = commitSmartFit()
+        if (!ok) replaySmartStroke(smartOrigPts)
+        smartGhostFit = null
+        smartOrigPts = emptyList()
+        smartGhostPoly = emptyList()
+        needsComposite = true
+        notifyStrokeChanged()
+        return ok
+    }
+
+    private fun commitSmartFit(): Boolean {
+        val fit = smartGhostFit ?: return false
+        if (handle == 0L) return false
+        return try {
+            when (fit.kind) {
+                "segment", "ellipse", "circle" -> {
+                    val idx = activeVectorLayer()
+                    if (idx < 0) return false
+                    val poly = SmartShape.ghostPoly(fit)
+                    if (poly.size < 2) return false
+                    val json = T2Vector.captureJson(
+                        poly.map { Triple(it.first, it.second, 1f) }
+                    )
+                    appendVectorPath(idx, json) >= 0
+                }
+                "rect", "triangle" -> {
+                    if (activeVectorLayer() >= 0) return false
+                    if (activeLayerIsAdjustment()) return false
+                    val xs = fit.geom.map { it.first }
+                    val ys = fit.geom.map { it.second }
+                    val x0 = xs.minOrNull() ?: return false
+                    val x1 = xs.maxOrNull() ?: return false
+                    val y0 = ys.minOrNull() ?: return false
+                    val y1 = ys.maxOrNull() ?: return false
+                    if (x1 - x0 < 2f || y1 - y0 < 2f) return false
+                    val sides = if (fit.kind == "rect") 4 else 3
+                    val rot = Math.toDegrees(
+                        atan2(
+                            (fit.geom[1].second - fit.geom[0].second).toDouble(),
+                            (fit.geom[1].first - fit.geom[0].first).toDouble()
+                        )
+                    ).toFloat()
+                    val strokeW = brushRadiusEngine.coerceIn(2f, 64f)
+                    val json = String.format(
+                        java.util.Locale.US,
+                        "{\"kind\":\"polygon\",\"x0\":%.1f,\"y0\":%.1f," +
+                            "\"x1\":%.1f,\"y1\":%.1f,\"sides\":%d," +
+                            "\"rotation\":%.1f,\"fillOn\":false," +
+                            "\"strokeOn\":true,\"stroke\":\"#000000\"," +
+                            "\"strokeW\":%.1f}",
+                        x0, y0, x1, y1, sides, rot, strokeW
+                    )
+                    stampShapeJson(json)
+                }
+                else -> false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Dismiss the ghost: the original stroke is replayed as-is
+     * (nothing lost). The next DOWN clears any ghost anyway.
+     */
+    fun dismissSmartShape() {
+        if (smartGhostFit == null) return
+        replaySmartStroke(smartOrigPts)
+        smartGhostFit = null
+        smartOrigPts = emptyList()
+        smartGhostPoly = emptyList()
+        needsComposite = true
+        notifyStrokeChanged()
+    }
+
+    // T4 §4: resolve a captured paint gesture (render thread): the
+    // captured engine points become texture dabs (radius = brush,
+    // panel ink, brush opacity) on the armed scene item.
+    private fun finishRefPaint() {
+        val pts = refPaintPts.toList()
+        val item = refPaintItem
+        refPaintActive = false
+        refPaintPts.clear()
+        needsComposite = true
+        val cb = onRefPaintDone
+        if (pts.size < 1 || item < 0 || handle == 0L) {
+            if (cb != null) post { cb(false) }
+            return
+        }
+        val sb = StringBuilder("[")
+        pts.forEachIndexed { i, p ->
+            if (i > 0) sb.append(',')
+            sb.append(
+                String.format(
+                    java.util.Locale.US,
+                    "{\"x\":%.1f,\"y\":%.1f,\"r\":%.1f,\"color\":\"%s\"," +
+                        "\"opacity\":%.2f}",
+                    p.first, p.second,
+                    brushRadiusEngine.coerceIn(1f, 128f),
+                    refPaintColor, brushOpaqueEngine.coerceIn(0f, 1f)
+                )
+            )
+        }
+        sb.append(']')
+        refPaintLastDabs = sb.toString()
+        refPaintLastItem = item
+        val ok = try {
+            paintRefMap(item, sb.toString())
+        } catch (_: Exception) {
+            false
+        }
+        if (cb != null) post { cb(ok) }
+    }
+
+    /**
+     * Commit the painted texture to the active layer (explicit,
+     * 1 undo + flatten, announced): the scene is transiently pushed
+     * with wire:0 + flat:1 (`commitJson`), the textured composite is
+     * pulled, the scene restored (`restoreJson`), and the overlay
+     * delta is mixed under its own diff mask (V+1 flatten pattern).
+     */
+    fun commitRefTexture(
+        commitJson: String,
+        restoreJson: String,
+        onResult: (Boolean) -> Unit
+    ) {
+        val cur = currentFrameIdx
+        pullFrameFull(cur) { before ->
+            if (before == null) {
+                post { onResult(false) }
+                return@pullFrameFull
+            }
+            if (!setRefScene(commitJson)) {
+                before.recycle()
+                post { onResult(false) }
+                return@pullFrameFull
+            }
+            pullFrameFull(cur) { after ->
+                setRefScene(restoreJson)
+                if (after == null) {
+                    before.recycle()
+                    post { onResult(false) }
+                    return@pullFrameFull
+                }
+                val w = before.width
+                val h = before.height
+                if (w <= 0 || h <= 0 || after.width != w || after.height != h) {
+                    before.recycle()
+                    after.recycle()
+                    post { onResult(false) }
+                    return@pullFrameFull
+                }
+                val ba = IntArray(w * h)
+                val aa = IntArray(w * h)
+                before.getPixels(ba, 0, w, 0, 0, w, h)
+                after.getPixels(aa, 0, w, 0, 0, w, h)
+                val bits = ByteArray(w * h)
+                var any = false
+                for (i in ba.indices) {
+                    val d =
+                        kotlin.math.abs((ba[i] and 0xFF) - (aa[i] and 0xFF)) +
+                            kotlin.math.abs(((ba[i] shr 8) and 0xFF) - ((aa[i] shr 8) and 0xFF)) +
+                            kotlin.math.abs(((ba[i] shr 16) and 0xFF) - ((aa[i] shr 16) and 0xFF))
+                    if (d > 24) {
+                        bits[i] = 255.toByte()
+                        any = true
+                    }
+                }
+                if (!any) {
+                    before.recycle()
+                    after.recycle()
+                    post { onResult(false) }
+                    return@pullFrameFull
+                }
+                val mask = SelectionMask(w, h)
+                if (!mask.loadBits(bits)) {
+                    before.recycle()
+                    after.recycle()
+                    post { onResult(false) }
+                    return@pullFrameFull
+                }
+                maskedCommit(before, after, mask, onResult)
+            }
+        }
     }
 
     /** Rebuild the trajectories overlay for a layer (overlay-only). */
@@ -3459,6 +3815,16 @@ class EngineSurface @JvmOverloads constructor(
         isAntiAlias = true
     }
 
+    // T4 §5 smart-shape ghost (dashed cyan phantom — overlay-only,
+    // suit la matrice de vue comme les trajectoires).
+    private val smartGhostPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = 0xFF59D6E6.toInt()
+        isAntiAlias = true
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f, 7f), 0f)
+    }
+
     private fun drawV2Overlays(
         c: android.graphics.Canvas,
         dst: RectF,
@@ -3507,6 +3873,28 @@ class EngineSurface @JvmOverloads constructor(
             }
             c.drawPath(path, trajLinePaint)
         }
+        c.restore()
+    }
+
+    /** T4 §5 smart-shape ghost (never engine pixels). */
+    private fun drawSmartGhost(
+        c: android.graphics.Canvas,
+        dst: RectF,
+        ang: Float
+    ) {
+        val poly = smartGhostPoly
+        if (poly.size < 2) return
+        val s = fitScale(width, height) * viewScaleMul
+        if (s <= 1e-6f) return
+        c.save()
+        if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+        val path = android.graphics.Path()
+        for ((i, e) in poly.withIndex()) {
+            val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
+            val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+            if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
+        }
+        c.drawPath(path, smartGhostPaint)
         c.restore()
     }
 

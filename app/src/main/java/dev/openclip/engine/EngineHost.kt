@@ -134,4 +134,11 @@ object EngineHost {
     external fun nTrackState(handle: Long): String
     external fun nExportPngSeq(handle: Long, dirPath: String, json: String): Boolean
     external fun nExportApng(handle: Long, path: String, json: String): Boolean
+
+    // T4 additions (ARCHITECTURE.md): puppet warp (whole raster layer),
+    // decor scene + 3D paint. Perspective/skew/bulge ride the existing
+    // nSelectionBlit JSON (0 new symbols); smart shape is app-side.
+    external fun nPuppetWarp(handle: Long, index: Int, json: String): Boolean
+    external fun nSetRefScene(handle: Long, json: String): Boolean
+    external fun nPaintRefMap(handle: Long, item: Int, jsonDabs: String): Boolean
 }

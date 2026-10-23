@@ -892,3 +892,139 @@ BEFORE code per the frozen-JNI rule):
   single generic `nAnimOp(handle, json)` was considered and
   DECLINED (same clause as T1 §8/T2 review): explicit names
   keep check_jni_symbols.sh and per-op tests readable.
+
+T4 additions (decided 2026-10-23, transforms + creative round —
+spec docs/t4-transform.md; delivery order §2 → §3 → §1 → §5 → §4;
+EXACTLY 3 new symbols, this section documents all of them BEFORE
+code per the frozen-JNI rule):
+
+- Conventions (all 5 items): M3 alpha contract holds (rgb <= alpha;
+  only texture commits §4b and the dropShadow composite §2 touch
+  alpha BY DESIGN); pixel writes =
+  full-layer tile snapshots (1 step); fiches (puppet pins, scene,
+  filter settings) = meta hors undo (like holds/bubbles/keys —
+  dragging is not a stroke); overlay-only UI (handles, warp grids,
+  ghost shapes); engine coords everywhere (screenToEngine);
+  targets >= 48dp.
+- §2 creative pack (0 new symbol): `nApplyFilter` routes seven new
+  names with the M3 params rule (unknown keys ignored, missing =
+  documented defaults, alpha untouched, rgb clamped to [0,alpha],
+  false + byte-identical surface on invalid params):
+  - `glow` `{"radius":8 (1..64), "amount":0.6 (0..2),
+    "tint":"#FFFFFF"}` — highlights (luma > 0.7) blurred with the
+    existing separable gaussian, tinted, screened over source.
+    amount 0 = byte-identical.
+  - `dropShadow` `{"dx":8, "dy":8 (-64..64), "radius":6 (0..64),
+    "color":"#000000", "opacity":0.5 (0..1)}` — the layer's alpha
+    silhouette shifted, blurred, tinted, composited BEHIND the
+    source. The only pack filter touching alpha — BY DESIGN: the
+    shadow lands on transparent pixels, where rgb <= alpha needs a
+    composited alpha to show at all (opaque source pixels stay
+    byte-identical, locked by test). radius 0 = hard shadow.
+  - `crystallize` `{"cell":16 (3..64)}` — hexagonal tiling (flat-top
+    axial rounding: a signature look, not square mosaic); each cell
+    = its center-pixel color. Deterministic.
+  - `normalMap` `{"strength":1.0 (0..4)}` — height = Rec.601 luma
+    (straight/unpremultiplied read, so translucent edges don't skew
+    the Sobel), 3x3 Sobel → normal RGB (`(n*0.5+0.5)*255`, B up).
+    A flat surface maps to uniform `#8080FF` (locked by test).
+  - `retro` `{"warmth":0.5 (0..1), "grain":10 (0..64),
+    "vignette":0.3 (0..1), "fade":0.2 (0..1)}` — warm lift (blacks
+    lifted, whites compressed), grain via the addNoise LCG reseeded
+    to the same fixed seed (reproducible), smooth radial vignette,
+    black fade. All zero = byte-identical.
+  - `pencil` `{"strength":0.7 (0..1)}` — luma → inverted Sobel edges
+    × fine procedural paper grain (value-Perlin §2b at fine scale,
+    fixed seed), warm near-monochrome output.
+  - `perlinClouds` `{"scale":6 (1..16), "octaves":4 (1..6),
+    "seed":0, "mode":"mix"|"overwrite" (default mix)}` — 2D
+    gradient (Perlin) noise from scratch (quintic fade, LCG-shuffled
+    permutation of `seed`), multi-octave fBm; `mix` = soft-light
+    blend at 50% over source, `overwrite` = full-layer fill (same
+    pattern as `nApplyTone` M10). White noise `addNoise` != Perlin
+    (spatially coherent — the announced difference).
+  `canApply`/`filterNames` grow by exactly these seven names.
+- §3 lens/fisheye/panorama (0 new symbol): three more
+  `nApplyFilter` names, same M3 rule:
+  - `lensBlur` `{"radius":8 (1..64), "highlights":0.5 (0..1)}` —
+    uniform-disk kernel (radius+1 square window thresholded to the
+    disk: polygonal bokeh approximation, NOT gaussian — the
+    announced difference vs `gaussianBlur`); `highlights` spares
+    bright luma (partial screen gain, simulated bokeh dots).
+    radius 1 ≈ identity (1px disk).
+  - `fisheyeFilter` `{"amount":0.5 (-1..1), "keepSize":1}` — radial
+    remap `r' = r*(1+k*r^2)` with `k = amount*0.001` scaled to px
+    (same formula as the M9 camera, documented); negative =
+    pincushion; `keepSize` crops to canvas (clamp-to-edge fill,
+    announced); amount 0 = byte-identical. Layer pixels, undoable —
+    distinct from the M9 overlay camera and the 2.27 tracing rule.
+  - `panoramaRemap` `{"mode":"cyl"|"rect" (default cyl),
+    "fov":120 (60..180)}` — `cyl` = cylindrical projection
+    (straightens wide bands, edges stretched+clamped), `rect` =
+    inverse. No multi-image stitching in T4 (stitch = FUTURE:
+    honest note, the filter preps/corrects bands, it never sews).
+- §1 perspective/skew/bulge + puppet (ONE new symbol, below):
+  - 0 symbols for persp/skew/bulge: `nSelectionBlit` JSON grows
+    (`mode:"persp"|"skew"|"bulge"`, `quad:[[x,y]x4]` clockwise
+    from top-left, `ax`/`ay` degrees clamped ±60,
+    `amount` -1..1 + `radius` 0.1..1; M3 rule; `false` + intact on
+    no mask / malformed JSON / degenerate quad (zero area, doubled
+    points)). Kernels: pure `openclip/warp.h` (`blitWarp(dst, src,
+    mask, spec)`, same signature spirit as `transform.h`):
+    persp = inverse homography + bilinear from scratch; skew =
+    shear about the mask bbox center + bilinear; bulge = smooth
+    cosine falloff radial grow/pinch (negative = pinch) about the
+    bbox center + bilinear. Neutral params (quad = bbox, ax=ay=0,
+    amount=0) are byte-identical. Source pixels are sampled from
+    the SOURCE surface, never the cleared tile (no tile seams —
+    the spec risk (a) is locked by a seam test).
+  - `nPuppetWarp(handle, index, json): Boolean` — `{pins:[{x,y,dx,dy}
+    ...], radius?}` on the ACTIVE raster layer `index` (0..64 pins;
+    out-of-range = error `false` + intact). Rigid moving-least-
+    squares (from scratch, same spirit as `guides.h`/`anim.h`: pure,
+    no Canvas) with `radius` px influence (default = 25% of the
+    diagonal) and smooth falloff beyond. Honest limits: 0 pins =
+    byte-identical; 1 pin = local translation; off-canvas pins
+    ignored. Full-layer tile snapshots, 1 step (filter pattern).
+  - Puppet is a WHOLE-LAYER tab (no mask needed; the V+2 mask carries
+    no pins). Groups/vector/adjustment layers refused (false).
+  - Soit 1 new symbol for §1.
+- §5 smart shape (0 new symbol, nominal path): app-side 100% Kotlin
+  pure function (`classifyStroke`: `segment|ellipse|circle|rect|
+  triangle`, confidence threshold 0.7, else the stroke stays —
+  never a surprise replace) + ghost overlay; user validates (tap)
+  or moves on (ghost dies on the next stroke). Replacement rides
+  T1/T2: segment/ellipse/circle → `nAppendVectorPath` T2 (stays
+  editable); rect/triangle → `nStampShape` T1 (pixels, 1 step).
+  The conditional `nFitShape` stays DOCUMENTED-HERE-FIRST if a
+  prototype measurement on the target tablet (> 300 ms for 2048
+  pts) ever requires it — nominal path adds no symbol.
+- §4 decor + 3D paint (TWO new symbols, below), overlay-first:
+  - `nSetRefScene(handle, json): Boolean` — poses the multi-item
+    scene `{items:[{src, pos:[x,y,z], rot:[x,y,z], scale, visible
+    }...]}` (0..8 items, `src` = `file:<cache-path>` |
+    `prim:cube|sphere|plane|cylinder`; M3 rule; false + scene
+    intact on malformed JSON or > 8 items). Replaces the single
+    M9 item (migration = 1-item scene, shared projection path).
+  - `nPaintRefMap(handle, item, jsonDabs): Boolean` — stamps
+    `{x,y,r,color,opacity}[]` (engine-canvas coords carried by the
+    app-side stroke) into the item's 1024² texture (created on
+    first dab; planar projection when the mesh has no UV —
+    projection frozen at stroke time, announced). Texture = session
+    meta hors undo (like an in-progress stroke); only the layer
+    commit (`nBlitPngIntoLayer` V+1 bridge, explicit, 1 undo) is
+    undoable. Primitives are procedural triangle-edge meshes from
+    scratch (no asset); cgltf already vendored (no new third party).
+    Rendering: screen-space ray → triangle hit (Möller–Trumbore over
+    the posed world mesh) → UV interpolation, else planar bbox map;
+    the painted texture renders as a tinted overlay UNDER the
+    wireframe (still an aid, never layer pixels — commit stays
+    explicit). Item persistence: app-side `decor.json` + per-item
+    `tex_itemNN.png` in the `.ocpages/` folder (V+3 `pose.json`
+    pattern); without them = empty scene, never a broken page.
+- T4 JNI budget: EXACTLY 3 new symbols (this section documents all
+  three BEFORE code): nPuppetWarp, nSetRefScene, nPaintRefMap.
+  Everything else is JSON growth on existing symbols or registry
+  growth. A generic `nT4Op(handle, json)` was considered and
+  REFUSED (same clause as T1 §8 / T2 / T3: explicit names keep
+  `check_jni_symbols.sh` and per-op tests readable).

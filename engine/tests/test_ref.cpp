@@ -4,6 +4,7 @@
 // loaded through loadRefModel and rendered with the perspective camera.
 #include "test.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -292,4 +293,116 @@ TEST(ref_pose_moves_overlay) {
     renderRefEdges(m, v, w, h, ident, d2);
     CHECK(ident == rest);
     std::remove(rig.c_str());
+}
+
+// --- T4 decor scene (ARCHITECTURE.md "T4 additions" §4) ---
+
+TEST(ref_primitive_cube_shell) {
+    openclip::RefSceneItem item;
+    std::string err;
+    CHECK(openclip::buildPrimitive("cube", item, err));
+    CHECK(item.loaded);
+    CHECK(!item.hasUV);  // planar painting, announced
+    CHECK_EQ(item.model.edges.size(), (std::size_t)18);  // 12 sides + 6 face diagonals (same as the M9 fixture)
+    CHECK_EQ(item.model.tris.size(), (std::size_t)12);
+    CHECK(!openclip::buildPrimitive("torus", item, err));
+    CHECK(!err.empty());
+    for (const char* k : {"sphere", "plane", "cylinder"}) {
+        openclip::RefSceneItem p;
+        std::string e2;
+        CHECK(openclip::buildPrimitive(k, p, e2));
+        CHECK(p.loaded && !p.model.tris.empty() && !p.model.edges.empty());
+    }
+}
+
+TEST(ref_scene_cube_renders_edges) {
+    openclip::RefScene scene;
+    openclip::RefSceneItem item;
+    std::string err;
+    CHECK(openclip::buildPrimitive("cube", item, err));
+    scene.items.push_back(item);
+    openclip::RefView v;
+    v.dist = 5;
+    v.fov = 45;
+    const int w = 256, h = 256;
+    std::vector<std::uint8_t> buf(static_cast<std::size_t>(w) * h * 4, 0);
+    int drawn = 0;
+    openclip::renderRefScene(scene, v, w, h, buf, drawn);
+    CHECK(drawn > 0);
+    bool anyAlpha = false;
+    for (std::size_t i = 3; i < buf.size(); i += 4)
+        if (buf[i] != 0) anyAlpha = true;
+    CHECK(anyAlpha);
+}
+
+TEST(ref_scene_invisible_absent_empty_scene_clean) {
+    openclip::RefScene scene;
+    openclip::RefSceneItem item;
+    std::string err;
+    CHECK(openclip::buildPrimitive("cube", item, err));
+    item.visible = false;
+    scene.items.push_back(item);
+    openclip::RefView v;
+    v.dist = 5;
+    v.fov = 45;
+    const int w = 128, h = 128;
+    std::vector<std::uint8_t> buf(static_cast<std::size_t>(w) * h * 4, 0);
+    int drawn = 0;
+    openclip::renderRefScene(scene, v, w, h, buf, drawn);
+    CHECK_EQ(drawn, 0);
+    for (auto b : buf) CHECK_EQ(b, 0);
+    // Empty scene = composite inchangé.
+    openclip::RefScene empty;
+    int drawn2 = -1;
+    openclip::renderRefScene(empty, v, w, h, buf, drawn2);
+    CHECK_EQ(drawn2, 0);
+}
+
+TEST(ref_paint_planar_touches_texels_and_tints) {
+    openclip::RefScene scene;
+    openclip::RefSceneItem item;
+    std::string err;
+    CHECK(openclip::buildPrimitive("cube", item, err));
+    scene.items.push_back(item);
+    openclip::RefView v;
+    v.dist = 5;
+    v.fov = 45;
+    const int w = 256, h = 256;
+    // Dab at the canvas center (the cube projects there): radius 8px.
+    openclip::RefDab d;
+    d.x = w / 2.0;
+    d.y = h / 2.0;
+    d.r = 8;
+    d.color[0] = 255;
+    d.color[1] = 0;
+    d.color[2] = 0;
+    d.opacity = 1.0;
+    CHECK(openclip::paintRefMap(scene, v, w, h, 0, {d}));
+    const auto& tex = scene.items[0].tex;
+    CHECK_EQ(tex.size(), (std::size_t)(1024 * 1024 * 4));
+    long alphaSum = 0;
+    for (std::size_t i = 3; i < tex.size(); i += 4) alphaSum += tex[i];
+    CHECK(alphaSum > 0);  // texels touched
+    // The painted texture tints the overlay render.
+    std::vector<std::uint8_t> buf(static_cast<std::size_t>(w) * h * 4, 0);
+    int drawn = 0;
+    openclip::renderRefScene(scene, v, w, h, buf, drawn);
+    bool anyRed = false;
+    for (std::size_t i = 0; i + 3 < buf.size(); i += 4)
+        if (buf[i] > 100 && buf[i + 3] > 0) anyRed = true;
+    CHECK(anyRed);
+    // Empty dabs = true no-op; bad item = false; NaN = false + intact.
+    CHECK(openclip::paintRefMap(scene, v, w, h, 0, {}));
+    CHECK(!openclip::paintRefMap(scene, v, w, h, 3, {d}));
+    openclip::RefDab bad = d;
+    bad.x = std::nan("");
+    const auto before = tex;
+    CHECK(!openclip::paintRefMap(scene, v, w, h, 0, {bad}));
+    CHECK(scene.items[0].tex == before);
+    // Dab far from the mesh misses but still succeeds.
+    openclip::RefDab miss = d;
+    miss.x = 2;
+    miss.y = 2;
+    miss.r = 1;
+    CHECK(openclip::paintRefMap(scene, v, w, h, 0, {miss}));
 }

@@ -54,6 +54,7 @@ import dev.openclip.media.ExportWebm
 import dev.openclip.media.WebdavClient
 import dev.openclip.ui.BrushPrefs
 import dev.openclip.ui.EngineSurface
+import dev.openclip.ui.SmartShape
 import dev.openclip.ui.LayerPanelTestHooks
 import dev.openclip.ui.AutosavePolicy
 import dev.openclip.ui.BezierEdit
@@ -138,6 +139,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -10614,5 +10616,562 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         }
     }
 
+
+    // T4 §2+§3 : les 10 noms de filtres routent (0 JNI) + undo restaure.
+    @Test
+    fun t4CreativeAndLensFiltersApplyAndUndo() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":10,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#E8E8E8"}"""
+            )
+            var sid = EngineHost.nStrokeBegin(handle, 40f, 128f, 1f)
+            for (x in 50..210 step 5) {
+                EngineHost.nStrokeMove(handle, sid, x.toFloat(), 128f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":10,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#303030"}"""
+            )
+            sid = EngineHost.nStrokeBegin(handle, 128f, 40f, 1f)
+            for (y in 50..210 step 5) {
+                EngineHost.nStrokeMove(handle, sid, 128f, y.toFloat(), 1f)
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+            val cases = listOf(
+                "glow" to """{"radius":2,"amount":1.0,"tint":"#FFFFFF"}""",
+                "crystallize" to """{"cell":8}""",
+                "normalMap" to """{"strength":2.0}""",
+                "retro" to """{"warmth":0.5,"grain":10,"vignette":0.3,"fade":0.2}""",
+                "pencil" to """{"strength":0.7}""",
+                "perlinClouds" to """{"scale":4,"octaves":2,"seed":7}""",
+                "lensBlur" to """{"radius":3,"highlights":0.0}""",
+                "fisheyeFilter" to """{"amount":0.5}""",
+                "panoramaRemap" to """{"mode":"cyl","fov":120}"""
+            )
+            for ((name, params) in cases) {
+                val before = IntArray(w * h)
+                assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+                assertTrue("t4 $name must apply", EngineHost.nApplyFilter(handle, name, params))
+                val after = IntArray(w * h)
+                assertEquals(w * h, EngineHost.nCompositeInto(handle, after, w, h))
+                assertTrue(
+                    "t4 $name must change pixels",
+                    after.indices.count { after[it] != before[it] } > 0
+                )
+                assertTrue("t4 $name must undo", EngineHost.nUndo(handle))
+                val undone = IntArray(w * h)
+                assertEquals(w * h, EngineHost.nCompositeInto(handle, undone, w, h))
+                assertTrue(
+                    "t4 $name undo must restore exactly",
+                    undone.contentEquals(before)
+                )
+            }
+            // dropShadow on an opaque canvas: accepted + undoable (the
+            // shadow itself needs transparency — locked engine-side).
+            val b0 = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, b0, w, h)
+            assertTrue(
+                EngineHost.nApplyFilter(
+                    handle, "dropShadow",
+                    """{"dx":4,"dy":4,"radius":2,"color":"#000000","opacity":0.5}"""
+                )
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            val b1 = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, b1, w, h)
+            assertTrue(b1.contentEquals(b0))
+            // Invalid params refuse everywhere, canvas intact.
+            assertFalse(EngineHost.nApplyFilter(handle, "glow", """{"radius":0}"""))
+            assertFalse(EngineHost.nApplyFilter(handle, "retro", """{"grain":99}"""))
+            assertFalse(
+                EngineHost.nApplyFilter(handle, "panoramaRemap", """{"mode":"cube"}""")
+            )
+            assertFalse(
+                EngineHost.nApplyFilter(handle, "perlinClouds", """{"mode":"stitch"}""")
+            )
+            val b2 = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, b2, w, h)
+            assertTrue(b2.contentEquals(b1))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T4 §1 : persp/skew/bulge valident en 1 undo ; neutres identiques ;
+    // quad dégénéré refusé.
+    @Test
+    fun t4WarpModesApplyAndUndo() {
+        val id = openFreshDoc("t4-warp")
+        val es = freshSurface(id)
+        try {
+            val t0 = SystemClock.uptimeMillis()
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            composeRule.activityRule.scenario.onActivity {
+                val down = MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, cx - 60f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+                val move = MotionEvent.obtain(t0, t0 + 16, MotionEvent.ACTION_MOVE, cx + 60f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+                val up = MotionEvent.obtain(t0, t0 + 32, MotionEvent.ACTION_UP, cx + 60f, cy, 1f, 1f, 0, 1f, 1f, 0, 0)
+                es.dispatchTouchEvent(down)
+                es.dispatchTouchEvent(move)
+                es.dispatchTouchEvent(up)
+                down.recycle(); move.recycle(); up.recycle()
+            }
+            Thread.sleep(800)
+            es.selectRectEngine(60f, 60f, 180f, 180f)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val mask = File.createTempFile("t4-w-", ".png", dir)
+            assertTrue(es.selectionToPng(mask.absolutePath))
+            assertTrue(es.setSelectionMask(mask.absolutePath))
+            mask.delete()
+            val before = pullFull(es)
+            val beforePx = intPixels(before)
+            before.recycle()
+            // Read the live mask bbox (engine coords): quads are built
+            // from it, so the neutral quad is exact by construction.
+            val bits = es.exportSelectionBits()
+            assertNotNull("mask bits must export", bits)
+            val (mw, mh) = es.selectionSize()
+            var bx0 = mw
+            var by0 = mh
+            var bx1 = -1
+            var by1 = -1
+            for (y in 0 until mh) {
+                for (x in 0 until mw) {
+                    if (bits!![y * mw + x] != 0.toByte()) {
+                        if (x < bx0) bx0 = x
+                        if (x > bx1) bx1 = x
+                        if (y < by0) by0 = y
+                        if (y > by1) by1 = y
+                    }
+                }
+            }
+            assertTrue("mask must be non-empty", bx1 >= bx0)
+            val neutralQuad =
+                "[[$bx0,$by0],[${bx1 + 1},$by0],[${bx1 + 1},${by1 + 1}],[$bx0,${by1 + 1}]]"
+            val shiftQuad =
+                "[[" + (bx0 + 30) + ",$by0],[" + (bx1 + 31) + ",$by0],[" +
+                    (bx1 + 31) + "," + (by1 + 1) + "],[" + (bx0 + 30) + "," +
+                    (by1 + 1) + "]]"
+            // Persp shift (+30,0): the bbox corners move right.
+            assertTrue(
+                es.selectionBlit(
+                    "{\"mode\":\"persp\",\"quad\":" + shiftQuad + "}"
+                )
+            )
+            var after = pullFull(es)
+            try {
+                assertTrue(
+                    "persp must move pixels",
+                    intPixels(after).contentEquals(beforePx).not()
+                )
+            } finally {
+                after.recycle()
+            }
+            assertTrue("persp is one undo", es.undo())
+            var undone = pullFull(es)
+            try {
+                assertTrue(intPixels(undone).contentEquals(beforePx))
+            } finally {
+                undone.recycle()
+            }
+            // Skew 30°: sheared; undo restores.
+            assertTrue(es.selectionBlit("""{"mode":"skew","ax":30,"ay":0}"""))
+            after = pullFull(es)
+            try {
+                assertTrue(intPixels(after).contentEquals(beforePx).not())
+            } finally {
+                after.recycle()
+            }
+            assertTrue(es.undo())
+            // Bulge +0.8: grown; undo restores.
+            assertTrue(
+                es.selectionBlit("""{"mode":"bulge","amount":0.8,"radius":1.0}""")
+            )
+            after = pullFull(es)
+            try {
+                assertTrue(intPixels(after).contentEquals(beforePx).not())
+            } finally {
+                after.recycle()
+            }
+            assertTrue(es.undo())
+            // Neutrals are byte-identical (quad = bbox, ax=ay=0, amount=0).
+            assertTrue(
+                es.selectionBlit(
+                    "{\"mode\":\"persp\",\"quad\":" + neutralQuad + "}"
+                )
+            )
+            after = pullFull(es)
+            try {
+                assertTrue(intPixels(after).contentEquals(beforePx))
+            } finally {
+                after.recycle()
+            }
+            assertTrue(es.undo())
+            assertTrue(es.selectionBlit("""{"mode":"skew","ax":0,"ay":0}"""))
+            after = pullFull(es)
+            try {
+                assertTrue(intPixels(after).contentEquals(beforePx))
+            } finally {
+                after.recycle()
+            }
+            assertTrue(es.undo())
+            assertTrue(es.selectionBlit("""{"mode":"bulge","amount":0}"""))
+            after = pullFull(es)
+            try {
+                assertTrue(intPixels(after).contentEquals(beforePx))
+            } finally {
+                after.recycle()
+            }
+            assertTrue(es.undo())
+            // Degenerate quad (doubled points) refuses, canvas intact.
+            assertFalse(
+                es.selectionBlit(
+                    """{"mode":"persp","quad":[[60,60],[60,60],[60,60],[60,60]]}"""
+                )
+            )
+            after = pullFull(es)
+            try {
+                assertTrue(intPixels(after).contentEquals(beforePx))
+            } finally {
+                after.recycle()
+            }
+            es.setSelectionMask(null)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // T4 §1 : marionnette calque entier — 0 épingle identique, 1 épingle
+    // locale, 65 refusées, 1 undo.
+    @Test
+    fun t4PuppetWarpWholeLayer() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":10,"hardness":0.7,"opaque":1.0,"spacing":0.15,"color":"#141414"}"""
+            )
+            val sid = EngineHost.nStrokeBegin(handle, 64f, 128f, 1f)
+            for (x in 70..170 step 5) {
+                EngineHost.nStrokeMove(handle, sid, x.toFloat(), 128f, 1f)
+            }
+            EngineHost.nStrokeEnd(handle, sid)
+            val before = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, before, w, h))
+            assertTrue(EngineHost.nPuppetWarp(handle, 0, """{"pins":[]}"""))
+            val same = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, same, w, h)
+            assertTrue("0 pins = identical", same.contentEquals(before))
+            assertTrue(
+                EngineHost.nPuppetWarp(
+                    handle, 0,
+                    """{"pins":[{"x":128,"y":128,"dx":30,"dy":0}],"radius":64}"""
+                )
+            )
+            val moved = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, moved, w, h)
+            assertTrue(
+                "1 pin must move pixels",
+                moved.indices.count { moved[it] != before[it] } > 0
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, undone, w, h)
+            assertTrue(undone.contentEquals(before))
+            // 65 pins refuse; bad index refuses.
+            val many = (1..65).joinToString(",") { """{"x":10,"y":10,"dx":1,"dy":0}""" }
+            assertFalse(EngineHost.nPuppetWarp(handle, 0, """{"pins":[$many]}"""))
+            assertFalse(EngineHost.nPuppetWarp(handle, 5, """{"pins":[]}"""))
+            val intact = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, intact, w, h)
+            assertTrue(intact.contentEquals(before))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T4 §4 : décor primitif + peinture + commit + undo (pipeline JNI).
+    @Test
+    fun t4RefScenePrimitivePaintCommitUndo() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        try {
+            val blank = IntArray(w * h)
+            assertEquals(w * h, EngineHost.nCompositeInto(handle, blank, w, h))
+            // Primitive cube renders edges over the composite.
+            assertTrue(
+                EngineHost.nSetRefScene(
+                    handle,
+                    """{"items":[{"src":"prim:cube","pos":[0,0,0],"rot":[0,0,0],"scale":1,"visible":1}]}"""
+                )
+            )
+            val wired = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, wired, w, h)
+            assertTrue(
+                "cube wireframe must show",
+                wired.indices.count { wired[it] != blank[it] } > 50
+            )
+            // Hidden item renders nothing; 9 items refuse.
+            assertTrue(
+                EngineHost.nSetRefScene(
+                    handle,
+                    """{"items":[{"src":"prim:cube","pos":[0,0,0],"rot":[0,0,0],"scale":1,"visible":0}]}"""
+                )
+            )
+            val hidden = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, hidden, w, h)
+            assertTrue(hidden.contentEquals(blank))
+            val nine = (1..9).joinToString(",") {
+                """{"src":"prim:cube","pos":[0,0,0],"rot":[0,0,0],"scale":1,"visible":1}"""
+            }
+            assertFalse(EngineHost.nSetRefScene(handle, """{"items":[$nine]}"""))
+            assertFalse(EngineHost.nPaintRefMap(handle, 3, """[{"x":1,"y":1}]"""))
+            // Paint the cube texture (dab at the canvas center, where the
+            // cube projects) with edges off + flat opaque: the tinted
+            // overlay alone must differ from the blank canvas.
+            assertTrue(
+                EngineHost.nSetRefScene(
+                    handle,
+                    """{"items":[{"src":"prim:cube","pos":[0,0,0],"rot":[0,20,0],"scale":1,"visible":1,"wire":0,"flat":1}]}"""
+                )
+            )
+            assertTrue(
+                EngineHost.nPaintRefMap(
+                    handle, 0,
+                    """[{"x":128,"y":128,"r":10,"color":"#FF0000","opacity":1}]"""
+                )
+            )
+            val painted = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, painted, w, h)
+            val reds = painted.count { (it shr 16) and 0xFF > 150 && (it shr 24) and 0xFF != 0 }
+            assertTrue("painted texture must tint the overlay, reds=$reds", reds > 20)
+            // Commit: bake the overlay into the layer, clear the scene,
+            // the red stays; undo restores the blank canvas.
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            bmp.setPixels(painted, 0, w, 0, 0, w, h)
+            val png = File.createTempFile("t4-commit-", ".png", dir)
+            try {
+                java.io.FileOutputStream(png).use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                assertTrue(EngineHost.nBlitPngIntoLayer(handle, 0, png.absolutePath))
+            } finally {
+                png.delete()
+            }
+            bmp.recycle()
+            assertTrue(EngineHost.nSetRefScene(handle, """{"items":[]}"""))
+            val baked = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, baked, w, h)
+            val bakedReds = baked.count { (it shr 16) and 0xFF > 150 }
+            assertTrue("commit must bake the texture, reds=$bakedReds", bakedReds > 20)
+            assertTrue(EngineHost.nUndo(handle))
+            val undone = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, undone, w, h)
+            assertTrue(undone.contentEquals(blank))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T4 §5 : classifieur pur — carré tordu = rect ≥ 0.7, gribouillis
+    // rejeté, cercle ±10 %, 2048 pts < 300 ms.
+    @Test
+    fun t4SmartShapeSquareIsRect() {
+        val pts = mutableListOf<Pair<Float, Float>>()
+        // Wobbly closed square, 100x100.
+        val corners = listOf(
+            Pair(0f, 0f), Pair(100f, 0f), Pair(100f, 100f), Pair(0f, 100f)
+        )
+        for (e in 0 until 4) {
+            val a = corners[e]
+            val b = corners[(e + 1) % 4]
+            for (i in 0..24) {
+                val t = i / 24f
+                val wob = if (i % 2 == 0) 1.5f else -1.5f
+                pts.add(
+                    Pair(
+                        a.first + (b.first - a.first) * t + wob,
+                        a.second + (b.second - a.second) * t - wob
+                    )
+                )
+            }
+        }
+        val fit = SmartShape.classify(pts)
+        assertNotNull("wobbly square must classify", fit)
+        assertEquals("rect", fit!!.kind)
+        assertTrue("confidence must reach 0.7, got ${fit.confidence}", fit.confidence >= 0.7f)
+    }
+
+    @Test
+    fun t4SmartShapeScribbleRejectedAndCircleAxes() {
+        // Scribble: back-and-forth, never shape-like.
+        val scribble = mutableListOf<Pair<Float, Float>>()
+        for (i in 0..120) {
+            scribble.add(
+                Pair(
+                    (i * 7 % 90).toFloat(),
+                    (if (i % 2 == 0) i * 3 % 40 else 90 - i * 3 % 40).toFloat()
+                )
+            )
+        }
+        assertNull("scribble must be rejected", SmartShape.classify(scribble))
+        // Circle radius 50 (closed, small radial noise).
+        val circle = (0..96).map { i ->
+            val a = i * 2f * Math.PI.toFloat() / 96f
+            val r = 50f + if (i % 2 == 0) 1f else -1f
+            Pair(128f + r * Math.cos(a.toDouble()).toFloat(), 128f + r * Math.sin(a.toDouble()).toFloat())
+        }
+        val fit = SmartShape.classify(circle)
+        assertNotNull("circle must classify", fit)
+        assertEquals("circle", fit!!.kind)
+        val (c, ax, ay) = fit.geom
+        val rx = Math.hypot((ax.first - c.first).toDouble(), (ax.second - c.second).toDouble())
+        val ry = Math.hypot((ay.first - c.first).toDouble(), (ay.second - c.second).toDouble())
+        assertTrue("axis X within 10%%: $rx", Math.abs(rx - 50.0) / 50.0 <= 0.10)
+        assertTrue("axis Y within 10%%: $ry", Math.abs(ry - 50.0) / 50.0 <= 0.10)
+    }
+
+    @Test
+    fun t4SmartShape2048ptsUnder300ms() {
+        val pts = (0..2047).map { i ->
+            Pair((i * 13 % 200).toFloat(), (i * 29 % 200).toFloat())
+        }
+        val t0 = SystemClock.uptimeMillis()
+        SmartShape.classify(pts)
+        val dt = SystemClock.uptimeMillis() - t0
+        assertTrue("2048 pts must classify under 300 ms, took $dt", dt < 300)
+    }
+
+    // T4 §5 : fantôme affiché, valider = 1 undo, continuer = trait intact.
+    @Test
+    fun t4SmartShapeGhostValidateAndKeep() {
+        // Validate path: armed capture of a square → ghost → confirm
+        // stamps a rect in ONE undo; undo restores the blank canvas
+        // (the stroke never inked before validation).
+        var id = openFreshDoc("t4-smart-ok")
+        var es = freshSurface(id)
+        try {
+            es.smartShapeArmed = true
+            val before = pullFull(es)
+            val beforePx = intPixels(before)
+            before.recycle()
+            drawSquareStroke(es)
+            assertTrue("ghost must appear", awaitGhost(es, 5000))
+            var ok = false
+            composeRule.activityRule.scenario.onActivity { ok = es.confirmSmartShape() }
+            Thread.sleep(600)
+            assertTrue("confirm must commit", ok)
+            var after = pullFull(es)
+            try {
+                assertTrue(
+                    "rect stamp must paint",
+                    intPixels(after).contentEquals(beforePx).not()
+                )
+            } finally {
+                after.recycle()
+            }
+            assertTrue("validate is one undo", es.undo())
+            after = pullFull(es)
+            try {
+                assertTrue(intPixels(after).contentEquals(beforePx))
+            } finally {
+                after.recycle()
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+        // Keep path: same square, dismissed → the original stroke is
+        // replayed pixel-identical to a direct (unarmed) stroke.
+        id = openFreshDoc("t4-smart-keep")
+        es = freshSurface(id)
+        try {
+            es.smartShapeArmed = true
+            drawSquareStroke(es)
+            assertTrue("ghost must appear", awaitGhost(es, 5000))
+            composeRule.activityRule.scenario.onActivity { es.dismissSmartShape() }
+            Thread.sleep(600)
+            val kept = pullFull(es)
+            val keptPx = intPixels(kept)
+            kept.recycle()
+            assertTrue("kept stroke must paint", keptPx.any { it != -1 })
+        } finally {
+            closeFreshDoc(id)
+        }
+        id = openFreshDoc("t4-smart-ref")
+        val ref = freshSurface(id)
+        try {
+            drawSquareStroke(ref)
+            val refBmp = pullFull(ref)
+            val refPx = intPixels(refBmp)
+            refBmp.recycle()
+            // Re-draw kept pixels on a second doc for the exactness check.
+            val id2 = openFreshDoc("t4-smart-keep2")
+            val es2 = freshSurface(id2)
+            try {
+                es2.smartShapeArmed = true
+                drawSquareStroke(es2)
+                assertTrue(awaitGhost(es2, 5000))
+                composeRule.activityRule.scenario.onActivity { es2.dismissSmartShape() }
+                Thread.sleep(600)
+                val kept2 = pullFull(es2)
+                try {
+                    assertTrue(
+                        "dismissed stroke must equal a direct stroke",
+                        intPixels(kept2).contentEquals(refPx)
+                    )
+                } finally {
+                    kept2.recycle()
+                }
+            } finally {
+                closeFreshDoc(id2)
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    private fun drawSquareStroke(es: EngineSurface) {
+        val cx = es.width * 0.5f
+        val cy = es.height * 0.5f
+        val r = 60f
+        val corners = listOf(
+            Pair(cx - r, cy - r), Pair(cx + r, cy - r),
+            Pair(cx + r, cy + r), Pair(cx - r, cy + r),
+            Pair(cx - r, cy - r)
+        )
+        composeRule.activityRule.scenario.onActivity {
+            val t0 = SystemClock.uptimeMillis()
+            var t = t0
+            var prev = corners[0]
+            es.dispatchTouchEvent(
+                MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, prev.first, prev.second, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+            for (c in corners.drop(1)) {
+                for (i in 1..6) {
+                    t += 8
+                    val x = prev.first + (c.first - prev.first) * i / 6f
+                    val y = prev.second + (c.second - prev.second) * i / 6f
+                    es.dispatchTouchEvent(
+                        MotionEvent.obtain(t0, t, MotionEvent.ACTION_MOVE, x, y, 1f, 1f, 0, 1f, 1f, 0, 0)
+                    )
+                }
+                prev = c
+            }
+            es.dispatchTouchEvent(
+                MotionEvent.obtain(t0, t + 8, MotionEvent.ACTION_UP, prev.first, prev.second, 1f, 1f, 0, 1f, 1f, 0, 0)
+            )
+        }
+        Thread.sleep(900)
+    }
+
+    private fun awaitGhost(es: EngineSurface, timeoutMs: Long): Boolean {
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            if (es.smartGhostPoly.size >= 2) return true
+            Thread.sleep(150)
+        }
+        return false
+    }
 }
 

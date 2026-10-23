@@ -555,4 +555,37 @@
     <string name="export_hold_expand">Éclater les tenues</string>
     <string name="export_no_audio">Pas d\'audio joint.</string>
     <string name="export_no_keys">Rien à exporter.</string>
+    <string name="filter_glow">Lueur</string>
+    <string name="filter_drop_shadow">Ombre portée</string>
+    <string name="filter_crystallize">Cristallisation</string>
+    <string name="filter_normal_map">Carte de normales</string>
+    <string name="filter_retro">Rétro</string>
+    <string name="filter_pencil">Crayon</string>
+    <string name="filter_perlin_clouds">Nuage Perlin</string>
+    <string name="filter_lens_blur">Flou d’objectif</string>
+    <string name="filter_fisheye">Fisheye (filtre)</string>
+    <string name="filter_panorama">Panorama</string>
+    <string name="warp_title">Déformation</string>
+    <string name="warp_persp">Perspective</string>
+    <string name="warp_skew">Inclinaison</string>
+    <string name="warp_bulge">Distorsion</string>
+    <string name="warp_puppet">Marionnette</string>
+    <string name="warp_validate">Valider</string>
+    <string name="warp_cancel">Annuler</string>
+    <string name="warp_pin_add">Toucher = ajouter, appui long = supprimer</string>
+    <string name="warp_no_selection">Pas de sélection — dessinez-en une</string>
+    <string name="smart_shape_title">Forme intelligente</string>
+    <string name="smart_shape_toggle">Forme intelligente</string>
+    <string name="smart_shape_tolerance">Tolérance</string>
+    <string name="smart_shape_confirm">Valider</string>
+    <string name="smart_shape_auto">Remplacement auto</string>
+    <string name="smart_shape_kept">Tracé gardé (confiance basse)</string>
+    <string name="ref_scene_add">Ajouter au décor</string>
+    <string name="ref_scene_remove">Retirer</string>
+    <string name="ref_scene_empty">Décor vide — ajoutez un .glb ou une primitive</string>
+    <string name="ref_item_pose">Pose</string>
+    <string name="ref_paint">Peinture</string>
+    <string name="ref_commit_layer">Reporter sur calque</string>
+    <string name="ref_no_uv_planar">Sans UV : projection planaire (figée au trait)</string>
+    <string name="selection_flattened_note">Aplati dans la trame (historique réinitialisé)</string>
 </resources>

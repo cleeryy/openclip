@@ -21,6 +21,8 @@ SRCS = src/raster/surface.cpp \
        src/filters/filters.cpp \
        src/raster/vector.cpp \
        src/raster/transform.cpp \
+       src/raster/warp.cpp \
+       src/raster/puppet.cpp \
        src/paint/fill.cpp \
        src/paint/gradient.cpp \
        src/paint/shapes.cpp \
@@ -47,6 +49,7 @@ TEST_SRCS = tests/main.cpp \
             tests/test_erase.cpp \
             tests/test_cels.cpp \
             tests/test_transform.cpp \
+            tests/test_warp.cpp \
             tests/test_fill.cpp \
             tests/test_gradient.cpp \
             tests/test_shapes.cpp \

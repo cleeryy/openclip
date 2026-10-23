@@ -4,8 +4,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <set>
 #include <string>
+#include <utility>
 
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
@@ -113,6 +115,133 @@ void eulerMat(float xDeg, float yDeg, float zDeg, Mat4& out) {
 }
 
 void rotatePoint(const RefView& v, double x, double y, double z, double& ox,
+              double& oy, double& oz);
+
+// T4 shared projection core (M9 path unchanged, scene reuses it):
+// posed world matrices, view projection params, per-vert project.
+void computeWorlds(const RefModel& m, std::vector<Mat4>& worlds) {
+    const std::size_t nn = m.nodeLocal.size();
+    worlds.assign(nn, Mat4());
+    std::vector<char> done(nn, 0);
+    for (std::size_t ni = 0; ni < nn; ++ni) {
+        // Preorder walk ids: parents resolve before children, so a
+        // single forward pass composes every parent.
+        Mat4 local;
+        for (int k = 0; k < 16; ++k) local.m[k] = m.nodeLocal[ni][k];
+        const std::string& nm =
+            ni < m.nodeNames.size() ? m.nodeNames[ni] : std::string();
+        const auto pit = nm.empty() ? m.pose.end() : m.pose.find(nm);
+        if (pit != m.pose.end()) {
+            Mat4 e, tinv, t1, t2;
+            eulerMat(pit->second[0], pit->second[1], pit->second[2], e);
+            const double tx = (ni * 3 + 2 < m.nodePos.size())
+                                  ? m.nodePos[ni * 3]
+                                  : 0;
+            const double ty = (ni * 3 + 2 < m.nodePos.size())
+                                  ? m.nodePos[ni * 3 + 1]
+                                  : 0;
+            const double tz = (ni * 3 + 2 < m.nodePos.size())
+                                  ? m.nodePos[ni * 3 + 2]
+                                  : 0;
+            tinv.m[3] = -tx;
+            tinv.m[7] = -ty;
+            tinv.m[11] = -tz;
+            mulMat(tinv, local, t1);
+            mulMat(e, t1, t2);
+            Mat4 t;
+            t.m[3] = tx;
+            t.m[7] = ty;
+            t.m[11] = tz;
+            mulMat(t, t2, local);
+        }
+        const int p = (ni < m.nodeParents.size()) ? m.nodeParents[ni] : -1;
+        if (p >= 0 && static_cast<std::size_t>(p) < nn && done[p]) {
+            Mat4 c;
+            mulMat(worlds[p], local, c);
+            worlds[ni] = c;
+        } else {
+            worlds[ni] = local;
+        }
+        done[ni] = 1;
+    }
+}
+
+struct Proj {
+    const RefView* v = nullptr;
+    double f = 1.0, k = 0.0, cx = 0.0, cy = 0.0;
+};
+
+Proj makeProj(const RefView& v, int w, int h) {
+    Proj p;
+    p.v = &v;
+    p.f = (h / 2.0) / std::tan(v.fov * kPi / 360.0);
+    p.k = v.fisheye * 0.001;
+    p.cx = w / 2.0 + v.offX;
+    p.cy = h / 2.0 + v.offY;
+    return p;
+}
+
+// Project vert `vi` through (posed world, then optional item matrix)
+// into screen px. Returns false when behind the camera. `depth` (when
+// non-null) receives the view-space distance (for paint picking).
+bool projectVert(const RefModel& m, const std::vector<Mat4>& worlds,
+                 const Mat4* item, std::size_t vi, const Proj& pr,
+                 double& px, double& py, double* depth) {
+    const std::size_t nn = worlds.size();
+    const std::uint32_t nid =
+        (vi < m.vertNode.size()) ? m.vertNode[vi] : 0xFFFFFFFFu;
+    double wx = m.verts[vi * 3], wy = m.verts[vi * 3 + 1],
+           wz = m.verts[vi * 3 + 2];
+    if (nid < nn && nid < m.nodeLocal.size()) {
+        double ox, oy, oz;
+        applyMat(worlds[nid], wx, wy, wz, ox, oy, oz);
+        wx = ox;
+        wy = oy;
+        wz = oz;
+    }
+    if (item) {
+        double ox, oy, oz;
+        applyMat(*item, wx, wy, wz, ox, oy, oz);
+        wx = ox;
+        wy = oy;
+        wz = oz;
+    }
+    double rx, ry, rz;
+    rotatePoint(*pr.v, wx, wy, wz, rx, ry, rz);
+    const double z = rz - pr.v->dist;
+    if (z > -1e-6) return false;
+    if (depth) *depth = -z;
+    double x = rx * pr.f / -z;
+    double y = -ry * pr.f / -z;
+    const double r = std::sqrt(x * x + y * y);
+    if (pr.k > 0 && r > 1e-6) {
+        const double rp = r * (1.0 + pr.k * r * r);
+        x *= rp / r;
+        y *= rp / r;
+    }
+    px = x + pr.cx;
+    py = y + pr.cy;
+    return true;
+}
+
+// Item transform: T(pos) * E(rot XYZ) * S(scale).
+Mat4 itemMatrix(const RefSceneItem& it) {
+    Mat4 t, r, s, rs, out;
+    t.m[3] = it.pos[0];
+    t.m[7] = it.pos[1];
+    t.m[11] = it.pos[2];
+    eulerMat(static_cast<float>(it.rot[0]), static_cast<float>(it.rot[1]),
+             static_cast<float>(it.rot[2]), r);
+    const double sc = (it.scale > 0) ? it.scale : 1.0;
+    s.m[0] = sc;
+    s.m[5] = sc;
+    s.m[10] = sc;
+    mulMat(r, s, rs);
+    mulMat(t, rs, out);
+    return out;
+}
+
+void rotatePoint(const RefView& v, double x, double y, double z, double& ox,
                  double& oy, double& oz) {
     const double yr = v.yaw * kPi / 180.0;
     const double pr = v.pitch * kPi / 180.0;
@@ -134,6 +263,8 @@ bool loadRefModel(const std::string& path, RefModel& out,
                   std::string& err) {
     out.verts.clear();
     out.edges.clear();
+    out.tris.clear();
+    out.uvs.clear();
     cgltf_options options = {};
     std::memset(&options, 0, sizeof options);
     cgltf_data* data = nullptr;
@@ -156,6 +287,9 @@ bool loadRefModel(const std::string& path, RefModel& out,
         std::vector<std::pair<std::uint32_t, std::uint32_t>> tris;
         std::vector<float> verts;
         std::vector<std::uint32_t> vertNode;
+        // T4: faces (vert triples) + per-vert UV (NaN when absent).
+        std::vector<std::array<std::uint32_t, 3>> faces;
+        std::vector<float> uvs;
         // V+3: full node-tree walk (roots = scene nodes, then children).
         // Node ids are walk order; unnamed nodes still own geometry but
         // never appear in the joints table.
@@ -231,12 +365,33 @@ bool loadRefModel(const std::string& path, RefModel& out,
                 const cgltf_primitive& prim = node->mesh->primitives[pi];
                 const cgltf_accessor* pos = nullptr;
                 const cgltf_accessor* idx = prim.indices;
-                for (std::size_t ai = 0; ai < prim.attributes_count; ++ai)
+                // T4: TEXCOORD_0 feeds per-vert UV (planar fallback
+                // when absent — primitives never carry UV).
+                const cgltf_accessor* tex = nullptr;
+                for (std::size_t ai = 0; ai < prim.attributes_count; ++ai) {
                     if (prim.attributes[ai].type == cgltf_attribute_type_position)
                         pos = prim.attributes[ai].data;
+                    if (prim.attributes[ai].type == cgltf_attribute_type_texcoord)
+                        tex = prim.attributes[ai].data;
+                }
                 if (!pos || pos->component_type != cgltf_component_type_r_32f ||
                     pos->type != cgltf_type_vec3 || pos->is_sparse)
                     continue;
+                const bool texOk =
+                    tex && tex->component_type == cgltf_component_type_r_32f &&
+                    tex->type == cgltf_type_vec2 && !tex->is_sparse &&
+                    tex->buffer_view && tex->buffer_view->buffer &&
+                    tex->buffer_view->buffer->data &&
+                    tex->count == pos->count;
+                const std::uint8_t* tbase = nullptr;
+                std::size_t tstride = sizeof(float) * 2;
+                if (texOk) {
+                    tbase = static_cast<const std::uint8_t*>(
+                                tex->buffer_view->buffer->data) +
+                            tex->offset + tex->buffer_view->offset;
+                    tstride = tex->buffer_view->stride ? tex->buffer_view->stride
+                                                      : sizeof(float) * 2;
+                }
                 const std::uint8_t* base = static_cast<const std::uint8_t*>(
                     pos->buffer_view->buffer->data) +
                     pos->offset + pos->buffer_view->offset;
@@ -256,7 +411,24 @@ bool loadRefModel(const std::string& path, RefModel& out,
                     verts.push_back(ly);
                     verts.push_back(lz);
                     vertNode.push_back(nid);
+                    if (texOk) {
+                        float tu, tv;
+                        std::memcpy(&tu, tbase + i * tstride, sizeof(float));
+                        std::memcpy(&tv, tbase + i * tstride + 4,
+                                    sizeof(float));
+                        uvs.push_back(tu);
+                        uvs.push_back(tv);
+                    } else {
+                        const float nan = std::nanf("");
+                        uvs.push_back(nan);
+                        uvs.push_back(nan);
+                    }
                 }
+                // T4 faces alongside the edge pairs below.
+                auto pushFace = [&](std::uint32_t a, std::uint32_t b,
+                                    std::uint32_t c) {
+                    faces.push_back({a, b, c});
+                };
                 // Indices: unsigned short or unsigned int only.
                 if (idx && idx->count >= 3 &&
                     (idx->component_type == cgltf_component_type_r_16u ||
@@ -281,6 +453,7 @@ bool loadRefModel(const std::string& path, RefModel& out,
                         tris.emplace_back(first + a, first + b);
                         tris.emplace_back(first + b, first + c);
                         tris.emplace_back(first + c, first + a);
+                        pushFace(first + a, first + b, first + c);
                     }
                 } else {
                     // Non-indexed: consecutive triples.
@@ -291,6 +464,9 @@ bool loadRefModel(const std::string& path, RefModel& out,
                                           first + static_cast<std::uint32_t>(i + 2));
                         tris.emplace_back(first + static_cast<std::uint32_t>(i + 2),
                                           first + static_cast<std::uint32_t>(i));
+                        pushFace(first + static_cast<std::uint32_t>(i),
+                                 first + static_cast<std::uint32_t>(i + 1),
+                                 first + static_cast<std::uint32_t>(i + 2));
                     }
                 }
             }
@@ -305,6 +481,8 @@ bool loadRefModel(const std::string& path, RefModel& out,
         for (const auto& e : unique) out.edges.push_back(e);
         out.verts.swap(verts);
         out.vertNode.swap(vertNode);
+        out.tris.swap(faces);
+        out.uvs.swap(uvs);
         out.pose.clear();
         ok = !out.verts.empty();
     }
@@ -352,82 +530,10 @@ void renderRefEdges(const RefModel& m, const RefView& v, int w, int h,
     // Rotation happens about the node's rest translation (the joint).
     const std::size_t nn = m.nodeLocal.size();
     std::vector<Mat4> worlds(nn);
-    std::vector<char> done(nn, 0);
-    for (std::size_t ni = 0; ni < nn; ++ni) {
-        // Iterative: parents always have smaller... no — walk order is
-        // DFS, parents come FIRST (parent pushed before children pop?
-        // children are pushed after, so parents have smaller ids). The
-        // walk above assigns parent ids before children (preorder), so
-        // a single forward pass resolves every parent.
-        Mat4 local;
-        for (int k = 0; k < 16; ++k) local.m[k] = m.nodeLocal[ni][k];
-        const std::string& nm =
-            ni < m.nodeNames.size() ? m.nodeNames[ni] : std::string();
-        const auto pit = nm.empty() ? m.pose.end() : m.pose.find(nm);
-        if (pit != m.pose.end()) {
-            Mat4 e, tinv, t1, t2;
-            eulerMat(pit->second[0], pit->second[1], pit->second[2], e);
-            const double tx = (ni * 3 + 2 < m.nodePos.size())
-                                  ? m.nodePos[ni * 3]
-                                  : 0;
-            const double ty = (ni * 3 + 2 < m.nodePos.size())
-                                  ? m.nodePos[ni * 3 + 1]
-                                  : 0;
-            const double tz = (ni * 3 + 2 < m.nodePos.size())
-                                  ? m.nodePos[ni * 3 + 2]
-                                  : 0;
-            tinv.m[3] = -tx;
-            tinv.m[7] = -ty;
-            tinv.m[11] = -tz;
-            mulMat(tinv, local, t1);
-            mulMat(e, t1, t2);
-            Mat4 t;
-            t.m[3] = tx;
-            t.m[7] = ty;
-            t.m[11] = tz;
-            mulMat(t, t2, local);
-        }
-        const int p = (ni < m.nodeParents.size()) ? m.nodeParents[ni] : -1;
-        if (p >= 0 && static_cast<std::size_t>(p) < nn && done[p]) {
-            Mat4 c;
-            mulMat(worlds[p], local, c);
-            worlds[ni] = c;
-        } else {
-            worlds[ni] = local;
-        }
-        done[ni] = 1;
-    }
-    const double f = (h / 2.0) / std::tan(v.fov * kPi / 360.0);
-    const double k = v.fisheye * 0.001;
-    const double cx = w / 2.0 + v.offX;
-    const double cy = h / 2.0 + v.offY;
+    computeWorlds(m, worlds);
+    Proj pr = makeProj(v, w, h);
     auto project = [&](std::size_t vi, double& px, double& py) {
-        std::uint32_t nid = (vi < m.vertNode.size()) ? m.vertNode[vi]
-                                                     : 0xFFFFFFFFu;
-        double wx = m.verts[vi * 3], wy = m.verts[vi * 3 + 1],
-               wz = m.verts[vi * 3 + 2];
-        if (nid < nn && done[nid]) {
-            double ox, oy, oz;
-            applyMat(worlds[nid], wx, wy, wz, ox, oy, oz);
-            wx = ox;
-            wy = oy;
-            wz = oz;
-        }
-        double rx, ry, rz;
-        rotatePoint(v, wx, wy, wz, rx, ry, rz);
-        const double z = rz - v.dist;
-        if (z > -1e-6) return false;
-        double x = rx * f / -z;
-        double y = -ry * f / -z;
-        const double r = std::sqrt(x * x + y * y);
-        if (k > 0 && r > 1e-6) {
-            const double rp = r * (1.0 + k * r * r);
-            x *= rp / r;
-            y *= rp / r;
-        }
-        px = x + cx;
-        py = y + cy;
-        return true;
+        return projectVert(m, worlds, nullptr, vi, pr, px, py, nullptr);
     };
     for (const auto& e : m.edges) {
         double ax, ay, bx, by;
@@ -540,6 +646,434 @@ bool applyRefPoseJson(RefModel& m, const std::string& json) {
         }
     }
     return true;
+}
+
+// ---- T4 decor scene (ARCHITECTURE.md "T4 additions" §4) ----
+
+namespace {
+
+// Single-identity-node shell for a procedural primitive.
+void primShell(RefSceneItem& item, std::vector<float>& verts,
+               const std::vector<std::array<std::uint32_t, 3>>& faces) {
+    item.model.verts.swap(verts);
+    item.model.tris = faces;
+    std::set<std::pair<std::uint32_t, std::uint32_t>> unique;
+    for (const auto& f : faces) {
+        const std::uint32_t v[3] = {f[0], f[1], f[2]};
+        for (int k = 0; k < 3; ++k) {
+            const std::uint32_t a = v[k], b = v[(k + 1) % 3];
+            if (a != b)
+                unique.insert({std::min(a, b), std::max(a, b)});
+        }
+    }
+    item.model.edges.clear();
+    for (const auto& e : unique) item.model.edges.push_back(e);
+    item.model.vertNode.assign(item.model.verts.size() / 3, 0);
+    const float nan = std::nanf("");
+    item.model.uvs.assign(item.model.verts.size() / 3 * 2, nan);
+    item.model.nodeNames = {""};
+    item.model.nodeParents = {-1};
+    std::array<double, 16> ident = {1, 0, 0, 0,  0, 1, 0, 0,
+                                    0, 0, 1, 0,  0, 0, 0, 1};
+    item.model.nodeLocal = {ident};
+    item.model.nodePos = {0, 0, 0};
+    item.model.joints.clear();
+    item.model.pose.clear();
+    item.hasUV = false;
+    item.loaded = true;
+}
+
+}  // namespace
+
+bool buildPrimitive(const std::string& kind, RefSceneItem& item,
+                    std::string& err) {
+    item = RefSceneItem();
+    item.src = "prim:" + kind;
+    std::vector<float> verts;
+    std::vector<std::array<std::uint32_t, 3>> faces;
+    if (kind == "cube") {
+        const float v[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1},
+                               {-1, 1, -1},  {-1, -1, 1}, {1, -1, 1},
+                               {1, 1, 1},    {-1, 1, 1}};
+        for (auto& p : v) {
+            verts.push_back(p[0]);
+            verts.push_back(p[1]);
+            verts.push_back(p[2]);
+        }
+        const std::uint32_t f[12][3] = {
+            {0, 1, 2}, {0, 2, 3},  // -z
+            {4, 6, 5}, {4, 7, 6},  // +z
+            {0, 4, 5}, {0, 5, 1},  // -y
+            {3, 2, 6}, {3, 6, 7},  // +y
+            {0, 3, 7}, {0, 7, 4},  // -x
+            {1, 5, 6}, {1, 6, 2}   // +x
+        };
+        for (auto& t : f) faces.push_back({t[0], t[1], t[2]});
+    } else if (kind == "plane") {
+        const float v[4][3] = {{-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}};
+        for (auto& p : v) {
+            verts.push_back(p[0]);
+            verts.push_back(p[1]);
+            verts.push_back(p[2]);
+        }
+        faces.push_back({0, 1, 2});
+        faces.push_back({0, 2, 3});
+    } else if (kind == "sphere" || kind == "cylinder") {
+        const int segs = 12;
+        if (kind == "sphere") {
+            const int rings = 6;
+            for (int r = 0; r <= rings; ++r) {
+                const double th = 3.141592653589793 * r / rings;
+                for (int s = 0; s <= segs; ++s) {
+                    const double ph = 2 * 3.141592653589793 * s / segs;
+                    verts.push_back(
+                        static_cast<float>(std::sin(th) * std::cos(ph)));
+                    verts.push_back(
+                        static_cast<float>(std::cos(th)));
+                    verts.push_back(
+                        static_cast<float>(std::sin(th) * std::sin(ph)));
+                }
+            }
+            for (int r = 0; r < rings; ++r)
+                for (int s = 0; s < segs; ++s) {
+                    const std::uint32_t a = r * (segs + 1) + s;
+                    const std::uint32_t b = a + 1;
+                    const std::uint32_t c = a + segs + 1;
+                    const std::uint32_t d = c + 1;
+                    faces.push_back({a, c, b});
+                    faces.push_back({b, c, d});
+                }
+        } else {
+            for (int s = 0; s <= segs; ++s) {
+                const double ph = 2 * 3.141592653589793 * s / segs;
+                const float cx = static_cast<float>(std::cos(ph));
+                const float sz = static_cast<float>(std::sin(ph));
+                verts.push_back(cx);
+                verts.push_back(-1);
+                verts.push_back(sz);
+                verts.push_back(cx);
+                verts.push_back(1);
+                verts.push_back(sz);
+            }
+            const std::uint32_t top = static_cast<std::uint32_t>(
+                verts.size() / 3);
+            verts.push_back(0);
+            verts.push_back(1);
+            verts.push_back(0);
+            const std::uint32_t bot = static_cast<std::uint32_t>(
+                verts.size() / 3);
+            verts.push_back(0);
+            verts.push_back(-1);
+            verts.push_back(0);
+            for (int s = 0; s < segs; ++s) {
+                const std::uint32_t b0 = s * 2, t0 = s * 2 + 1;
+                const std::uint32_t b1 = s * 2 + 2, t1 = s * 2 + 3;
+                faces.push_back({b0, b1, t1});
+                faces.push_back({b0, t1, t0});
+                faces.push_back({top, t0, t1});
+                faces.push_back({bot, b1, b0});
+            }
+        }
+    } else {
+        err = "unknown primitive '" + kind + "'";
+        return false;
+    }
+    primShell(item, verts, faces);
+    return true;
+}
+
+namespace {
+
+// Projected triangle cache for one paint/render pass.
+struct ProjTri {
+    double x[3], y[3], d[3];  // screen px + view depth
+    std::size_t face = 0;     // index into RefModel::tris
+    bool ok = false;
+};
+
+void projectItemTris(const RefSceneItem& item, const Proj& pr,
+                     std::vector<ProjTri>& out, double& minx, double& miny,
+                     double& maxx, double& maxy) {
+    out.clear();
+    minx = miny = 1e30;
+    maxx = maxy = -1e30;
+    if (!item.loaded) return;
+    const RefModel& m = item.model;
+    std::vector<Mat4> worlds;
+    computeWorlds(m, worlds);
+    const Mat4 im = itemMatrix(item);
+    for (std::size_t fi = 0; fi < m.tris.size(); ++fi) {
+        const auto& f = m.tris[fi];
+        ProjTri t;
+        t.ok = true;
+        t.face = fi;
+        for (int k = 0; k < 3; ++k) {
+            if (f[k] * 3 + 2 >= m.verts.size()) {
+                t.ok = false;
+                break;
+            }
+            double sx, sy, dep = 0;
+            if (!projectVert(m, worlds, &im, f[k], pr, sx, sy, &dep)) {
+                t.ok = false;
+                break;
+            }
+            t.x[k] = sx;
+            t.y[k] = sy;
+            t.d[k] = dep;
+        }
+        if (!t.ok) continue;
+        out.push_back(t);
+        for (int k = 0; k < 3; ++k) {
+            if (t.x[k] < minx) minx = t.x[k];
+            if (t.y[k] < miny) miny = t.y[k];
+            if (t.x[k] > maxx) maxx = t.x[k];
+            if (t.y[k] > maxy) maxy = t.y[k];
+        }
+    }
+}
+
+bool pointInTri(double px, double py, const ProjTri& t, double& w0,
+                double& w1, double& w2) {
+    const double d =
+        (t.y[1] - t.y[2]) * (t.x[0] - t.x[2]) + (t.x[2] - t.x[1]) * (t.y[0] - t.y[2]);
+    if (!(std::fabs(d) > 1e-12)) return false;
+    w0 = ((t.y[1] - t.y[2]) * (px - t.x[2]) +
+          (t.x[2] - t.x[1]) * (py - t.y[2])) / d;
+    w1 = ((t.y[2] - t.y[0]) * (px - t.x[2]) +
+          (t.x[0] - t.x[2]) * (py - t.y[2])) / d;
+    w2 = 1.0 - w0 - w1;
+    const double eps = -1e-6;
+    return w0 >= eps && w1 >= eps && w2 >= eps;
+}
+
+}  // namespace
+
+bool paintRefMap(RefScene& scene, const RefView& v, int w, int h,
+                 int item, const std::vector<RefDab>& dabs) {
+    if (w <= 0 || h <= 0) return false;
+    if (item < 0 || item >= static_cast<int>(scene.items.size()))
+        return false;
+    RefSceneItem& it = scene.items[static_cast<std::size_t>(item)];
+    if (!it.loaded) return false;
+    if (dabs.empty()) return true;
+    // Validate dabs first: malformed = false, texture untouched.
+    for (const auto& d : dabs) {
+        if (!(std::isfinite(d.x) && std::isfinite(d.y) &&
+              std::isfinite(d.r) && std::isfinite(d.opacity)))
+            return false;
+        if (d.r < 0 || d.r > 512 || d.opacity < 0 || d.opacity > 1)
+            return false;
+    }
+    // Project the posed mesh in the CURRENT view (projection frozen
+    // at stroke time, announced): dabs are engine-canvas coords, i.e.
+    // the live canvas frame (w,h) — the projection centre matches the
+    // composite path exactly.
+    const Proj pr = makeProj(v, w, h);
+    std::vector<ProjTri> tris;
+    double minx, miny, maxx, maxy;
+    projectItemTris(it, pr, tris, minx, miny, maxx, maxy);
+    if (tris.empty()) return true;  // nothing visible: all dabs miss
+    constexpr int kTex = 1024;
+    if (it.tex.empty()) it.tex.assign(kTex * kTex * 4, 0);
+    const double bw = maxx - minx, bh = maxy - miny;
+    const double texScale = 1024.0 / ((bw > bh ? bw : bh) > 1e-9
+                                         ? (bw > bh ? bw : bh)
+                                         : 1.0);
+    for (const auto& d : dabs) {
+        // Front-most containing triangle (nearest view depth wins).
+        const ProjTri* best = nullptr;
+        double bu = 0, bv = 0, bw2 = 0, bdep = 0;
+        bool have = false;
+        for (const auto& t : tris) {
+            double w0, w1, w2;
+            if (!pointInTri(d.x, d.y, t, w0, w1, w2)) continue;
+            const double dep = w0 * t.d[0] + w1 * t.d[1] + w2 * t.d[2];
+            if (!have || dep < bdep) {
+                have = true;
+                best = &t;
+                bu = w0;
+                bv = w1;
+                bw2 = w2;
+                bdep = dep;
+            }
+        }
+        if (!have || !best) continue;  // dab missed the mesh
+        // UV when carried, else planar over the projected screen bbox.
+        double u = 0, vv = 0;
+        if (it.hasUV) {
+            const auto& f = it.model.tris[best->face];
+            const double ws[3] = {bu, bv, bw2};
+            for (int k = 0; k < 3; ++k) {
+                const std::size_t vi = f[k];
+                if (vi * 2 + 1 < it.model.uvs.size()) {
+                    u += ws[k] * it.model.uvs[vi * 2];
+                    vv += ws[k] * it.model.uvs[vi * 2 + 1];
+                }
+            }
+        } else {
+            u = (bw > 1e-9) ? (d.x - minx) / bw : 0;
+            vv = (bh > 1e-9) ? (d.y - miny) / bh : 0;
+        }
+        if (u < 0) u = 0;
+        if (u > 1) u = 1;
+        if (vv < 0) vv = 0;
+        if (vv > 1) vv = 1;
+        const double tx = u * (kTex - 1), ty = vv * (kTex - 1);
+        double trad = d.r * texScale;
+        if (trad < 1.0) trad = 1.0;
+        const int x0 = static_cast<int>(std::floor(tx - trad));
+        const int x1 = static_cast<int>(std::ceil(tx + trad));
+        const int y0 = static_cast<int>(std::floor(ty - trad));
+        const int y1 = static_cast<int>(std::ceil(ty + trad));
+        for (int y = y0; y <= y1; ++y) {
+            if (y < 0 || y >= kTex) continue;
+            for (int x = x0; x <= x1; ++x) {
+                if (x < 0 || x >= kTex) continue;
+                const double dist =
+                    std::sqrt((x - tx) * (x - tx) + (y - ty) * (y - ty));
+                if (dist > trad) continue;
+                // Cosine dab falloff, source-over with dab opacity.
+                const double m =
+                    (std::cos(3.141592653589793 * dist / trad) + 1.0) * 0.5;
+                const double sa = m * d.opacity;
+                if (sa <= 0.0) continue;
+                std::uint8_t* p =
+                    &it.tex[(static_cast<std::size_t>(y) * kTex + x) * 4];
+                const double da = p[3] / 255.0;
+                const double oa = sa + da * (1.0 - sa);
+                for (int c = 0; c < 3; ++c)
+                    p[c] = static_cast<std::uint8_t>(
+                        d.color[c] * sa + p[c] * (1.0 - sa) + 0.5);
+                p[3] = static_cast<std::uint8_t>(oa * 255.0 + 0.5);
+            }
+        }
+    }
+    return true;
+}
+
+void renderRefScene(RefScene& scene, const RefView& v, int w, int h,
+                    std::vector<std::uint8_t>& rgba, int& drawnEdges) {
+    drawnEdges = 0;
+    if (w <= 0 || h <= 0 || rgba.size() != static_cast<std::size_t>(w) * h * 4)
+        return;
+    const Proj pr = makeProj(v, w, h);
+    constexpr int kTex = 1024;
+    for (auto& it : scene.items) {
+        if (!it.visible || !it.loaded) continue;
+        std::vector<ProjTri> tris;
+        double minx, miny, maxx, maxy;
+        projectItemTris(it, pr, tris, minx, miny, maxx, maxy);
+        // Texture fill UNDER the wireframe (aid only). flat:1 =
+        // opaque commit-preview, else 50% tint.
+        if (!it.tex.empty()) {
+            // Far-to-near painter order (mean depth, descending).
+            std::vector<std::size_t> order(tris.size());
+            for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::sort(order.begin(), order.end(), [&](std::size_t a,
+                                                      std::size_t b) {
+                return (tris[a].d[0] + tris[a].d[1] + tris[a].d[2]) >
+                       (tris[b].d[0] + tris[b].d[1] + tris[b].d[2]);
+            });
+            const double alpha = it.flat ? 1.0 : 0.5;
+            for (std::size_t oi = 0; oi < order.size(); ++oi) {
+                const ProjTri& t = tris[order[oi]];
+                int x0 = static_cast<int>(std::floor(
+                    std::min(t.x[0], std::min(t.x[1], t.x[2]))));
+                int x1 = static_cast<int>(std::ceil(
+                    std::max(t.x[0], std::max(t.x[1], t.x[2]))));
+                int y0 = static_cast<int>(std::floor(
+                    std::min(t.y[0], std::min(t.y[1], t.y[2]))));
+                int y1 = static_cast<int>(std::ceil(
+                    std::max(t.y[0], std::max(t.y[1], t.y[2]))));
+                if (x0 < 0) x0 = 0;
+                if (y0 < 0) y0 = 0;
+                if (x1 >= w) x1 = w - 1;
+                if (y1 >= h) y1 = h - 1;
+                for (int y = y0; y <= y1; ++y)
+                    for (int x = x0; x <= x1; ++x) {
+                        double w0, w1, w2;
+                        if (!pointInTri(x + 0.5, y + 0.5, t, w0, w1, w2))
+                            continue;
+                        // UV when the mesh carries it, else planar
+                        // over the item's projected screen bbox.
+                        double u = 0, vv = 0;
+                        if (it.hasUV) {
+                            const auto& f =
+                                it.model.tris[order[oi]];
+                            for (int k = 0; k < 3; ++k) {
+                                const double wk =
+                                    (k == 0) ? w0 : (k == 1 ? w1 : w2);
+                                const std::size_t vi = f[k];
+                                if (vi * 2 + 1 < it.model.uvs.size()) {
+                                    u += wk * it.model.uvs[vi * 2];
+                                    vv += wk * it.model.uvs[vi * 2 + 1];
+                                }
+                            }
+                        } else {
+                            const double bw = maxx - minx;
+                            const double bh = maxy - miny;
+                            u = (bw > 1e-9) ? (x + 0.5 - minx) / bw : 0;
+                            vv = (bh > 1e-9) ? (y + 0.5 - miny) / bh : 0;
+                        }
+                        if (u < 0) u = 0;
+                        if (u > 1) u = 1;
+                        if (vv < 0) vv = 0;
+                        if (vv > 1) vv = 1;
+                        const int texx = static_cast<int>(u * (kTex - 1));
+                        const int texy = static_cast<int>(vv * (kTex - 1));
+                        const std::uint8_t* tp =
+                            &it.tex[(static_cast<std::size_t>(texy) * kTex +
+                                     texx) * 4];
+                        if (tp[3] == 0) continue;
+                        const double sa = (tp[3] / 255.0) * alpha;
+                        std::uint8_t* d =
+                            &rgba[static_cast<std::size_t>(y) * w * 4 +
+                                  x * 4];
+                        const double da = d[3] / 255.0;
+                        const double oa = sa + da * (1.0 - sa);
+                        if (oa <= 0) continue;
+                        for (int c = 0; c < 3; ++c)
+                            d[c] = static_cast<std::uint8_t>(
+                                tp[c] * sa + d[c] * (1.0 - sa) + 0.5);
+                        d[3] = static_cast<std::uint8_t>(oa * 255.0 + 0.5);
+                    }
+            }
+        }
+        // Wireframe edges on top (M9 style), unless wire:0.
+        if (!it.wire) continue;
+        for (const auto& e : it.model.edges) {
+            double ax, ay, bx, by;
+            // Reuse the projected cache when possible: project raw.
+            std::vector<Mat4> worlds;
+            computeWorlds(it.model, worlds);
+            const Mat4 im = itemMatrix(it);
+            double dep = 0;
+            if (!projectVert(it.model, worlds, &im, e.first, pr, ax, ay,
+                             &dep) ||
+                !projectVert(it.model, worlds, &im, e.second, pr, bx, by,
+                             &dep))
+                continue;
+            const double dx = bx - ax, dy = by - ay;
+            const int steps =
+                static_cast<int>(std::max(std::fabs(dx), std::fabs(dy))) + 1;
+            bool any = false;
+            for (int i = 0; i <= steps; ++i) {
+                const double t = steps > 0 ? static_cast<double>(i) / steps
+                                           : 0;
+                const int px = static_cast<int>(ax + dx * t);
+                const int py = static_cast<int>(ay + dy * t);
+                if (px < 0 || px >= w || py < 0 || py >= h) continue;
+                std::uint8_t* d = &rgba[static_cast<std::size_t>(py) * w * 4 +
+                                        px * 4];
+                d[0] = static_cast<std::uint8_t>(48 + d[0] * 127 / 255);
+                d[1] = static_cast<std::uint8_t>(48 + d[1] * 127 / 255);
+                d[2] = static_cast<std::uint8_t>(48 + d[2] * 127 / 255);
+                d[3] = static_cast<std::uint8_t>(128 + d[3] * 127 / 255);
+                any = true;
+            }
+            if (any) ++drawnEdges;
+        }
+    }
 }
 
 }  // namespace openclip
