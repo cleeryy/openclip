@@ -15,6 +15,17 @@
 
 namespace openclip {
 
+// T3: per-layer animation sample aligned with a top-level layer list
+// (ARCHITECTURE.md "T3 additions" §1). on=false = paint normally;
+// groups ignore samples (documented).
+struct LayerAnimSample {
+    bool on = false;
+    float dx = 0.0f, dy = 0.0f;
+    float scale = 1.0f;
+    float angle = 0.0f;    // degrees, clockwise
+    float opacity = 1.0f;  // extra factor over the layer opacity
+};
+
 struct Layer {
     std::string name = "layer";
     float opacity = 1.0f;  // 0..1
@@ -148,6 +159,12 @@ public:
     // composite children into a temp surface first, then blend the temp
     // with the group's blend mode and opacity.
     void composite(Surface& out) const;
+    // T3: same walk with per-top-level-layer animation samples
+    // (samples.size() < layerCount() = missing entries are off).
+    // Identity samples paint exactly like composite() (locked by
+    // test: no keys = byte-identical). Groups ignore samples.
+    void compositeAnim(Surface& out,
+                       const std::vector<LayerAnimSample>& samples) const;
 
     // True when the active top-level index paints (not a group).
     bool activeIsRaster() const;

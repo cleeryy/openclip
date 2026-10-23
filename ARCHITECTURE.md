@@ -808,3 +808,87 @@ symbols):
   §8.2/§8.3 AI): no ARCHITECTURE.md change beyond this paragraph.
   §8.2/§8.3 stay CONDITIONAL (no permissive <5 Mo ONNX weight
   confirmed — same gate as M8); only classic §8.1 ships.
+
+T3 additions (decided 2026-10-22, animation productive round —
+spec docs/t3-animation.md; delivery order §3a -> §1 -> §2 -> §3b
+-> §4; EXACTLY 15 new symbols, this section documents all of them
+BEFORE code per the frozen-JNI rule):
+
+- Conventions (all 4 items): M3 alpha contract holds (rgb <= alpha;
+  only pixel commits — PNG seq, APNG, matte — touch alpha BY
+  DESIGN); pixel writes = full-layer tile snapshots (1 step);
+  animation fiches (keys, camera, tracks, labels) = meta hors undo
+  (like holds/bubbles — dragging a key is not a stroke);
+  overlay-only UI (trajectories, camera path, exposure sheet);
+  engine coords everywhere; targets >= 48dp.
+- §1 layer keys (2 symbols): `nSetLayerAnim(handle, index,
+  json|null): Boolean` — poses the track
+  `{keys:[{cel,dx,dy,scale,angle,opacity,ease}...]}` on a top-level
+  layer (null/empty clears). M3 rule; false + intact on bad index
+  or unparsable json; out-of-range values clamped (scale 0.1..8,
+  opacity 0..1, cel >= 0). `nLayerAnim(handle, index): String` —
+  read-only (`{"keys":[...]}`; `{}` when none; empty on bad
+  index, the nVectorPaths pattern). Noyau pur `openclip/anim.h`
+  (from scratch, same spirit as cels.h: no Canvas dependency):
+  sample(track, celFloat) with bilerp on dx/dy/scale/opacity,
+  shortest-path lerp on angle, ease applied to t
+  (linear|ease-in|ease-out|smooth|step; single key = hold, outside
+  = nearest, no layer = byte-identical). Composite-time
+  application in `Canvas::compositeAnim` (same point as
+  opacity/visibility): inverse-map + bilinear resample about the
+  layer center, opacity multiplies output alpha; groups ignore
+  keys (documented). `nLayerState` gains `"anim":N` per top-level
+  layer (key count, badge ◆). ORA unchanged (pixels only).
+- §2 camera track (3 symbols, needs §1): `nSetCameraTrack(handle,
+  json|null): Boolean` (`{keys:[{cel,x,y,zoom,angle?,ease}...]}`,
+  zoom 0.25..8, x/y = watched center in engine px, angle default
+  0), `nCameraTrack(handle): String`, `nSetCameraEnabled(handle,
+  on): Boolean` (default OFF — manual view untouched until the
+  user opts in). The camera is an OUTPUT: applied in
+  `nCompositeInto` + `nFrameCompositeInto` + GIF + WebM + PNG
+  seq/APNG (crop + bilinear + transparent hors-champ fill),
+  thumbnails included. OFF = byte-identical (locked by test).
+- §3 tracks + labels (8 symbols, palier b; palier a = 0 JNI):
+  session holds up to 4 tracks (`Track{frames,cur,name,visible}`;
+  track 0 = the M7 clip, migration = byte-identical). Frame
+  symbols (add/duplicate/delete/set/count/moveCel/hold/composite)
+  scope the ACTIVE track; the multi-track composite =
+  source-over of each visible track's cel at the requested index
+  (other tracks clamp to their range, `openclip/tracks.h`
+  `resolveStackIndex`), layer keys sampled at that cel, camera
+  applied once. Symbols: `nTrackCount(handle): Int`,
+  `nAddTrack(handle, name): Int` (index, 4 = refusal; the new
+  track starts TRANSPARENT — empty layer, no paper fill — so lower
+  tracks show through the source-over merge; only track 0 carries
+  the white M7 paper),
+  `nSetActiveTrack(handle, i): Boolean`,
+  `nActiveTrack(handle): Int`,
+  `nSetTrackVisible(handle, i, on): Boolean`,
+  `nSetTrackName(handle, i, name): Boolean` (24 chars max,
+  truncated), `nDeleteTrack(handle, i): Boolean` (>= 1 track
+  kept), `nTrackState(handle): String`
+  (`{"active":N,"tracks":[{"name","frames":N,"visible"}]}`).
+  Pending cel-moves clear on track switch (exact-LIFO stays
+  within the active track). Palier (a), 0 JNI: labels
+  (`{cel,txt,color}`, 24 chars) + exposure sheet (derived view:
+  holds/badges/labels) + TXT/CSV export live app-side in the
+  `anim.json` v1 sidecar (cap 64 KiB, absent = 1 track + no
+  labels, never a broken clip).
+- §4 exports (2 symbols; audio-only = 0 JNI app-side copy):
+  `nExportPngSeq(handle, dirPath, json): Boolean` — writes
+  `prefix_%04d.png` full-res files into an existing dir
+  (`{expandHolds:true,prefix:"frame_"}`; holds éclatés = one
+  file per playback tick, camera included, helpers excluded);
+  the app zips them via java.util.zip (progress + cancel —
+  this is the documented deviation from "engine ZIP": same
+  bytes, better UX). `nExportApng(handle, path, json): Boolean`
+  — from-scratch APNG (`acTL`/`fcTL`/`fdAT`, zlib via system
+  `-lz` like minizip, delays = `celDelayCs`, loop like GIF,
+  `{loop,maxWidth,matte?}` where `matte:"#RRGGBB"` flattens to
+  opaque over that color). Sticker preset = app-side
+  (maxWidth<=512 + matte white + infinite loop). No MP4
+  (patents — WebM stays the film).
+- T3 JNI budget: EXACTLY 15 new symbols (2 + 3 + 8 + 2). A
+  single generic `nAnimOp(handle, json)` was considered and
+  DECLINED (same clause as T1 §8/T2 review): explicit names
+  keep check_jni_symbols.sh and per-op tests readable.

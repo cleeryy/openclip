@@ -109,11 +109,29 @@ object EngineHost {
     external fun nPaintGradient(handle: Long, json: String): Boolean
     external fun nStampShape(handle: Long, json: String): Boolean
 
-    // T2 additions (ARCHITECTURE.md): indexed vector ops (retrace,
+    // T3 additions (ARCHITECTURE.md): indexed vector ops (retrace,
     // connect, widths) + bubble fiche. Text runs/outline/fonts/dir/
     // hyphen ride the existing nSetLayerText JSON (0 new symbols).
     external fun nReplaceVectorPath(handle: Long, index: Int, id: Int, pathJson: String): Boolean
     external fun nConnectVectorPaths(handle: Long, index: Int, a: Int, b: Int, tolJson: String?): Boolean
     external fun nSetVectorWidths(handle: Long, index: Int, id: Int, widthsJson: String): Boolean
     external fun nSetLayerBubble(handle: Long, index: Int, json: String?): Boolean
+
+    // T3 additions (ARCHITECTURE.md): images cles (2 symboles),
+    // camera (3), multi-pistes (8), sequences + APNG (2).
+    external fun nSetLayerAnim(handle: Long, index: Int, json: String?): Boolean
+    external fun nLayerAnim(handle: Long, index: Int): String
+    external fun nSetCameraTrack(handle: Long, json: String?): Boolean
+    external fun nCameraTrack(handle: Long): String
+    external fun nSetCameraEnabled(handle: Long, on: Boolean): Boolean
+    external fun nTrackCount(handle: Long): Int
+    external fun nAddTrack(handle: Long, name: String): Int
+    external fun nSetActiveTrack(handle: Long, i: Int): Boolean
+    external fun nActiveTrack(handle: Long): Int
+    external fun nSetTrackVisible(handle: Long, i: Int, on: Boolean): Boolean
+    external fun nSetTrackName(handle: Long, i: Int, name: String): Boolean
+    external fun nDeleteTrack(handle: Long, i: Int): Boolean
+    external fun nTrackState(handle: Long): String
+    external fun nExportPngSeq(handle: Long, dirPath: String, json: String): Boolean
+    external fun nExportApng(handle: Long, path: String, json: String): Boolean
 }

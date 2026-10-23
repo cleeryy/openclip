@@ -69,35 +69,6 @@ bool tagAttr(const std::string& xml, std::size_t tagStart, const char* attr,
     return true;
 }
 
-// Encode premultiplied surface to straight-RGBA PNG bytes in memory.
-bool encodePng(const Surface& s, std::vector<std::uint8_t>& png) {
-    const int w = s.width(), h = s.height();
-    if (w <= 0 || h <= 0) return false;
-    std::vector<std::uint8_t> straight((std::size_t)w * h * 4, 0);
-    const auto& px = s.bytes();
-    for (std::size_t i = 0; i < (std::size_t)w * h; ++i) {
-        const std::uint8_t a = px[i * 4 + 3];
-        straight[i * 4 + 3] = a;
-        if (a == 0) continue;
-        if (a == 255) {
-            straight[i * 4 + 0] = px[i * 4 + 0];
-            straight[i * 4 + 1] = px[i * 4 + 1];
-            straight[i * 4 + 2] = px[i * 4 + 2];
-        } else {
-            for (int c = 0; c < 3; ++c) {
-                int v = (px[i * 4 + c] * 255 + a / 2) / a;
-                straight[i * 4 + c] = (std::uint8_t)(v > 255 ? 255 : v);
-            }
-        }
-    }
-    int len = 0;
-    unsigned char* data =
-        stbi_write_png_to_mem(straight.data(), 0, w, h, 4, &len);
-    if (!data || len <= 0) return false;
-    png.assign(data, data + len);
-    STBIW_FREE(data);
-    return true;
-}
 
 bool decodePng(const std::vector<std::uint8_t>& png, Surface& s) {
     int w = 0, h = 0, comp = 0;
@@ -911,6 +882,38 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
 }
 
 }  // namespace
+
+// Encode premultiplied surface to straight-RGBA PNG bytes in memory.
+// At openclip:: scope (NOT anonymous): declared in ora.h, shared with
+// the T3 PNG sequence writer.
+bool encodePng(const Surface& s, std::vector<std::uint8_t>& png) {
+    const int w = s.width(), h = s.height();
+    if (w <= 0 || h <= 0) return false;
+    std::vector<std::uint8_t> straight((std::size_t)w * h * 4, 0);
+    const auto& px = s.bytes();
+    for (std::size_t i = 0; i < (std::size_t)w * h; ++i) {
+        const std::uint8_t a = px[i * 4 + 3];
+        straight[i * 4 + 3] = a;
+        if (a == 0) continue;
+        if (a == 255) {
+            straight[i * 4 + 0] = px[i * 4 + 0];
+            straight[i * 4 + 1] = px[i * 4 + 1];
+            straight[i * 4 + 2] = px[i * 4 + 2];
+        } else {
+            for (int c = 0; c < 3; ++c) {
+                int v = (px[i * 4 + c] * 255 + a / 2) / a;
+                straight[i * 4 + c] = (std::uint8_t)(v > 255 ? 255 : v);
+            }
+        }
+    }
+    int len = 0;
+    unsigned char* data =
+        stbi_write_png_to_mem(straight.data(), 0, w, h, 4, &len);
+    if (!data || len <= 0) return false;
+    png.assign(data, data + len);
+    STBIW_FREE(data);
+    return true;
+}
 
 bool saveOra(const Canvas& c, const std::string& path, std::string& error) {
     std::vector<std::pair<std::string, std::vector<std::uint8_t>>> entries;

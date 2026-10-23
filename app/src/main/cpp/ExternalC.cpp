@@ -37,6 +37,8 @@
 #include <string>
 #include <vector>
 
+#include "openclip/anim.h"
+#include "openclip/apng.h"
 #include "openclip/blend.h"
 #include "openclip/brush.h"
 #include "openclip/bubble.h"
@@ -52,6 +54,7 @@
 #include "openclip/shapes.h"
 #include "openclip/stroke.h"
 #include "openclip/surface.h"
+#include "openclip/tracks.h"
 #include "openclip/transform.h"
 #include "openclip/undo.h"
 #include "openclip/vector.h"
@@ -93,16 +96,29 @@ struct Frame {
     Frame() = default;
     explicit Frame(openclip::Canvas c) : canvas(std::move(c)) {}
 };
-struct Session {
-    // The live document canvas is frames[cur].canvas;
-    // nLoadDocument/nSaveDocument apply to the current frame only.
-    // Switching frames shows the destination frame's stacks (fresh
-    // frames undo nothing, returning preserves them); deleting a frame
-    // drops its stacks with it. The session mask arm stays global but
-    // is disarmed on any frame op (it indexes current-frame layers;
-    // shim documented).
+// T3: multi-track clip (ARCHITECTURE.md "T3 additions" §3). Track 0
+// is the M7 clip (migration = byte-identical: 1 visible track).
+// Each track owns its frame list + editing cursor; frame symbols
+// scope the ACTIVE track, the merge is source-over of visible
+// tracks (others clamp to their range).
+struct Track {
     std::vector<Frame> frames;
     std::size_t cur = 0;
+    std::string name;  // empty = app shows P1..P4
+    bool visible = true;
+    Track() = default;
+};
+struct Session {
+    // The live document canvas is tracks[activeTrack].frames[cur].
+    // canvas; nLoadDocument/nSaveDocument apply to the current frame
+    // of the active track only. Switching frames shows the
+    // destination frame's stacks (fresh frames undo nothing,
+    // returning preserves them); deleting a frame drops its stacks
+    // with it. The session mask arm stays global but is disarmed on
+    // any frame op (it indexes current-frame layers; shim
+    // documented). T3: same, scoped per active track.
+    std::vector<Track> tracks;
+    std::size_t activeTrack = 0;
     // M7 playback rate, app-side only (no engine loop, no JNI symbol;
     // default 12 per the contract; the Compose timeline owns the value).
     float fps = 12.0f;
@@ -117,6 +133,7 @@ struct Session {
     // pixel ops on the same frame; cross-frame strokes live in their
     // own frame stacks per the M7 contract).
     struct CelMove {
+        std::size_t track = 0;  // T3: moves undo within their track
         std::size_t frameAfter = 0;
         std::size_t histDepthAfter = 0;
         std::size_t from = 0, to = 0;
@@ -127,6 +144,14 @@ struct Session {
     // target; cleared on frame structural ops and loads.
     std::vector<std::uint8_t> selMask;
     bool selMaskOn = false;
+    // T3: per-layer animation tracks (session-global, sampled at the
+    // requested cel — ARCHITECTURE.md "T3 additions" §1). Meta hors
+    // undo (like holds/bubbles).
+    std::map<int, std::vector<openclip::AnimKey>> layerAnims;
+    // T3: camera track + enable flag (session-global, §T3 §2).
+    // Disabled = manual view byte-identical (locked by test).
+    std::vector<openclip::CameraKey> camTrack;
+    bool camEnabled = false;
     // V+2: approximation count from the last layered PSD save
     // (nPsdApproxCount; 0 = pixel-faithful).
     int psdApprox = 0;
@@ -176,13 +201,25 @@ struct Session {
 
 Session* asSession(jlong handle) { return reinterpret_cast<Session*>(handle); }
 
-// M7: the live document canvas is always the current frame's; hist/vecs
-// expose that frame's own undo stacks.
-inline openclip::Canvas& cur(Session* s) { return s->frames[s->cur].canvas; }
-inline const openclip::Canvas& cur(const Session* s) { return s->frames[s->cur].canvas; }
-inline openclip::History& hist(Session* s) { return s->frames[s->cur].history; }
+// T3: the active track's frame store (frame symbols scope it).
+inline Track& trk(Session* s) { return s->tracks[s->activeTrack]; }
+inline const Track& trk(const Session* s) {
+    return s->tracks[s->activeTrack];
+}
+
+// M7: the live document canvas is always the active track's current
+// frame's; hist/vecs expose that frame's own undo stacks.
+inline openclip::Canvas& cur(Session* s) {
+    return trk(s).frames[trk(s).cur].canvas;
+}
+inline const openclip::Canvas& cur(const Session* s) {
+    return trk(s).frames[trk(s).cur].canvas;
+}
+inline openclip::History& hist(Session* s) {
+    return trk(s).frames[trk(s).cur].history;
+}
 inline std::map<std::size_t, openclip::VectorHistory>& vecs(Session* s) {
-    return s->frames[s->cur].vectors;
+    return trk(s).frames[trk(s).cur].vectors;
 }
 
 std::string toStd(JNIEnv* env, jstring jstr) {
@@ -425,7 +462,9 @@ Java_dev_openclip_engine_EngineHost_nInit(JNIEnv* env, jclass, jint w, jint h,
     if (w <= 0 || h <= 0) return 0;
     Session* s = new (std::nothrow) Session();
     if (!s) return 0;
-    // M7: nInit creates the initial single-frame clip (frames={canvas}).
+    // M7: nInit creates the initial single-frame clip on track 0
+    // (T3: tracks={track0}, activeTrack=0 — the M7 clip migrates
+    // byte-identical).
     openclip::Canvas first;
     first.resize(w, h);
     if (first.layerCount() == 0) first.addLayer("Layer 1");
@@ -434,8 +473,10 @@ Java_dev_openclip_engine_EngineHost_nInit(JNIEnv* env, jclass, jint w, jint h,
             first.layer(0).surface.set(x, y,
                                        openclip::Pixel{255, 255, 255, 255});
     first.setActiveLayer(0);
-    s->frames.push_back(Frame(std::move(first)));
-    s->cur = 0;
+    Track t0;
+    t0.frames.push_back(Frame(std::move(first)));
+    s->tracks.push_back(std::move(t0));
+    s->activeTrack = 0;
     return reinterpret_cast<jlong>(s);
 }
 
@@ -823,7 +864,7 @@ void appendJsonStr(std::string& out, const std::string& s) {
 }
 
 void appendLayerJson(std::string& out, const openclip::Layer& l,
-                     bool isGroup) {
+                     bool isGroup, int animKeys = -1) {
     out += "{\"name\":";
     appendJsonStr(out, l.name);
     out += ",\"visible\":";
@@ -840,6 +881,11 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
     out += l.hasMask ? "true" : "false";
     out += ",\"clipped\":";
     out += l.clipped ? "true" : "false";
+    // T3: key count badge (top-level only, -1 = child entry).
+    if (animKeys >= 0) {
+        out += ",\"anim\":";
+        out += std::to_string(animKeys);
+    }
     // V+2: vector-layer flag (SVG export + Bézier discovery read it;
     // absent = raster, the app parses tolerantly).
     out += ",\"vector\":";
@@ -981,11 +1027,15 @@ Java_dev_openclip_engine_EngineHost_nLayerState(JNIEnv* env, jclass,
         if (l.isGroup) {
             for (std::size_t k = 0; k < l.children.size(); ++k) {
                 if (k > 0) out += ",";
-                appendLayerJson(out, l.children[k], false);
+                appendLayerJson(out, l.children[k], false, -1);
             }
         }
         out += "],\"self\":";
-        appendLayerJson(out, l, l.isGroup);
+        int animN = 0;
+        const auto animIt = s->layerAnims.find(static_cast<int>(i));
+        if (animIt != s->layerAnims.end())
+            animN = static_cast<int>(animIt->second.size());
+        appendLayerJson(out, l, l.isGroup, animN);
         out += "}";
     }
     out += "]}";
@@ -1250,6 +1300,59 @@ static void resetFrameLocalState(Session* s, bool structural) {
     }
 }
 
+// T3: composite cel `want` of track `ti` (ARCHITECTURE.md "T3
+// additions"). Merges every VISIBLE track's cel at the requested
+// index (other tracks clamp into their range, resolveStackIndex),
+// samples the session layer anims at each track's displayed cel,
+// then applies the camera once when enabled. Helpers never enter
+// (onion/ref stay caller-side, like today).
+static bool compositeCell(Session* s, std::size_t ti, int want,
+                          openclip::Surface& out) {
+    if (!s || s->tracks.empty() || ti >= s->tracks.size()) return false;
+    const int w = cur(s).width(), h = cur(s).height();
+    if (w <= 0 || h <= 0) return false;
+    std::vector<std::pair<const openclip::Surface*, bool>> stack;
+    std::vector<openclip::Surface> temps;
+    temps.reserve(s->tracks.size());
+    for (const Track& t : s->tracks) {
+        if (!t.visible || t.frames.empty()) continue;
+        const int idx = openclip::resolveStackIndex(
+            static_cast<int>(t.frames.size()), want);
+        const openclip::Canvas& c =
+            t.frames[static_cast<std::size_t>(idx)].canvas;
+        std::vector<openclip::LayerAnimSample> samples(c.layerCount());
+        for (std::size_t li = 0; li < c.layerCount(); ++li) {
+            const auto it =
+                s->layerAnims.find(static_cast<int>(li));
+            if (it == s->layerAnims.end() || it->second.empty()) continue;
+            openclip::LayerKeys k;
+            if (!openclip::sampleAnimTrack(it->second, idx, k)) continue;
+            openclip::LayerAnimSample sm;
+            sm.on = true;
+            sm.dx = k.dx;
+            sm.dy = k.dy;
+            sm.scale = k.scale;
+            sm.angle = k.angle;
+            sm.opacity = k.opacity;
+            samples[li] = sm;
+        }
+        temps.emplace_back();
+        c.compositeAnim(temps.back(), samples);
+        stack.push_back({&temps.back(), true});
+    }
+    openclip::compositeTrackStack(stack, w, h, out);
+    if (s->camEnabled && !s->camTrack.empty()) {
+        const openclip::CameraSample cam =
+            openclip::sampleCameraTrack(s->camTrack, want);
+        if (cam.on) {
+            openclip::Surface cropped;
+            openclip::applyCameraCrop(out, cam, cropped);
+            out = cropped;
+        }
+    }
+    return true;
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
                                                    jlong handle, jintArray out,
@@ -1259,7 +1362,9 @@ Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
     if (width <= 0 || height <= 0) return -2;
 
     openclip::Surface comp;
-    cur(s).composite(comp);
+    if (!compositeCell(s, s->activeTrack,
+                       static_cast<int>(trk(s).cur), comp))
+        return -1;
     std::vector<std::uint8_t> px = comp.bytes();  // premult RGBA8
     // M7 onion skin (V+2: up to N neighbors per side, counts from
     // nSetOnionCount; nSetOnion maps to 0/1): neighbor composites
@@ -1268,12 +1373,14 @@ Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
     // ghosts; a transparent one (hidden base layer) reveals them —
     // that is the intended onion workflow.
     const std::vector<std::size_t> ghosts = openclip::onionRange(
-        s->cur, s->frames.size(), s->onionBefore, s->onionAfter);
+        trk(s).cur, trk(s).frames.size(), s->onionBefore, s->onionAfter);
     if (!ghosts.empty()) {
         std::vector<std::uint8_t> under(px.size(), 0);
         for (std::size_t gi : ghosts) {
             openclip::Surface n;
-            s->frames[gi].canvas.composite(n);
+            if (!compositeCell(s, s->activeTrack,
+                               static_cast<int>(gi), n))
+                continue;
             if (n.bytes().size() == under.size()) {
                 std::vector<std::uint8_t> t;
                 tintOnion(n, s->onionStrength, t);
@@ -1829,17 +1936,17 @@ Java_dev_openclip_engine_EngineHost_nUndo(JNIEnv*, jclass, jlong handle) {
     // first, then the move).
     if (!s->celMoves.empty()) {
         const Session::CelMove& m = s->celMoves.back();
-        if (m.frameAfter == s->cur &&
+        if (m.track == s->activeTrack && m.frameAfter == trk(s).cur &&
             hist(s).undoDepth() == m.histDepthAfter &&
-            m.from < s->frames.size() && m.to < s->frames.size()) {
-            Frame f = std::move(s->frames[m.from]);
-            s->frames.erase(s->frames.begin() +
+            m.from < trk(s).frames.size() && m.to < trk(s).frames.size()) {
+            Frame f = std::move(trk(s).frames[m.from]);
+            trk(s).frames.erase(trk(s).frames.begin() +
                             static_cast<std::ptrdiff_t>(m.from));
-            s->frames.insert(s->frames.begin() +
+            trk(s).frames.insert(trk(s).frames.begin() +
                              static_cast<std::ptrdiff_t>(m.to),
                              std::move(f));
-            s->cur = openclip::moveCursor(s->frames.size(), m.to,
-                                          m.from, s->cur);
+            trk(s).cur = openclip::moveCursor(trk(s).frames.size(), m.to,
+                                          m.from, trk(s).cur);
             s->celMoves.pop_back();
             s->selMask.clear();
             s->selMaskOn = false;
@@ -2311,7 +2418,7 @@ Java_dev_openclip_engine_EngineHost_nSetRulers(JNIEnv* env, jclass,
 extern "C" JNIEXPORT jint JNICALL
 Java_dev_openclip_engine_EngineHost_nAddFrame(JNIEnv*, jclass, jlong handle) {
     Session* s = asSession(handle);
-    if (!s || s->frames.empty()) return -1;
+    if (!s || trk(s).frames.empty()) return -1;
     openclip::Canvas blank;
     blank.resize(cur(s).width(), cur(s).height());
     blank.addLayer("Layer 1");
@@ -2320,39 +2427,39 @@ Java_dev_openclip_engine_EngineHost_nAddFrame(JNIEnv*, jclass, jlong handle) {
             blank.layer(0).surface.set(x, y,
                                        openclip::Pixel{255, 255, 255, 255});
     blank.setActiveLayer(0);
-    s->frames.insert(s->frames.begin() + static_cast<std::ptrdiff_t>(s->cur) + 1,
+    trk(s).frames.insert(trk(s).frames.begin() + static_cast<std::ptrdiff_t>(trk(s).cur) + 1,
                      Frame(std::move(blank)));
-    ++s->cur;
+    ++trk(s).cur;
     resetFrameLocalState(s, true);
-    return static_cast<jint>(s->cur);
+    return static_cast<jint>(trk(s).cur);
 }
 
 extern "C" JNIEXPORT jint JNICALL
 Java_dev_openclip_engine_EngineHost_nDuplicateFrame(JNIEnv*, jclass,
                                                      jlong handle) {
     Session* s = asSession(handle);
-    if (!s || s->frames.empty()) return -1;
+    if (!s || trk(s).frames.empty()) return -1;
     // Full Canvas copy (layers + framebuffers) with a fresh empty undo
     // stack: a duplicate is a new frame, not a history fork.
-    s->frames.insert(s->frames.begin() + static_cast<std::ptrdiff_t>(s->cur) + 1,
+    trk(s).frames.insert(trk(s).frames.begin() + static_cast<std::ptrdiff_t>(trk(s).cur) + 1,
                      Frame(cur(s)));
-    ++s->cur;
+    ++trk(s).cur;
     resetFrameLocalState(s, true);
-    return static_cast<jint>(s->cur);
+    return static_cast<jint>(trk(s).cur);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_openclip_engine_EngineHost_nDeleteFrame(JNIEnv*, jclass, jlong handle,
                                                  jint index) {
     Session* s = asSession(handle);
-    if (!s || s->frames.empty()) return JNI_FALSE;
+    if (!s || trk(s).frames.empty()) return JNI_FALSE;
     if (index < 0 ||
-        index >= static_cast<jint>(s->frames.size()))
+        index >= static_cast<jint>(trk(s).frames.size()))
         return JNI_FALSE;
-    if (s->frames.size() == 1) return JNI_FALSE;  // keep the last frame
-    s->frames.erase(s->frames.begin() + index);
-    if (s->cur >= s->frames.size()) s->cur = s->frames.size() - 1;
-    if (s->cur > static_cast<std::size_t>(index)) --s->cur;
+    if (trk(s).frames.size() == 1) return JNI_FALSE;  // keep the last frame
+    trk(s).frames.erase(trk(s).frames.begin() + index);
+    if (trk(s).cur >= trk(s).frames.size()) trk(s).cur = trk(s).frames.size() - 1;
+    if (trk(s).cur > static_cast<std::size_t>(index)) --trk(s).cur;
     resetFrameLocalState(s, true);
     return JNI_TRUE;
 }
@@ -2361,11 +2468,11 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_openclip_engine_EngineHost_nSetFrame(JNIEnv*, jclass, jlong handle,
                                               jint index) {
     Session* s = asSession(handle);
-    if (!s || s->frames.empty()) return JNI_FALSE;
+    if (!s || trk(s).frames.empty()) return JNI_FALSE;
     if (index < 0 ||
-        index >= static_cast<jint>(s->frames.size()))
+        index >= static_cast<jint>(trk(s).frames.size()))
         return JNI_FALSE;
-    s->cur = static_cast<std::size_t>(index);
+    trk(s).cur = static_cast<std::size_t>(index);
     resetFrameLocalState(s, false);
     return JNI_TRUE;
 }
@@ -2374,7 +2481,7 @@ extern "C" JNIEXPORT jint JNICALL
 Java_dev_openclip_engine_EngineHost_nFrameCount(JNIEnv*, jclass,
                                                 jlong handle) {
     Session* s = asSession(handle);
-    return s ? static_cast<jint>(s->frames.size()) : 0;
+    return s ? static_cast<jint>(trk(s).frames.size()) : 0;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -2387,9 +2494,9 @@ Java_dev_openclip_engine_EngineHost_nFrameCompositeInto(JNIEnv* env, jclass,
     Session* s = asSession(handle);
     if (!s || !out) return -1;
     if (width <= 0 || height <= 0) return -2;
-    if (index < 0 || index >= static_cast<jint>(s->frames.size())) return -2;
+    if (index < 0 || index >= static_cast<jint>(trk(s).frames.size())) return -2;
     openclip::Surface comp;
-    s->frames[static_cast<std::size_t>(index)].canvas.composite(comp);
+    if (!compositeCell(s, s->activeTrack, index, comp)) return -2;
     std::vector<std::uint8_t> px = comp.bytes();
     return blitArgb(env, px, out, width, height);
 }
@@ -2418,22 +2525,23 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_openclip_engine_EngineHost_nMoveCel(JNIEnv*, jclass, jlong handle,
                                              jint from, jint to) {
     Session* s = asSession(handle);
-    if (!s || s->frames.empty()) return JNI_FALSE;
+    if (!s || trk(s).frames.empty()) return JNI_FALSE;
     if (from < 0 || to < 0 ||
-        from >= static_cast<jint>(s->frames.size()) ||
-        to >= static_cast<jint>(s->frames.size()))
+        from >= static_cast<jint>(trk(s).frames.size()) ||
+        to >= static_cast<jint>(trk(s).frames.size()))
         return JNI_FALSE;
     if (from == to) return JNI_TRUE;  // no-op, still success
-    Frame f = std::move(s->frames[static_cast<std::size_t>(from)]);
-    s->frames.erase(s->frames.begin() + static_cast<std::ptrdiff_t>(from));
-    s->frames.insert(s->frames.begin() + static_cast<std::ptrdiff_t>(to),
+    Frame f = std::move(trk(s).frames[static_cast<std::size_t>(from)]);
+    trk(s).frames.erase(trk(s).frames.begin() + static_cast<std::ptrdiff_t>(from));
+    trk(s).frames.insert(trk(s).frames.begin() + static_cast<std::ptrdiff_t>(to),
                      std::move(f));
-    s->cur =
-        openclip::moveCursor(s->frames.size(), static_cast<std::size_t>(from),
-                             static_cast<std::size_t>(to), s->cur);
+    trk(s).cur =
+        openclip::moveCursor(trk(s).frames.size(), static_cast<std::size_t>(from),
+                             static_cast<std::size_t>(to), trk(s).cur);
     // Record AFTER the move: the post-move frame + its history depth.
     Session::CelMove m;
-    m.frameAfter = s->cur;
+    m.track = s->activeTrack;
+    m.frameAfter = trk(s).cur;
     m.histDepthAfter = hist(s).undoDepth();
     m.from = static_cast<std::size_t>(from);
     m.to = static_cast<std::size_t>(to);
@@ -2449,12 +2557,12 @@ Java_dev_openclip_engine_EngineHost_nSetCelHold(JNIEnv*, jclass,
                                                 jlong handle, jint index,
                                                 jint frames) {
     Session* s = asSession(handle);
-    if (!s || s->frames.empty()) return JNI_FALSE;
+    if (!s || trk(s).frames.empty()) return JNI_FALSE;
     if (index < 0 ||
-        index >= static_cast<jint>(s->frames.size()))
+        index >= static_cast<jint>(trk(s).frames.size()))
         return JNI_FALSE;
     if (!openclip::validCelHold(frames)) return JNI_FALSE;
-    s->frames[static_cast<std::size_t>(index)].hold = frames;
+    trk(s).frames[static_cast<std::size_t>(index)].hold = frames;
     return JNI_TRUE;
 }
 
@@ -2603,6 +2711,49 @@ void downscaleBox(const std::vector<std::uint8_t>& src, int sw, int sh,
 }
 }  // namespace
 
+// T3: one export frame — compositeCell (tracks + anims + camera) at cel
+// `cel`, premult->straight, box-downscaled to maxW (aspect kept).
+// False when the session/cel is unusable.
+bool pullExportFrame(Session* s, int cel, int maxW,
+                     std::vector<std::uint8_t>& straight, int& w, int& h) {
+    if (!s) return false;
+    if (maxW < 1) maxW = 1;
+    if (maxW > 4096) maxW = 4096;
+    openclip::Surface comp;
+    if (!compositeCell(s, s->activeTrack, cel, comp)) return false;
+    const int sw = comp.width(), sh = comp.height();
+    if (sw <= 0 || sh <= 0) return false;
+    const auto& px = comp.bytes();
+    std::vector<std::uint8_t> full(static_cast<std::size_t>(sw) * sh * 4);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(sw) * sh; ++i) {
+        const std::uint8_t a = px[i * 4 + 3];
+        full[i * 4 + 3] = a;
+        if (a == 0) {
+            full[i * 4 + 0] = full[i * 4 + 1] = full[i * 4 + 2] = 0;
+        } else if (a == 255) {
+            full[i * 4 + 0] = px[i * 4 + 0];
+            full[i * 4 + 1] = px[i * 4 + 1];
+            full[i * 4 + 2] = px[i * 4 + 2];
+        } else {
+            for (int k = 0; k < 3; ++k) {
+                int v = (px[i * 4 + k] * 255 + a / 2) / a;
+                full[i * 4 + k] =
+                    static_cast<std::uint8_t>(v > 255 ? 255 : v);
+            }
+        }
+    }
+    if (sw > maxW) {
+        w = maxW;
+        h = std::max(1, sh * maxW / sw);
+        downscaleBox(full, sw, sh, w, h, straight);
+    } else {
+        w = sw;
+        h = sh;
+        straight.swap(full);
+    }
+    return true;
+}
+
 // Animated GIF export (ARCHITECTURE.md "V+2 additions"): composites
 // every frame internally, downscales to maxWidth, quantizes + LZW from
 // scratch. GCE delay = cel hold x fps (optional "fps", default 12).
@@ -2611,7 +2762,7 @@ Java_dev_openclip_engine_EngineHost_nExportGif(JNIEnv* env, jclass,
                                                jlong handle, jstring path,
                                                jstring json) {
     Session* s = asSession(handle);
-    if (!s || !path || s->frames.empty()) return JNI_FALSE;
+    if (!s || !path || trk(s).frames.empty()) return JNI_FALSE;
     const std::string p = toStd(env, path);
     if (p.empty()) return JNI_FALSE;
     const std::string j = json ? toStd(env, json) : std::string();
@@ -2632,54 +2783,386 @@ Java_dev_openclip_engine_EngineHost_nExportGif(JNIEnv* env, jclass,
     }
     if (loop != 0 && loop != -1 && loop < 2) return JNI_FALSE;
     std::vector<openclip::GifFrame> frames;
-    for (auto& f : s->frames) {
-        openclip::Surface comp;
-        f.canvas.composite(comp);
-        const int sw = comp.width(), sh = comp.height();
-        if (sw <= 0 || sh <= 0) return JNI_FALSE;
-        int dw = sw, dh = sh;
-        if (sw > maxW) {
-            dw = maxW;
-            dh = std::max(1, sh * maxW / sw);
-        }
-        // Premultiplied engine bytes -> straight RGBA for the writer.
-        const auto& px = comp.bytes();
-        std::vector<std::uint8_t> straight(
-            static_cast<std::size_t>(sw) * sh * 4);
-        for (std::size_t i = 0; i < static_cast<std::size_t>(sw) * sh;
-             ++i) {
-            const std::uint8_t a = px[i * 4 + 3];
-            straight[i * 4 + 3] = a;
-            if (a == 0) {
-                straight[i * 4 + 0] = straight[i * 4 + 1] =
-                    straight[i * 4 + 2] = 0;
-            } else if (a == 255) {
-                straight[i * 4 + 0] = px[i * 4 + 0];
-                straight[i * 4 + 1] = px[i * 4 + 1];
-                straight[i * 4 + 2] = px[i * 4 + 2];
-            } else {
-                for (int k = 0; k < 3; ++k) {
-                    int v = (px[i * 4 + k] * 255 + a / 2) / a;
-                    straight[i * 4 + k] =
-                        static_cast<std::uint8_t>(v > 255 ? 255 : v);
-                }
-            }
-        }
+    const std::size_t n = trk(s).frames.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        std::vector<std::uint8_t> straight;
+        int dw = 0, dh = 0;
+        if (!pullExportFrame(s, static_cast<int>(i), maxW, straight, dw,
+                             dh))
+            return JNI_FALSE;
         openclip::GifFrame g;
-        g.delayCs = openclip::celDelayCs(f.hold, fps);
-        if (dw != sw) {
-            downscaleBox(straight, sw, sh, dw, dh, g.rgba);
-            g.w = dw;
-            g.h = dh;
-        } else {
-            g.rgba.swap(straight);
-            g.w = sw;
-            g.h = sh;
-        }
+        g.delayCs = openclip::celDelayCs(trk(s).frames[i].hold, fps);
+        g.rgba.swap(straight);
+        g.w = dw;
+        g.h = dh;
         frames.push_back(std::move(g));
     }
     std::string error;
     if (!openclip::writeGif(p, frames, loop, dither, error)) return JNI_FALSE;
+    return JNI_TRUE;
+}
+
+// ---- T3 additions (symbols per ARCHITECTURE.md "T3 additions") ----
+
+// §1: per-layer animation track (meta hors undo, like holds). M3 rule;
+// false + intact on bad index or unparsable json; out-of-range values
+// clamped by the parser. Groups refuse (keys are raster/vector only).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerAnim(JNIEnv* env, jclass,
+                                                  jlong handle, jint index,
+                                                  jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    const openclip::Layer& ly =
+        cur(s).layer(static_cast<std::size_t>(index));
+    if (ly.isGroup) return JNI_FALSE;
+    const std::string j = json ? toStd(env, json) : std::string();
+    if (j.empty()) {
+        s->layerAnims.erase(index);
+        return JNI_TRUE;
+    }
+    std::vector<openclip::AnimKey> keys;
+    if (!openclip::parseAnimTrack(j, keys)) return JNI_FALSE;
+    if (keys.empty())
+        s->layerAnims.erase(index);
+    else
+        s->layerAnims[index] = std::move(keys);
+    return JNI_TRUE;
+}
+
+// §1 read path (nVectorPaths pattern: {} when none, empty on bad
+// index).
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_openclip_engine_EngineHost_nLayerAnim(JNIEnv* env, jclass,
+                                                jlong handle, jint index) {
+    Session* s = asSession(handle);
+    if (!s || index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return env->NewStringUTF("");
+    const auto it = s->layerAnims.find(index);
+    if (it == s->layerAnims.end() || it->second.empty())
+        return env->NewStringUTF("{}");
+    const std::string j = openclip::animTrackJson(it->second);
+    return env->NewStringUTF(j.c_str());
+}
+
+// §2: session camera track (meta hors undo). null/empty clears.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetCameraTrack(JNIEnv* env, jclass,
+                                                     jlong handle,
+                                                     jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string j = json ? toStd(env, json) : std::string();
+    if (j.empty()) {
+        s->camTrack.clear();
+        return JNI_TRUE;
+    }
+    std::vector<openclip::CameraKey> keys;
+    if (!openclip::parseCameraTrack(j, keys)) return JNI_FALSE;
+    s->camTrack = std::move(keys);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_openclip_engine_EngineHost_nCameraTrack(JNIEnv* env, jclass,
+                                                  jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return env->NewStringUTF("");
+    const std::string j = openclip::cameraTrackJson(s->camTrack);
+    return env->NewStringUTF(j.c_str());
+}
+
+// §2: camera output toggle (default OFF — manual view untouched).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetCameraEnabled(JNIEnv*, jclass,
+                                                       jlong handle,
+                                                       jboolean on) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    s->camEnabled = (on == JNI_TRUE);
+    return JNI_TRUE;
+}
+
+// §3 palier b: multi-track clip (frame symbols scope the active
+// track; merges are source-over of visible tracks).
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nTrackCount(JNIEnv*, jclass,
+                                                jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return 0;
+    return static_cast<jint>(s->tracks.size());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nAddTrack(JNIEnv* env, jclass,
+                                               jlong handle, jstring name) {
+    Session* s = asSession(handle);
+    if (!s) return -1;
+    if (!openclip::canAddTrack(static_cast<int>(s->tracks.size())))
+        return 4;  // cap refusal (spec §3.4), not an index
+    // New track starts as a blank single-frame clip at the live size.
+    // The blank is TRANSPARENT (empty layer, no paper fill): the
+    // visible-stack merge is source-over, so an opaque white blank on
+    // an upper track would occlude ink on lower tracks. Only track 0
+    // (the M7 clip) carries the white paper.
+    const int w = cur(s).width(), h = cur(s).height();
+    openclip::Canvas blank;
+    blank.resize(w, h);
+    blank.addLayer("Layer 1");
+    blank.setActiveLayer(0);
+    Track t;
+    t.frames.push_back(Frame(std::move(blank)));
+    t.name = name ? openclip::sanitizeTrackName(toStd(env, name)) : "";
+    s->tracks.push_back(std::move(t));
+    return static_cast<jint>(s->tracks.size() - 1);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetActiveTrack(JNIEnv*, jclass,
+                                                     jlong handle, jint i) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (!openclip::validTrackIndex(static_cast<int>(s->tracks.size()), i))
+        return JNI_FALSE;
+    if (static_cast<std::size_t>(i) == s->activeTrack) return JNI_TRUE;
+    s->activeTrack = static_cast<std::size_t>(i);
+    // Pending cel-moves stay in their track (exact-LIFO per track).
+    s->celMoves.clear();
+    resetFrameLocalState(s, false);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_dev_openclip_engine_EngineHost_nActiveTrack(JNIEnv*, jclass,
+                                                  jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return -1;
+    return static_cast<jint>(s->activeTrack);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetTrackVisible(JNIEnv*, jclass,
+                                                      jlong handle, jint i,
+                                                      jboolean on) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (!openclip::validTrackIndex(static_cast<int>(s->tracks.size()), i))
+        return JNI_FALSE;
+    s->tracks[static_cast<std::size_t>(i)].visible = (on == JNI_TRUE);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetTrackName(JNIEnv* env, jclass,
+                                                   jlong handle, jint i,
+                                                   jstring name) {
+    Session* s = asSession(handle);
+    if (!s || !name) return JNI_FALSE;
+    if (!openclip::validTrackIndex(static_cast<int>(s->tracks.size()), i))
+        return JNI_FALSE;
+    s->tracks[static_cast<std::size_t>(i)].name =
+        openclip::sanitizeTrackName(toStd(env, name));
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nDeleteTrack(JNIEnv*, jclass,
+                                                  jlong handle, jint i) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (!openclip::canDeleteTrack(static_cast<int>(s->tracks.size())))
+        return JNI_FALSE;
+    if (!openclip::validTrackIndex(static_cast<int>(s->tracks.size()), i))
+        return JNI_FALSE;
+    s->tracks.erase(s->tracks.begin() +
+                    static_cast<std::ptrdiff_t>(i));
+    if (s->activeTrack >= s->tracks.size())
+        s->activeTrack = s->tracks.size() - 1;
+    s->celMoves.clear();
+    resetFrameLocalState(s, false);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_openclip_engine_EngineHost_nTrackState(JNIEnv* env, jclass,
+                                                 jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return env->NewStringUTF("{\"active\":0,\"tracks\":[]}");
+    std::string out = "{\"active\":";
+    out += std::to_string(s->activeTrack);
+    out += ",\"tracks\":[";
+    for (std::size_t i = 0; i < s->tracks.size(); ++i) {
+        if (i > 0) out += ",";
+        out += "{\"name\":";
+        appendJsonStr(out, s->tracks[i].name);
+        out += ",\"frames\":";
+        out += std::to_string(s->tracks[i].frames.size());
+        out += ",\"visible\":";
+        out += s->tracks[i].visible ? "true" : "false";
+        out += "}";
+    }
+    out += "]}";
+    return env->NewStringUTF(out.c_str());
+}
+
+// §4: PNG sequence export — one prefix_%04d.png per playback tick
+// (holds éclatés when expandHolds, camera included). Writes into an
+// existing dir; the app zips via java.util.zip (ARCHITECTURE.md §T3).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nExportPngSeq(JNIEnv* env, jclass,
+                                                   jlong handle,
+                                                   jstring dirPath,
+                                                   jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !dirPath || trk(s).frames.empty()) return JNI_FALSE;
+    const std::string dir = toStd(env, dirPath);
+    if (dir.empty()) return JNI_FALSE;
+    const std::string j = json ? toStd(env, json) : std::string();
+    bool expand = true;
+    if (j.find("\"expandHolds\"") != std::string::npos) {
+        const std::size_t at = j.find("\"expandHolds\"");
+        const std::size_t colon = j.find(':', at + 13);
+        if (colon != std::string::npos) {
+            const std::string tail = j.substr(colon + 1, 8);
+            if (tail.find("false") != std::string::npos) expand = false;
+        }
+    }
+    std::string prefix = "frame";
+    {
+        const std::string pat = "\"prefix\"";
+        const std::size_t at = j.find(pat);
+        if (at != std::string::npos) {
+            const std::size_t colon = j.find(':', at + pat.size());
+            const std::size_t q0 =
+                colon == std::string::npos
+                    ? std::string::npos
+                    : j.find('"', colon + 1);
+            if (q0 != std::string::npos) {
+                const std::size_t q1 = j.find('"', q0 + 1);
+                if (q1 != std::string::npos && q1 > q0 + 1)
+                    prefix = j.substr(q0 + 1, q1 - q0 - 1);
+            }
+        }
+    }
+    std::vector<int> holds;
+    holds.reserve(trk(s).frames.size());
+    for (const auto& f : trk(s).frames) holds.push_back(f.hold);
+    const std::vector<int> plan = openclip::planPngSeq(
+        static_cast<int>(trk(s).frames.size()), holds, expand);
+    if (plan.empty()) return JNI_FALSE;
+    // Composite each tick through the export path (tracks + anims +
+    // camera, same pixels as GIF/APNG).
+    std::vector<openclip::Surface> surfs(plan.size());
+    std::vector<const openclip::Surface*> ticks;
+    ticks.reserve(plan.size());
+    for (std::size_t k = 0; k < plan.size(); ++k) {
+        if (!compositeCell(s, s->activeTrack, plan[k], surfs[k]))
+            return JNI_FALSE;
+        ticks.push_back(&surfs[k]);
+    }
+    std::string error;
+    if (!openclip::writePngSeq(dir, prefix, ticks, "", error))
+        return JNI_FALSE;
+    return JNI_TRUE;
+}
+
+// §4: APNG export from scratch (acTL/fcTL/fdAT, delays = cel holds,
+// loop like GIF, maxWidth box-downscale, matte flattens to opaque).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nExportApng(JNIEnv* env, jclass,
+                                                jlong handle, jstring path,
+                                                jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !path || trk(s).frames.empty()) return JNI_FALSE;
+    const std::string p = toStd(env, path);
+    if (p.empty()) return JNI_FALSE;
+    const std::string j = json ? toStd(env, json) : std::string();
+    const int loop = static_cast<int>(jsonNum(j, "loop", 0));
+    int maxW = static_cast<int>(jsonNum(j, "maxWidth", 1024));
+    if (maxW < 1) maxW = 1;
+    if (maxW > 4096) maxW = 4096;
+    const double fps = jsonNum(j, "fps", 12.0);
+    std::string matte;
+    {
+        const std::string pat = "\"matte\"";
+        const std::size_t at = j.find(pat);
+        if (at != std::string::npos) {
+            const std::size_t colon = j.find(':', at + pat.size());
+            const std::size_t q0 =
+                colon == std::string::npos
+                    ? std::string::npos
+                    : j.find('"', colon + 1);
+            if (q0 != std::string::npos) {
+                const std::size_t q1 = j.find('"', q0 + 1);
+                if (q1 != std::string::npos && q1 > q0 + 1)
+                    matte = j.substr(q0 + 1, q1 - q0 - 1);
+            }
+        }
+    }
+    if (loop != 0 && loop != -1 && loop < 2) return JNI_FALSE;
+    const std::size_t n = trk(s).frames.size();
+    std::vector<openclip::ApngFrame> frames;
+    std::vector<openclip::Surface> owned;
+    owned.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        std::vector<std::uint8_t> straight;
+        int dw = 0, dh = 0;
+        if (!pullExportFrame(s, static_cast<int>(i), maxW, straight, dw,
+                             dh))
+            return JNI_FALSE;
+        openclip::ApngFrame f;
+        f.w = dw;
+        f.h = dh;
+        f.rgba.swap(straight);
+        f.delayCs = openclip::celDelayCs(trk(s).frames[i].hold, fps);
+        frames.push_back(std::move(f));
+    }
+    // Matte flatten: straight RGBA over the matte color (opaque out).
+    if (!matte.empty()) {
+        std::uint8_t mr = 255, mg = 255, mb = 255;
+        if (matte.size() == 7 && matte[0] == '#') {
+            unsigned v = 0;
+            bool ok = true;
+            for (int k = 1; k < 7; ++k) {
+                const char c = matte[k];
+                unsigned d = 0;
+                if (c >= '0' && c <= '9') d = c - '0';
+                else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                else ok = false;
+                v = (v << 4) | d;
+            }
+            if (ok) {
+                mr = (v >> 16) & 0xFF;
+                mg = (v >> 8) & 0xFF;
+                mb = v & 0xFF;
+                for (auto& f : frames) {
+                    for (std::size_t k = 0;
+                         k < static_cast<std::size_t>(f.w) * f.h; ++k) {
+                        const int a = f.rgba[k * 4 + 3];
+                        const int ia = 255 - a;
+                        int qr = f.rgba[k * 4 + 0] + (mr * ia + 127) / 255;
+                        int qg = f.rgba[k * 4 + 1] + (mg * ia + 127) / 255;
+                        int qb = f.rgba[k * 4 + 2] + (mb * ia + 127) / 255;
+                        f.rgba[k * 4 + 0] = qr > 255 ? 255 : qr;
+                        f.rgba[k * 4 + 1] = qg > 255 ? 255 : qg;
+                        f.rgba[k * 4 + 2] = qb > 255 ? 255 : qb;
+                        f.rgba[k * 4 + 3] = 255;
+                    }
+                }
+            } else {
+                return JNI_FALSE;  // malformed matte, honest refusal
+            }
+        } else {
+            return JNI_FALSE;
+        }
+    }
+    std::string error;
+    if (!openclip::writeApng(p, frames, loop, error)) return JNI_FALSE;
     return JNI_TRUE;
 }
 

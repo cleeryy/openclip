@@ -57,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -91,6 +92,9 @@ fun TimelineStrip(
     onClearAudio: () -> Unit = {},
     onExportWebm: () -> Unit = {},
     onAiUpscale: (Int) -> Unit = {},
+    // T3 animation productive (ARCHITECTURE.md §T3) : CSV de la
+    // feuille via SAF (MainActivity), le reste est engine direct.
+    onExportCsv: (String) -> Unit = {},
     // V+3 §7: external play/pause requests (space bar). Each increment
     // toggles; 0 (initial) never fires.
     playToggle: Int = 0,
@@ -858,6 +862,103 @@ fun TimelineStrip(
                     maxLines = 1
                 )
             }
+        }
+        // T3 animation productive (ARCHITECTURE.md §T3) : cles /
+        // camera / pistes / feuille. Les dialogues poussent le moteur
+        // direct (fiches meta hors undo) ; onChanged = refresh.
+        var showKeys by remember { mutableStateOf(false) }
+        var showCamera by remember { mutableStateOf(false) }
+        var showTracks by remember { mutableStateOf(false) }
+        var showSheet by remember { mutableStateOf(false) }
+        var t3Tick by remember { mutableStateOf(0) }
+        val t3Labels = remember(t3Tick) { surface.t3Labels }
+        if (t3Labels.isNotEmpty()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.testTag("t3-labels-ruler")
+            ) {
+                for (l in t3Labels) {
+                    TextButton(
+                        onClick = { gotoFrame(l.cel) },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("t3-label-${l.cel}")
+                    ) {
+                        Text(
+                            "● ${l.txt}",
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+        }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(
+                onClick = { showKeys = true },
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("t3-keys-open")
+            ) { Text(stringResource(R.string.anim_keys_open), maxLines = 1) }
+            TextButton(
+                onClick = { showCamera = true },
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("t3-camera-open")
+            ) { Text(stringResource(R.string.camera_open), maxLines = 1) }
+            TextButton(
+                onClick = { showTracks = true },
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("t3-tracks-open")
+            ) { Text(stringResource(R.string.track_open), maxLines = 1) }
+            TextButton(
+                onClick = { showSheet = true },
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("t3-sheet-open")
+            ) { Text(stringResource(R.string.exposure_open), maxLines = 1) }
+        }
+        if (showKeys) {
+            AnimKeysDialog(
+                surface = surface,
+                layerIndex = t3ActiveLayer(surface),
+                curCel = cur,
+                onDismiss = { showKeys = false },
+                onChanged = { refresh(); t3Tick++ }
+            )
+        }
+        if (showCamera) {
+            CameraDialog(
+                surface = surface,
+                curCel = cur,
+                onDismiss = { showCamera = false },
+                onChanged = { refresh(); t3Tick++ }
+            )
+        }
+        if (showTracks) {
+            val ctx = LocalContext.current
+            TracksDialog(
+                surface = surface,
+                cacheDir = ctx.cacheDir,
+                curCel = cur,
+                onDismiss = { showTracks = false },
+                onChanged = { refresh(); t3Tick++ }
+            )
+        }
+        if (showSheet) {
+            ExposureSheetDialog(
+                surface = surface,
+                frameCount = count,
+                holds = holds.toMap(),
+                curCel = cur,
+                onJump = { gotoFrame(it) },
+                onExportCsv = onExportCsv,
+                onDismiss = { showSheet = false; t3Tick++ }
+            )
         }
     }
     // Play steps only refresh the current thumb (full refresh waits for

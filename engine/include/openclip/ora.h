@@ -3,7 +3,9 @@
 #ifndef OPENCLIP_ORA_H
 #define OPENCLIP_ORA_H
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace openclip {
 
@@ -18,6 +20,10 @@ bool loadOra(Canvas& c, const std::string& path, std::string& error);
 
 // Export composited canvas to PNG file.
 bool exportPng(const Canvas& c, const std::string& path, std::string& error);
+
+// Encode a premultiplied surface to straight-RGBA PNG bytes in
+// memory (shared by exportPng and the T3 PNG sequence writer).
+bool encodePng(const Surface& s, std::vector<std::uint8_t>& png);
 
 // Import a PNG file as a single flattened layer (document helpers).
 bool loadPngInto(Canvas& c, const std::string& path, std::string& error);

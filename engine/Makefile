@@ -25,7 +25,10 @@ SRCS = src/raster/surface.cpp \
        src/paint/gradient.cpp \
        src/paint/shapes.cpp \
        src/paint/bubble.cpp \
-       src/ref/ref.cpp
+       src/ref/ref.cpp \
+       src/raster/anim.cpp \
+       src/raster/tracks.cpp \
+       src/io/apng.cpp
 
 TEST_SRCS = tests/main.cpp \
             tests/test_surface.cpp \
@@ -49,7 +52,10 @@ TEST_SRCS = tests/main.cpp \
             tests/test_shapes.cpp \
             tests/test_guides.cpp \
             tests/test_tiff.cpp \
-            tests/test_gif.cpp
+            tests/test_gif.cpp \
+            tests/test_anim.cpp \
+            tests/test_tracks.cpp \
+            tests/test_apng.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a

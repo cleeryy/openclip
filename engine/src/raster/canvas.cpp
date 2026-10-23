@@ -9,6 +9,8 @@
 #include <cmath>
 #include <utility>
 
+#include "openclip/anim.h"
+
 namespace openclip {
 
 namespace {
@@ -210,8 +212,13 @@ inline bool walkChildAdjustment(
 // mask.a/255.
 // M6: vector layers rasterize once per compositeInto call into a temp
 // surface and flow through the same blend/opacity/mask/clip path.
+// T3: `animTop` carries per-TOP-LEVEL-layer samples (nullptr = off);
+// recursive group levels always pass null (groups ignore keys,
+// ARCHITECTURE.md "T3 additions" §1).
 void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
-                   int h) {
+                   int h,
+                   const std::vector<LayerAnimSample>* animTop = nullptr,
+                   bool topLevel = true) {
     std::vector<Surface> vecScratch;
     const std::vector<const Surface*> vecCache =
         rasterizeAllVectors(layers, vecScratch, w, h);
@@ -286,7 +293,7 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                 Surface tmp;
                 tmp.resize(w, h);
                 tmp.clear();
-                compositeInto(l.children, tmp, w, h);
+                compositeInto(l.children, tmp, w, h, nullptr, false);
                 for (int y = 0; y < h; ++y) {
                     for (int x = 0; x < w; ++x) {
                         Pixel s = tmp.get(x, y);
@@ -303,6 +310,12 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
         }
         const Surface* vecTmp = vecCache[li];
         const Surface* bubTmp = bubCache[li];
+        // T3: active animation sample for this top-level layer (groups
+        // and untracked layers paint normally).
+        const LayerAnimSample* samp = nullptr;
+        if (topLevel && animTop && li < animTop->size() &&
+            (*animTop)[li].on && !l.isGroup)
+            samp = &(*animTop)[li];
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 // M8: adjustment layers paint no pixels; their op
@@ -312,7 +325,20 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                     continue;
                 // T2 bubble: composite-time balloon OVER the layer's own
                 // pixels (the fiche never commits pixels).
-                Pixel s = layerPixel(l, vecTmp, x, y);
+                Pixel s;
+                if (samp) {
+                    // T3: inverse-map through the sampled transform
+                    // about the layer center, bilinear resample.
+                    double sx, sy;
+                    animInverseMap(x, y, w / 2.0, h / 2.0,
+                                   LayerKeys{samp->dx, samp->dy, samp->scale,
+                                             samp->angle, samp->opacity},
+                                   sx, sy);
+                    const Surface* src = vecTmp ? vecTmp : &l.surface;
+                    s = sampleBilinear(*src, sx, sy);
+                } else {
+                    s = layerPixel(l, vecTmp, x, y);
+                }
                 if (bubTmp) {
                     const Pixel bpx = bubTmp->get(x, y);
                     if (bpx.a != 0) {
@@ -343,6 +369,9 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                     if (s.a == 0) continue;
                 }
                 s = scalePixel(s, l.opacity);
+                // T3: sampled opacity multiplies the layer opacity
+                // (alpha-only path, rgb stays <= alpha).
+                if (samp) s = scalePixel(s, samp->opacity);
                 Pixel d = out.get(x, y);
                 Pixel r;
                 blendPixel(s, d, l.blend, r);
@@ -441,6 +470,13 @@ void Canvas::composite(Surface& out) const {
     out.resize(w_, h_);
     out.clear();
     compositeInto(layers_, out, w_, h_);
+}
+
+void Canvas::compositeAnim(
+    Surface& out, const std::vector<LayerAnimSample>& samples) const {
+    out.resize(w_, h_);
+    out.clear();
+    compositeInto(layers_, out, w_, h_, &samples, true);
 }
 
 }  // namespace openclip

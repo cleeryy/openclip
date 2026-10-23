@@ -111,6 +111,10 @@ import dev.openclip.ui.BezierPanel
 import dev.openclip.ui.CopyPastePanel
 import dev.openclip.ui.CurvesPanel
 import dev.openclip.ui.GifPanel
+import dev.openclip.ui.AnimSidecar
+import dev.openclip.ui.T3ExportPanel
+import dev.openclip.ui.applyT3Doc
+import dev.openclip.ui.collectT3Doc
 import dev.openclip.ui.GuidesPanel
 import dev.openclip.ui.NavigatorPanel
 import dev.openclip.ui.PagesPanel
@@ -295,6 +299,30 @@ class MainActivity : ComponentActivity() {
         }
         val clipAudio = remember { ClipAudio() }
         val audioName = remember { mutableStateOf<String?>(null) }
+        // T3 §4 : chemin du cache audio (export audio seul = copie
+        // byte-identique, 0 JNI).
+        val audioPath = remember { mutableStateOf<String?>(null) }
+
+        // T3 §3.5 : sidecar anim.json v1 par document (filesDir,
+        // 64 Ko cap ; absent = 1 piste + pas d'etiquettes).
+        fun sidecarFile(id: String): java.io.File =
+            java.io.File(ctx.filesDir, "anim-${id}.json")
+
+        fun pushSidecar(surf: EngineSurface, id: String) {
+            try {
+                val doc = AnimSidecar.load(sidecarFile(id))
+                applyT3Doc(surf, doc)
+            } catch (_: Exception) {
+            }
+        }
+
+        fun pullSidecar(surf: EngineSurface, id: String) {
+            try {
+                val doc = collectT3Doc(surf, surf.layerCount())
+                AnimSidecar.save(sidecarFile(id), doc)
+            } catch (_: Exception) {
+            }
+        }
         val exporting = remember { mutableStateOf(false) }
         val clipFps = remember { mutableStateOf(12f) }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -592,6 +620,8 @@ class MainActivity : ComponentActivity() {
                             docRegistry.open(id, name)
                             docs.firstOrNull { it.docId == id }?.name = name
                             docRegistry.markDirty(id, false)
+                            // T3 §3.5 : repousse le sidecar du doc.
+                            pushSidecar(surface, id)
                         }
                     }
                     status.value = if (ok)
@@ -653,6 +683,7 @@ class MainActivity : ComponentActivity() {
                 copyTo(ctx, uri, dst)
                 if (clipAudio.attach(dst.absolutePath, name)) {
                     audioName.value = name
+                    audioPath.value = dst.absolutePath
                     status.value = ctx.getString(R.string.import_ok) + " " + name
                 } else {
                     dst.delete()
@@ -927,6 +958,55 @@ class MainActivity : ComponentActivity() {
             pendingExportFile.value = f
             createExportFile.launch("calque-${System.currentTimeMillis()}")
         }
+
+        // T3 §3 palier a + §4 : CSV de la feuille + audio seul (SAF,
+        // un hop par fichier comme V+2 ; l'audio = copie byte-identique
+        // du cache, 0 JNI).
+        val pendingCsv = remember { mutableStateOf<String?>(null) }
+        val createCsv = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("text/csv")
+        ) { uri: Uri? ->
+            val csv = pendingCsv.value
+            pendingCsv.value = null
+            if (uri != null && csv != null) {
+                try {
+                    ctx.contentResolver.openOutputStream(uri)?.use { o ->
+                        o.write(csv.toByteArray())
+                        status.value = ctx.getString(R.string.export_ok)
+                    } ?: run {
+                        status.value = ctx.getString(R.string.export_failed)
+                    }
+                } catch (_: Exception) {
+                    status.value = ctx.getString(R.string.export_failed)
+                }
+            } else if (uri != null) {
+                status.value = ctx.getString(R.string.export_failed)
+            }
+        }
+        val createAudioOnly = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream")
+        ) { uri: Uri? ->
+            val src = audioPath.value?.let { java.io.File(it) }
+            if (uri != null && src != null && src.exists()) {
+                try {
+                    ctx.contentResolver.openOutputStream(uri)?.use { o ->
+                        src.inputStream().use { i -> i.copyTo(o) }
+                        status.value = ctx.getString(R.string.export_ok)
+                    } ?: run {
+                        status.value = ctx.getString(R.string.export_failed)
+                    }
+                } catch (_: Exception) {
+                    status.value = ctx.getString(R.string.export_failed)
+                }
+            } else if (uri != null) {
+                status.value = if (src == null || !src.exists()) {
+                    ctx.getString(R.string.export_no_audio)
+                } else {
+                    ctx.getString(R.string.export_failed)
+                }
+            }
+        }
+
 
         // V+2 autosave (opt-in, local only, never mid-stroke).
         val autosaveOn = remember { mutableStateOf(false) }
@@ -1295,6 +1375,8 @@ class MainActivity : ComponentActivity() {
                     }
                     if (wrote) {
                         docRegistry.markDirty(id, false)
+                        // T3 §3.5 : persiste le sidecar avec le doc.
+                        pullSidecar(surf, id)
                         status.value = if (savePersistFailed.value &&
                             !savePersistHintShown.value
                         ) {
@@ -1324,7 +1406,11 @@ class MainActivity : ComponentActivity() {
             val surf = surfaces[id] ?: run { onDone?.invoke(false); return }
             testSavePaths[id]?.let { path ->
                 surf.saveTo(path, "ora") { ok ->
-                    if (ok) docRegistry.markDirty(id, false)
+                    if (ok) {
+                        docRegistry.markDirty(id, false)
+                        // T3 §3.5 : persiste le sidecar avec le doc.
+                        pullSidecar(surf, id)
+                    }
                     status.value = if (ok) ctx.getString(R.string.save_ok)
                     else ctx.getString(R.string.save_failed)
                     refreshKey.value++
@@ -2524,6 +2610,25 @@ class MainActivity : ComponentActivity() {
                                     onStatus = { status.value = it },
                                     modifier = Modifier.fillMaxWidth()
                                 )
+                                // T3 animation productive (spec
+                                // docs/t3-animation.md §4) : sequences
+                                // PNG (ZIP), APNG, stickers, audio seul.
+                                T3ExportPanel(
+                                    surface = surface,
+                                    cacheDir = ctx.cacheDir,
+                                    fps = clipFps.value,
+                                    hasAudio = audioName.value != null,
+                                    onExportFile = { f, mime ->
+                                        offerExportFile(f, mime)
+                                    },
+                                    onExportAudioOnly = {
+                                        createAudioOnly.launch(
+                                            "calque-audio-${System.currentTimeMillis()}"
+                                        )
+                                    },
+                                    onStatus = { status.value = it },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                                 WebtoonPanel(
                                     surface = surface,
                                     cacheDir = ctx.cacheDir,
@@ -2758,10 +2863,17 @@ class MainActivity : ComponentActivity() {
                             onClearAudio = {
                                 clipAudio.clear()
                                 audioName.value = null
+                                audioPath.value = null
                             },
                             onExportWebm = {
                                 createWebm.launch(
                                     "calque-${System.currentTimeMillis()}.webm"
+                                )
+                            },
+                            onExportCsv = { csv ->
+                                pendingCsv.value = csv
+                                createCsv.launch(
+                                    "calque-${System.currentTimeMillis()}.csv"
                                 )
                             },
                             onAiUpscale = { frameIdx ->

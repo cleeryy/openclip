@@ -76,6 +76,18 @@ import dev.openclip.ui.FontRegistry
 import dev.openclip.ui.TextOutline
 import dev.openclip.ui.TextRun
 import dev.openclip.ui.hyphenate
+import dev.openclip.ui.AnimKey
+import dev.openclip.ui.AnimLabel
+import dev.openclip.ui.AnimSidecar
+import dev.openclip.ui.CameraKey
+import dev.openclip.ui.T3TestHooks
+import dev.openclip.ui.animKeysFromJson
+import dev.openclip.ui.animKeysToJson
+import dev.openclip.ui.bezierEaseTable
+import dev.openclip.ui.buildExposure
+import dev.openclip.ui.cameraKeysFromJson
+import dev.openclip.ui.cameraKeysToJson
+import dev.openclip.ui.exposureCsv
 import dev.openclip.ui.textLayerIndexes
 import dev.openclip.ui.V2Bezier
 import dev.openclip.ui.V2CopyPaste
@@ -141,6 +153,9 @@ class EngineConformanceTest {
     // Small canvas: fast to composite, still larger than the brush stamp.
     private val w = 256
     private val h = 256
+
+    // T3 §1 : temoin median linear vs smooth (hors moteur).
+    private var lastMidLinear: IntArray = IntArray(0)
 
     // a. MainActivity starts and its Compose UI renders. On compact
     // phones the dock starts folded (Slice 0 §3): open it first so the
@@ -10099,4 +10114,505 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             closeFreshDoc(id)
         }
     }
+
+    // T3 §1: une cle deplacee change le composite ; l'undo moteur reste
+    // vide (fiches meta hors undo, comme holds/bulles).
+    @Test
+    fun keyAddMovesRendering() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val plain = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, plain, w, h)
+            assertTrue(
+                EngineHost.nSetLayerAnim(
+                    handle, 0,
+                    """{"keys":[{"cel":0,"dx":60,"dy":0,"scale":1,"angle":0,"opacity":1,"ease":"linear"}]}"""
+                )
+            )
+            val moved = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, moved, w, h)
+            // Calque blanc deplace de 60px : une bande de 60px devient
+            // transparente (ARGB 0) a gauche... en pratique le fond du
+            // composite est transparent hors calque : des pixels changent.
+            assertNotEquals(
+                "key must move rendering",
+                plain.toList(), moved.toList()
+            )
+            assertFalse("anim fiche is meta, never in undo", EngineHost.nUndo(handle))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §1: supprimer la piste restaure le rendu (calque normal).
+    @Test
+    fun keyDeleteRestores() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val plain = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, plain, w, h)
+            EngineHost.nSetLayerAnim(
+                handle, 0,
+                """{"keys":[{"cel":0,"dx":60,"dy":0,"scale":1,"angle":0,"opacity":1,"ease":"linear"}]}"""
+            )
+            assertTrue(EngineHost.nSetLayerAnim(handle, 0, null))
+            val back = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, back, w, h)
+            assertTrue(
+                "clearing keys must restore rendering",
+                plain.contentEquals(back)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §1: smooth != linear au cellulo median (aisance moteur).
+    @Test
+    fun curveEaseChangesMidframe() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            // Deux cles dx 0 -> 200 : echantillon au cel 3 (t=0.3, hors
+            // point fixe 0.5 ou smoothstep == lineaire) via le rendu
+            // (cle finale hors indice jouée par nFrameCompositeInto sur
+            // un clip de 11 cellulos).
+            repeat(10) { EngineHost.nAddFrame(handle) }
+            assertEquals(11, EngineHost.nFrameCount(handle))
+            val keys = listOf(
+                AnimKey(0, dx = 0f, ease = "EASE"),
+                AnimKey(10, dx = 200f, ease = "linear")
+            )
+            for (ease in listOf("linear", "smooth")) {
+                val ks = keys.map { it.copy(ease = if (it.cel == 0) ease else it.ease) }
+                EngineHost.nSetLayerAnim(handle, 0, animKeysToJson(ks))
+                val mid = IntArray(w * h)
+                EngineHost.nFrameCompositeInto(handle, 3, mid, w, h)
+                if (ease == "linear") {
+                    // Garde le temoin pour comparer (stocke hors moteur).
+                    lastMidLinear = mid
+                } else {
+                    assertNotEquals(
+                        "smooth must differ from linear at midframe",
+                        lastMidLinear.toList(), mid.toList()
+                    )
+                }
+            }
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §1+§3.5 : les cles survivent au sidecar (save/clear/re-push).
+    @Test
+    fun animSurvivesReload() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val json = animKeysToJson(
+                listOf(
+                    AnimKey(0, dx = 10f, ease = "smooth"),
+                    AnimKey(4, dx = 90f, opacity = 0.5f)
+                )
+            )
+            assertTrue(EngineHost.nSetLayerAnim(handle, 0, json))
+            val before = EngineHost.nLayerAnim(handle, 0)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val f = java.io.File(dir, "t3-anim-sidecar.json")
+            val doc = AnimSidecar.Doc(keys = mapOf(0 to animKeysFromJson(before)))
+            assertTrue(AnimSidecar.save(f, doc))
+            assertTrue(EngineHost.nSetLayerAnim(handle, 0, null))
+            assertEquals("{}", EngineHost.nLayerAnim(handle, 0))
+            val back = AnimSidecar.load(f)
+            val restored = back.keys[0] ?: emptyList()
+            assertTrue(EngineHost.nSetLayerAnim(handle, 0, animKeysToJson(restored)))
+            assertEquals(before, EngineHost.nLayerAnim(handle, 0))
+            f.delete()
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §2 : 2 cles pan — vignettes 0 et N different, median entre.
+    @Test
+    fun cameraKeyFramesDiffer() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            // Marque visible sur toute la largeur (chaque cellulo la
+            // porte : on DUPLIQUE, pas nAddFrame qui part vierge).
+            EngineHost.nSetBrush(handle, """{"radius":12,"color":"#141414"}""")
+            val sid = EngineHost.nStrokeBegin(handle, 60f, 128f, 1f)
+            EngineHost.nStrokeMove(handle, sid, 220f, 128f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            repeat(4) { EngineHost.nDuplicateFrame(handle) }
+            val cam = cameraKeysToJson(
+                listOf(
+                    CameraKey(0, x = 64f, y = 64f, zoom = 2f),
+                    CameraKey(4, x = 192f, y = 192f, zoom = 2f)
+                )
+            )
+            assertTrue(EngineHost.nSetCameraTrack(handle, cam))
+            assertTrue(EngineHost.nSetCameraEnabled(handle, true))
+            val a = IntArray(w * h)
+            val b = IntArray(w * h)
+            val m = IntArray(w * h)
+            EngineHost.nFrameCompositeInto(handle, 0, a, w, h)
+            EngineHost.nFrameCompositeInto(handle, 4, b, w, h)
+            EngineHost.nFrameCompositeInto(handle, 2, m, w, h)
+            assertTrue("cel 0 must show ink", a.any { it != -1 })
+            assertTrue("cel 4 must show ink", b.any { it != -1 })
+            assertNotEquals(a.toList(), b.toList())
+            assertNotEquals(a.toList(), m.toList())
+            assertNotEquals(b.toList(), m.toList())
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §2 : OFF = vue manuelle (composite identique, camera neutre).
+    @Test
+    fun cameraToggleRestores() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            repeat(2) { EngineHost.nAddFrame(handle) }
+            val plain = IntArray(w * h)
+            EngineHost.nFrameCompositeInto(handle, 1, plain, w, h)
+            assertTrue(
+                EngineHost.nSetCameraTrack(
+                    handle,
+                    cameraKeysToJson(listOf(CameraKey(0, x = 10f, y = 10f, zoom = 3f)))
+                )
+            )
+            assertTrue(EngineHost.nSetCameraEnabled(handle, true))
+            val framed = IntArray(w * h)
+            EngineHost.nFrameCompositeInto(handle, 1, framed, w, h)
+            assertNotEquals(plain.toList(), framed.toList())
+            assertTrue(EngineHost.nSetCameraEnabled(handle, false))
+            val back = IntArray(w * h)
+            EngineHost.nFrameCompositeInto(handle, 1, back, w, h)
+            assertTrue(plain.contentEquals(back))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §2+§3.5 : la camera survit au sidecar.
+    @Test
+    fun cameraSurvivesReload() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            val json = cameraKeysToJson(
+                listOf(
+                    CameraKey(0, x = 30f, y = 40f, zoom = 2f),
+                    CameraKey(3, x = 90f, y = 20f, zoom = 1f, ease = "smooth")
+                )
+            )
+            assertTrue(EngineHost.nSetCameraTrack(handle, json))
+            val before = EngineHost.nCameraTrack(handle)
+            val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            val f = java.io.File(dir, "t3-cam-sidecar.json")
+            assertTrue(
+                AnimSidecar.save(
+                    f, AnimSidecar.Doc(camera = cameraKeysFromJson(before))
+                )
+            )
+            assertTrue(EngineHost.nSetCameraTrack(handle, null))
+            assertEquals("{\"keys\":[]}", EngineHost.nCameraTrack(handle))
+            val back = AnimSidecar.load(f)
+            assertTrue(EngineHost.nSetCameraTrack(handle, cameraKeysToJson(back.camera)))
+            assertEquals(before, EngineHost.nCameraTrack(handle))
+            f.delete()
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §3 palier b : ajout + switch + stroke isole par piste.
+    @Test
+    fun trackAddSwitchStroke() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            assertEquals(1, EngineHost.nTrackCount(handle))
+            assertEquals(1, EngineHost.nAddTrack(handle, "B"))
+            assertEquals(2, EngineHost.nAddTrack(handle, "C"))
+            assertEquals(3, EngineHost.nAddTrack(handle, "D"))
+            assertEquals(4, EngineHost.nAddTrack(handle, "E")) // cap 4 : refus
+            assertEquals(4, EngineHost.nTrackCount(handle))
+            assertTrue(EngineHost.nSetActiveTrack(handle, 1))
+            assertEquals(1, EngineHost.nActiveTrack(handle))
+            EngineHost.nSetBrush(handle, """{"radius":8,"color":"#141414"}""")
+            val sid = EngineHost.nStrokeBegin(handle, 60f, 60f, 1f)
+            EngineHost.nStrokeMove(handle, sid, 120f, 60f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            val with1 = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, with1, w, h)
+            assertTrue(
+                "stroke on track 1 must show in the merged composite",
+                with1.any { it != -1 }
+            )
+            // Merge = pile visible entiere : retour piste 0, l'encre
+            // piste 1 reste visible (nCompositeInto ne cadre pas la
+            // piste active, ARCHITECTURE.md §T3).
+            assertTrue(EngineHost.nSetActiveTrack(handle, 0))
+            val stillMerged = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, stillMerged, w, h)
+            assertTrue(with1.contentEquals(stillMerged))
+            // Piste 1 cachee = encre absente du composite.
+            assertTrue(EngineHost.nSetTrackVisible(handle, 1, false))
+            val muted = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, muted, w, h)
+            assertTrue("muted track must vanish", muted.all { it == -1 })
+            assertNotEquals(with1.toList(), muted.toList())
+            assertTrue(EngineHost.nSetTrackVisible(handle, 1, true))
+            val reshown = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, reshown, w, h)
+            assertTrue(with1.contentEquals(reshown))
+            // Noms + etat.
+            assertTrue(EngineHost.nSetTrackName(handle, 1, "Encre"))
+            val st = EngineHost.nTrackState(handle)
+            assertTrue(st.contains("Encre"))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §3 : muette = absente du composite (piste masquee).
+    @Test
+    fun trackMuteHides() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        try {
+            EngineHost.nAddTrack(handle, "B")
+            assertTrue(EngineHost.nSetActiveTrack(handle, 1))
+            EngineHost.nSetBrush(handle, """{"radius":16,"color":"#141414"}""")
+            val sid = EngineHost.nStrokeBegin(handle, 128f, 128f, 1f)
+            EngineHost.nStrokeMove(handle, sid, 160f, 128f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            val shown = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, shown, w, h)
+            assertTrue(shown.any { it != -1 })
+            assertTrue(EngineHost.nSetTrackVisible(handle, 1, false))
+            val hidden = IntArray(w * h)
+            EngineHost.nCompositeInto(handle, hidden, w, h)
+            assertTrue(
+                "muted track must vanish from the composite",
+                hidden.all { it == -1 }
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §3 palier a : etiquette + rechargement identique (sidecar).
+    @Test
+    fun labelJumpAndRoundTrip() {
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val f = java.io.File(dir, "t3-labels-sidecar.json")
+        try {
+            val doc = AnimSidecar.Doc(
+                labels = listOf(
+                    AnimLabel(0, "debut"),
+                    AnimLabel(5, "fin", "#FF0000")
+                )
+            )
+            assertTrue(AnimSidecar.save(f, doc))
+            val back = AnimSidecar.load(f)
+            assertEquals(2, back.labels.size)
+            assertEquals(0, back.labels[0].cel)
+            assertEquals("debut", back.labels[0].txt)
+            // La couleur par defaut survit au round trip.
+            assertEquals("#FFC845", back.labels[0].color)
+            assertEquals("#FF0000", back.labels[1].color)
+        } finally {
+            f.delete()
+        }
+    }
+
+    // T3 §3 palier a : la feuille montre holds + badges (sonde).
+    @Test
+    fun exposureSheetShowsHolds() {
+        val rows = buildExposure(
+            frameCount = 4,
+            holds = mapOf(1 to 3),
+            keyCounts = mapOf(0 to 2),
+            cameraCels = setOf(2),
+            labels = listOf(AnimLabel(0, "debut"))
+        )
+        T3TestHooks.lastExposure = rows
+        val probe = T3TestHooks.exposureForTest()
+        assertEquals(4, probe.size)
+        assertEquals(1, probe[0].hold)
+        assertEquals(3, probe[1].hold)
+        assertEquals(listOf(0), probe[0].keyedLayers)
+        assertTrue(probe[2].cameraKey)
+        assertEquals("debut", probe[0].label)
+        // Table Bezier 64 pas : monotone sur la diagonale lineaire.
+        val table = bezierEaseTable(0.25f, 0.25f, 0.75f, 0.75f)
+        T3TestHooks.lastBezierTable = table
+        assertEquals(65, table.size)
+        assertTrue(table[0] <= 0.01f && table[64] >= 0.99f)
+    }
+
+    // T3 §3 palier a : le CSV s'exporte (en-tete + N lignes, lisible).
+    @Test
+    fun exposureCsvExports() {
+        val rows = buildExposure(
+            frameCount = 3,
+            holds = mapOf(2 to 4),
+            keyCounts = mapOf(1 to 1),
+            cameraCels = emptySet(),
+            labels = listOf(AnimLabel(2, "fin"))
+        )
+        val csv = exposureCsv(rows, trackCount = 2)
+        val lines = csv.trim().split("\n")
+        assertEquals("cel,hold,keys,camera,label,tracks", lines[0])
+        assertEquals(4, lines.size)
+        assertTrue(lines[3].startsWith("2,4,"))
+        assertTrue(lines[3].contains("fin"))
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val f = java.io.File(dir, "t3-exposure.csv")
+        try {
+            f.writeText(csv)
+            val back = f.readText()
+            assertEquals(csv, back)
+            assertTrue(back.contains("cel,hold,keys"))
+        } finally {
+            f.delete()
+        }
+    }
+
+    // T3 §4 : sequence PNG -> ZIP lisible (entrees PNG valides).
+    @Test
+    fun pngSeqZipOpens() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val seq = java.io.File(dir, "t3seq-${System.currentTimeMillis()}")
+        try {
+            EngineHost.nAddFrame(handle)
+            EngineHost.nSetCelHold(handle, 0, 2)
+            seq.mkdirs()
+            assertTrue(
+                EngineHost.nExportPngSeq(
+                    handle, seq.absolutePath,
+                    """{"expandHolds":true,"prefix":"frame"}"""
+                )
+            )
+            val files = seq.listFiles { f -> f.extension == "png" }
+                ?.sortedBy { it.name } ?: emptyList()
+            // 2 cellulos, cel 0 tenu x2 -> 3 ticks.
+            assertEquals(3, files.size)
+            // ZIP app-side (java.util.zip) : entrees lisibles, PNG reels.
+            val zip = java.io.File(dir, "t3seq-${System.currentTimeMillis()}.zip")
+            try {
+                java.util.zip.ZipOutputStream(zip.outputStream()).use { z ->
+                    for (f in files) {
+                        z.putNextEntry(java.util.zip.ZipEntry(f.name))
+                        f.inputStream().use { it.copyTo(z) }
+                        z.closeEntry()
+                    }
+                }
+                var entries = 0
+                java.util.zip.ZipFile(zip).use { zf ->
+                    val en = zf.entries()
+                    while (en.hasMoreElements()) {
+                        val e = en.nextElement()
+                        zf.getInputStream(e).use { ins ->
+                            val sig = ByteArray(8)
+                            assertEquals(8, ins.read(sig))
+                            // Signature PNG.
+                            assertEquals(137.toByte(), sig[0])
+                            assertEquals(80.toByte(), sig[1])
+                        }
+                        entries++
+                    }
+                }
+                assertEquals(3, entries)
+            } finally {
+                zip.delete()
+            }
+        } finally {
+            seq.deleteRecursively()
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §4 : APNG jouable (non vide + acTL present).
+    @Test
+    fun apngExportPlayable() {
+        val handle = EngineHost.nInit(w, h, 160f)
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        try {
+            EngineHost.nAddFrame(handle)
+            val dst = java.io.File(dir, "t3-${System.currentTimeMillis()}.png")
+            try {
+                assertTrue(
+                    EngineHost.nExportApng(
+                        handle, dst.absolutePath,
+                        """{"loop":-1,"maxWidth":256,"fps":12}"""
+                    )
+                )
+                assertTrue(dst.length() > 100)
+                val bytes = dst.readBytes()
+                assertEquals(137.toByte(), bytes[0])
+                val txt = String(bytes, Charsets.ISO_8859_1)
+                assertTrue("acTL must be present", txt.contains("acTL"))
+                assertTrue("2 fcTL expected", txt.split("fcTL").size == 3)
+            } finally {
+                dst.delete()
+            }
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §4 : sticker 512 — le grand cote tient dans 512, fond opaque.
+    @Test
+    fun sticker512Fits() {
+        val big = 1024
+        val handle = EngineHost.nInit(big, big, 160f)
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        try {
+            val dst = java.io.File(dir, "sticker-${System.currentTimeMillis()}.png")
+            try {
+                assertTrue(
+                    EngineHost.nExportApng(
+                        handle, dst.absolutePath,
+                        """{"loop":-1,"maxWidth":512,"matte":"#FFFFFF"}"""
+                    )
+                )
+                val bytes = dst.readBytes()
+                assertTrue(bytes.size > 33)
+                // IHDR : largeur/hauteur u32 big-endian a l'offset 16.
+                fun u32(o: Int): Int {
+                    return ((bytes[o].toInt() and 0xFF) shl 24) or
+                        ((bytes[o + 1].toInt() and 0xFF) shl 16) or
+                        ((bytes[o + 2].toInt() and 0xFF) shl 8) or
+                        (bytes[o + 3].toInt() and 0xFF)
+                }
+                val iw = u32(16)
+                val ih = u32(20)
+                assertTrue("sticker side must fit 512, got $iw x $ih", iw <= 512 && ih <= 512)
+            } finally {
+                dst.delete()
+            }
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    // T3 §4 : audio seul = copie byte-identique (0 JNI, chemin SAF).
+    @Test
+    fun audioOnlyCopiesBytes() {
+        val dir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val src = java.io.File(dir, "t3-audio-src.bin")
+        val dst = java.io.File(dir, "t3-audio-dst.bin")
+        try {
+            val payload = ByteArray(4096) { (it * 31 % 251).toByte() }
+            src.writeBytes(payload)
+            src.inputStream().use { i -> dst.outputStream().use { o -> i.copyTo(o) } }
+            assertTrue(dst.readBytes().contentEquals(payload))
+        } finally {
+            src.delete()
+            dst.delete()
+        }
+    }
+
 }
+

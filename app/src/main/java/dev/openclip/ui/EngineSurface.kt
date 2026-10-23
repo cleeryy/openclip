@@ -856,6 +856,83 @@ class EngineSurface @JvmOverloads constructor(
             .also { if (it) needsComposite = true } else false
     }
 
+    // T3 animation (ARCHITECTURE.md §T3) : cles, camera, pistes,
+    // sequences + APNG. Fiches meta hors undo ; sorties = lecture
+    // seule cote undo (comme GIF/WebM).
+    fun setLayerAnim(index: Int, json: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetLayerAnim(handle, index, json)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun layerAnim(index: Int): String = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nLayerAnim(handle, index) else ""
+    }
+
+    fun animKeyCount(index: Int): Int = try {
+        animKeysFromJson(layerAnim(index)).size
+    } catch (_: Exception) {
+        0
+    }
+
+    fun setCameraTrack(json: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetCameraTrack(handle, json)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun cameraTrack(): String = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nCameraTrack(handle) else "{\"keys\":[]}"
+    }
+
+    fun setCameraEnabled(on: Boolean): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetCameraEnabled(handle, on)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun trackCount(): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nTrackCount(handle) else 0
+    }
+
+    fun addTrack(name: String): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nAddTrack(handle, name)
+            .also { if (it >= 0) needsComposite = true } else -1
+    }
+
+    fun setActiveTrack(i: Int): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetActiveTrack(handle, i)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun activeTrack(): Int = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nActiveTrack(handle) else 0
+    }
+
+    fun setTrackVisible(i: Int, on: Boolean): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetTrackVisible(handle, i, on)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun setTrackName(i: Int, name: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetTrackName(handle, i, name) else false
+    }
+
+    fun deleteTrack(i: Int): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nDeleteTrack(handle, i)
+            .also { if (it) needsComposite = true } else false
+    }
+
+    fun trackState(): String = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nTrackState(handle)
+        else "{\"active\":0,\"tracks\":[]}"
+    }
+
+    fun exportPngSeq(dirPath: String, json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nExportPngSeq(handle, dirPath, json) else false
+    }
+
+    fun exportApng(path: String, json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nExportApng(handle, path, json) else false
+    }
+
     /** Bubble fiche mirror for panels/tests (null = normal layer). */
     fun bubbleFicheForTest(index: Int): BubbleLayer? {
         return try {
@@ -905,6 +982,9 @@ class EngineSurface @JvmOverloads constructor(
     /** V+2: guides JSON fragment shared with GuidesPanel (single
      * rulers source: both sides re-push symmetry + guides together). */
     @Volatile var guideJson: String = ""
+
+    /** T3 §3 palier a : etiquettes session (0 JNI, sidecar anim.json). */
+    @Volatile var t3Labels: List<AnimLabel> = emptyList()
 
     /** V+2: symmetry fragment owned by ToolPalette, merged by guides. */
     @Volatile var symmetryJson: String = ""
