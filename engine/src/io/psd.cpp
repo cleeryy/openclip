@@ -403,9 +403,28 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
                 return "lddg";  // linear dodge (add)
             case BlendMode::SoftLight:
                 return "sSoft";
+            // T5 additions (ARCHITECTURE.md "T5 additions" §3): real
+            // Photoshop keys where they exist; exclusion has no key.
+            case BlendMode::Darken:
+                return "dark";
+            case BlendMode::Lighten:
+                return "lite";
+            case BlendMode::LinearBurn:
+                return "lbrn";
+            case BlendMode::LinearDodge:
+                return "lddg";  // same key as Add (documented twin)
+            case BlendMode::VividLight:
+                return "vLit";
+            case BlendMode::LinearLight:
+                return "lLit";
+            case BlendMode::PinLight:
+                return "pLit";
+            case BlendMode::Subtract:
+                return "fsub";
+            case BlendMode::Divide:
+                return "fdiv";
             default:
-                mapped = false;  // hard-light/difference/color/
-                                 // luminosity -> norm + counted
+                mapped = false;  // exclusion -> norm + counted
                 return "norm";
         }
     };
@@ -418,9 +437,13 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
         // T2: bubble layers are non-eligible (flattened + counted, the
         // V+2 §5.5 rule); text layers stay eligible (fiche is
         // pixel-neutral) with a TySh subset block (see below).
+        // T5: reference/draft layers merge into the base record
+        // (spec §1.6: flattened + counted); fill layers carry no
+        // committable pixels (spec §2.6: base + counted).
         const bool eligible = !l.isGroup && !l.hasMask && !l.clipped &&
                               l.adjustType.empty() && !l.isVector &&
-                              l.bubbleShape.empty();
+                              l.bubbleShape.empty() && !l.hasFill() &&
+                              !l.reference && !l.draft;
         if (!eligible) {
             needBase = true;
             ++approx;  // merged into the base record (visible count)
@@ -484,7 +507,8 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
             const Layer& l = c.layer(i);
             const bool eligible = !l.isGroup && !l.hasMask && !l.clipped &&
                                   l.adjustType.empty() && !l.isVector &&
-                                  l.bubbleShape.empty();
+                                  l.bubbleShape.empty() && !l.hasFill() &&
+                                  !l.reference && !l.draft;
             if (!eligible) base.adoptLayer(l);
         }
         Surface bcomp;

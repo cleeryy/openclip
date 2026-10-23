@@ -38,16 +38,22 @@ struct FillParams {
 // composite pull (one pull, never a pull loop) instead of s at the
 // seed point — the region walk still runs on s. Same contract
 // otherwise (seed point only bounds-checks, still required in-range).
+// T5 §1 verrou alpha (ARCHITECTURE.md "T5 additions" §1): when
+// alphaLock is true, pixels whose destination alpha is zero are
+// skipped (paint only lands on already-covered pixels). Default false
+// = byte-identical legacy path.
 bool floodFillSeeded(Surface& s, int x, int y, double seedLum,
                      std::uint8_t r, std::uint8_t g, std::uint8_t b,
                      const FillParams& p, const std::uint8_t* mask,
-                     int maskStride, std::string& error);
+                     int maskStride, std::string& error,
+                     bool alphaLock = false);
 // Returns false + surface byte-identical when the seed is outside the
 // surface, the surface is empty, or params are invalid
 // (tolerance outside [0,1], expandPx outside [0,2]).
 bool floodFill(Surface& s, int x, int y, std::uint8_t r, std::uint8_t g,
                std::uint8_t b, const FillParams& p,
-               const std::uint8_t* mask, int maskStride, std::string& error);
+               const std::uint8_t* mask, int maskStride, std::string& error,
+               bool alphaLock = false);
 
 // Magic wand (§4): the SAME kernel in mask-output mode. Region metric
 // identical to floodFill (4-connected, Rec.601 luma + tolerance).

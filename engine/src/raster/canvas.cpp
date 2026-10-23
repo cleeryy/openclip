@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "openclip/anim.h"
+#include "openclip/fill_layer.h"
 
 namespace openclip {
 
@@ -71,6 +72,37 @@ inline std::vector<const Surface*> renderAllBubbles(
         scratch[i].resize(w, h);
         scratch[i].clear();
         if (!renderBubble(spec, scratch[i], err)) continue;
+        ptrs[i] = &scratch[i];
+    }
+    return ptrs;
+}
+
+// T5: pre-render every fill layer of a flat list into scratch
+// (nullptr for non-fill entries). Composite-time only: the fiche
+// never commits pixels (ARCHITECTURE.md "T5 additions" §2).
+inline std::vector<const Surface*> renderAllFills(
+    const std::vector<Layer>& layers, std::vector<Surface>& scratch, int w,
+    int h) {
+    scratch.clear();
+    scratch.resize(layers.size());
+    std::vector<const Surface*> ptrs(layers.size(), nullptr);
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        const Layer& l = layers[i];
+        if (l.isGroup || !l.hasFill()) continue;
+        // A fiche is present: the surface is IGNORED while it lives
+        // (ARCHITECTURE.md "T5 additions" §2). Malformed fiches paint
+        // nothing (cleared scratch), never the stale surface.
+        scratch[i].resize(w, h);
+        scratch[i].clear();
+        FillSpec spec;
+        std::string err;
+        if (!parseFillSpec(l, spec, err)) {
+            ptrs[i] = &scratch[i];
+            continue;
+        }
+        if (!renderFill(spec, w, h, scratch[i], err)) {
+            scratch[i].clear();
+        }
         ptrs[i] = &scratch[i];
     }
     return ptrs;
@@ -215,19 +247,27 @@ inline bool walkChildAdjustment(
 // T3: `animTop` carries per-TOP-LEVEL-layer samples (nullptr = off);
 // recursive group levels always pass null (groups ignore keys,
 // ARCHITECTURE.md "T3 additions" §1).
+// T5: `forExport` skips top-level reference/draft layers
+// (ARCHITECTURE.md "T5 additions" §1 — editor composites keep them).
 void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                    int h,
                    const std::vector<LayerAnimSample>* animTop = nullptr,
-                   bool topLevel = true) {
+                   bool topLevel = true, bool forExport = false) {
     std::vector<Surface> vecScratch;
     const std::vector<const Surface*> vecCache =
         rasterizeAllVectors(layers, vecScratch, w, h);
     std::vector<Surface> bubScratch;
     const std::vector<const Surface*> bubCache =
         renderAllBubbles(layers, bubScratch, w, h);
+    std::vector<Surface> fillScratch;
+    const std::vector<const Surface*> fillCache =
+        renderAllFills(layers, fillScratch, w, h);
     for (std::size_t li = 0; li < layers.size(); ++li) {
         const auto& l = layers[li];
         if (!l.visible || l.opacity <= 0.0f) continue;
+        // T5 §1: reference/draft layers never reach an export — but
+        // only at the top level (flags live on top-level layers).
+        if (forExport && topLevel && (l.reference || l.draft)) continue;
         if (l.isGroup) {
             if (l.passThrough) {
                 // Children blend directly into the target with their own
@@ -237,9 +277,16 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                 // into childVec (isolated groups recurse through
                 // compositeInto and are covered by that level's cache).
                 // The stencil below is vector-aware via childVecCache.
+                // T5: fill children of pass-through groups render like
+                // top-level fills (the isolated-group path below
+                // recurses through compositeInto and is covered by
+                // that level's cache).
                 std::vector<Surface> childVecScratch;
                 const std::vector<const Surface*> childVecCache =
                     rasterizeAllVectors(l.children, childVecScratch, w, h);
+                std::vector<Surface> childFillScratch;
+                const std::vector<const Surface*> childFillCache =
+                    renderAllFills(l.children, childFillScratch, w, h);
                 for (std::size_t ci = 0; ci < l.children.size(); ++ci) {
                     const auto& child = l.children[ci];
                     if (!child.visible || child.opacity <= 0.0f) continue;
@@ -261,7 +308,13 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                                 !stencilPainted(l.children, childVecCache,
                                                 ci, out, x, y))
                                 continue;
-                            Pixel s = layerPixel(child, childTmp, x, y);
+                            // T5: fill children paint their rendered
+                            // content (surface ignored while fiche
+                            // lives, like top-level fills below).
+                            Pixel s = childFillCache[ci]
+                                          ? childFillCache[ci]->get(x, y)
+                                          : layerPixel(child, childTmp, x,
+                                                       y);
                             if (s.a == 0) continue;
                             if (child.hasMask) {
                                 const std::uint8_t ma = child.mask.get(x, y).a;
@@ -293,7 +346,8 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                 Surface tmp;
                 tmp.resize(w, h);
                 tmp.clear();
-                compositeInto(l.children, tmp, w, h, nullptr, false);
+                compositeInto(l.children, tmp, w, h, nullptr, false,
+                              forExport);
                 for (int y = 0; y < h; ++y) {
                     for (int x = 0; x < w; ++x) {
                         Pixel s = tmp.get(x, y);
@@ -325,6 +379,9 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                     continue;
                 // T2 bubble: composite-time balloon OVER the layer's own
                 // pixels (the fiche never commits pixels).
+                // T5: fill layers paint their rendered content (the
+                // surface is ignored while the fiche lives).
+                const Surface* fillTmp = fillCache[li];
                 Pixel s;
                 if (samp) {
                     // T3: inverse-map through the sampled transform
@@ -334,8 +391,11 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                                    LayerKeys{samp->dx, samp->dy, samp->scale,
                                              samp->angle, samp->opacity},
                                    sx, sy);
-                    const Surface* src = vecTmp ? vecTmp : &l.surface;
+                    const Surface* src =
+                        fillTmp ? fillTmp : (vecTmp ? vecTmp : &l.surface);
                     s = sampleBilinear(*src, sx, sy);
+                } else if (fillTmp) {
+                    s = fillTmp->get(x, y);
                 } else {
                     s = layerPixel(l, vecTmp, x, y);
                 }
@@ -472,11 +532,24 @@ void Canvas::composite(Surface& out) const {
     compositeInto(layers_, out, w_, h_);
 }
 
+void Canvas::compositeExport(Surface& out) const {
+    out.resize(w_, h_);
+    out.clear();
+    compositeInto(layers_, out, w_, h_, nullptr, true, true);
+}
+
 void Canvas::compositeAnim(
     Surface& out, const std::vector<LayerAnimSample>& samples) const {
     out.resize(w_, h_);
     out.clear();
     compositeInto(layers_, out, w_, h_, &samples, true);
+}
+
+void Canvas::compositeAnimExport(
+    Surface& out, const std::vector<LayerAnimSample>& samples) const {
+    out.resize(w_, h_);
+    out.clear();
+    compositeInto(layers_, out, w_, h_, &samples, true, true);
 }
 
 }  // namespace openclip

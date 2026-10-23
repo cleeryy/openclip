@@ -1028,3 +1028,192 @@ code per the frozen-JNI rule):
   growth. A generic `nT4Op(handle, json)` was considered and
   REFUSED (same clause as T1 §8 / T2 / T3: explicit names keep
   `check_jni_symbols.sh` and per-op tests readable).
+
+T5 additions (decided 2026-10-23, exchange + pages + productivity
+round — spec docs/t5-exchange.md; delivery order §3 → §1 → §2 →
+§4 → §7 → §5 → §6; EXACTLY 2 new symbols, this section documents
+both BEFORE code per the frozen-JNI rule):
+
+- Conventions (all 7 items): M3 alpha contract holds (rgb <= alpha;
+  only texture commits and the dropShadow-style shadow step touch
+  alpha BY DESIGN); pixel writes = full-layer tile snapshots (1
+  step); fiches (flags, fills, keys, macros, labels) = meta hors
+  undo (like holds/bubbles/pins — dragging or ticking is not a
+  stroke); refused writes create NO undo entry (endStroke with zero
+  touched tiles records nothing — locked by the undo kernel);
+  overlay-only UI (badges, crop marks, double view, history, loupe);
+  engine coords everywhere; targets >= 48dp.
+- §3 blends (0 new symbol): `blend.h` grows TEN clean-room modes,
+  routed by the existing LayerPanel list (pattern V+2 §5.5):
+  `darken` (min), `lighten` (max), `linear-burn` (max(0,s+d-1)),
+  `linear-dodge` (min(1,s+d) — documented TWIN of the existing
+  `add`, tested twin-equal, kept as its own name for the open
+  nomenclature), `vivid-light` (burn(2s,d) for s<=0.5 else
+  dodge(2(s-0.5),d)), `linear-light` (clamp(d+2s-1)),
+  `pin-light` (darken(2s,d) for s<=0.5 else lighten(2(s-0.5),d)),
+  `subtract` (max(0,d-s)), `divide` (d/s clamped, s<=0 → d<=0 ? 0
+  : 1), `exclusion` (s+d-2sd). All flow through the existing
+  unpremultiply/over/repremultiply path (premultiplied-safe,
+  rgb <= alpha). Neutrals documented: darken=white,
+  lighten=black, linear-burn=white, linear-dodge=black,
+  vivid/linear/pin=mid-gray, subtract=black, divide=white,
+  exclusion=black. `blendFromName`/`blendToName` accept and emit
+  both bare and `svg:`-prefixed names (M5 rule); snake_case
+  aliases accepted on input. PSD `savePsd` maps the open names
+  onto real keys (darken→`dark`, lighten→`lite`,
+  linear-burn→`lbrn`, linear-dodge/add→`lddg`, vivid-light→`vLit`,
+  linear-light→`lLit`, pin-light→`pLit`, subtract→`fsub`,
+  divide→`fdiv`); `exclusion` has no PSD key → `norm` + counted
+  (V+2 §5.5 rule unchanged). ORA keeps the `svg:` names.
+- §1 layer locks (ONE new symbol, below): `Layer` grows four plain
+  flags (default false, survive resize/copy like the M8 fiches):
+  `locked` (any write refused: strokes, flood/gradient/shape/blit,
+  selection blit, puppet, filters, tones — false + layer
+  byte-identical), `alphaLock` (paint commits only where dst
+  alpha > 0 — the maison transparency lock), `reference` and
+  `draft` (visible in the editor, EXCLUDED from every export
+  composite). The guard is CENTRAL in the shim (one
+  `layerWritable` check at each write entry point, not N `if`s):
+  strokes are refused in `paintStamp` (zero touched tiles → zero
+  undo entry, kernel-guaranteed); indexed ops check before their
+  snapshot; mask/selection READS stay allowed on locked layers
+  (overlay only, never applicable). `alphaLock` rides the dab
+  path: `paintDab`/`eraseDab` gain a defaulted `alphaLock=false`
+  param (existing callers byte-identical) skipping dst.a==0
+  pixels — and so do `floodFill`/`floodFillSeeded`, `paintGradient`
+  and `stampShape` (same defaulted param, same skip). Ops that would
+  ignore coverage by construction are REFUSED on alphaLock layers
+  (`false` + intact, no undo): `nBlitPngIntoLayer` (whole-surface
+  replace), `dropShadow` and `edgeBorder` outside/center (alpha
+  extension by design). Transforms (selection moves, warps, puppet)
+  RELOCATE coverage and stay allowed; the wand only writes the mask.
+  Export exclusion lives in the composite: `compositeInto`
+  (and the `Canvas::compositeAnim` / `compositeCell` chain) gain
+  a defaulted `forExport=false` param; `forExport=true` skips
+  `reference`/`draft` top-level layers (group children never
+  carry flags — spec: flags are top-level only). The editor
+  `nCompositeInto` passes false; `nFrameCompositeInto` (= the
+  export composite: no onion, no ref wireframe, no R/D) and every
+  engine-side sequence export (GIF/APNG/PNG-seq pulls) pass true.
+  App-side file exports (EPUB/PDF/webtoon/sequence ZIP) pull
+  `nFrameCompositeInto`, never the editor composite — so R/D
+  never leaks into a deliverable. `Canvas::compositeExport`
+  (forExport walk over the live canvas) backs `nSaveDocument`
+  `png` (ORA keeps everything: it is the working round trip, not
+  an export). PSD: R/D layers are non-eligible → merged into the
+  base `Merged approximations` record + counted (spec §1.6 —
+  honest flatten, like bubbles).
+  - `nSetLayerFlags(handle, index, json): Boolean` — `{locked?,
+    alphaLock?, reference?, draft?}` (M3 rule: unknown ignored,
+    missing = unchanged; `false` + intact on bad index or
+    unparsable JSON). Meta hors undo. `nLayerState` gains
+    `"flags":{locked,alphaLock,reference,draft}` on every entry.
+    ORA round trip: `x-openclip-locked|alphalock|reference|draft`
+    `="1"` attrs on `<layer>` (third-party readers ignore them →
+    pixels only, same clean degrade as M8; the generic meta
+    reloader skips these four names so they never double into
+    `meta`).
+- §2 fills + edge filters (ONE new symbol, below): pure kernel
+  `openclip/fill_layer.h` (same spirit as `bubble.h`: parse +
+  render, no Canvas): `parseFillSpec(json, FillSpec&, err)` reads
+  `{kind:"solid"|"gradient"|"foil", color:"#RRGGBB",
+  mode:"linear"|"radial", x0,y0,x1,y1, stops:["#RRGGBB:pos"...2..8],
+  hue:0..360, scale:1..16, shine:0..1}` (M3 rule; stops sorted by
+  the engine; < 2 stops with kind gradient = error); `renderFill
+  (FillSpec, w, h, Surface&)` is deterministic (fixed seeds):
+  solid = opaque flat; gradient = linear projection or radial
+  distance over the stops ramp (opaque stops only — the T1 FUTURE
+  holds); foil = rotating-hue iridescent ramp × fixed-seed
+  value-Perlin (same spirit as the T4 `perlinClouds` grain) ×
+  diagonal clear bands (documented evocation, not a physical
+  simulation). Composite-time like adjustments M8: `compositeInto`
+  pre-renders every fill layer once per composite call (the
+  bubble-cache pattern) and the fill pixels flow through the SAME
+  mask/clip/opacity/blend path as normal layers (children of
+  groups included — fills may live anywhere a normal layer may).
+  The surface of a fill layer is KEPT but ignored while the fiche
+  lives, restored untouched when the fiche clears (null).
+  `nSetLayerFill(handle, index, json|null): Boolean` — null/empty
+  clears (layer normal again); `{"bake":true}` rasterizes: the
+  fill is rendered into the surface through the INTERNAL
+  blit-into-layer routine (full-layer tile snapshots, 1 undo
+  step — the same code path as `nBlitPngIntoLayer`, no PNG round
+  trip, same bytes, fewer failure modes; documented here) and the
+  fiche clears. `false` + intact on bad index / unparsable JSON /
+  stops < 2. Pixel tools on a fill layer are refused (app guard +
+  `activePaintLayer` extension, like adjustments V+1). Meta hors
+  undo (moving a stop is not a stroke). `nLayerState` gains
+  `"fill":{...}|null` (badge `F`). ORA: `x-openclip-fill`
+  (kind) + `x-openclip-fill-stops` + `x-openclip-fill-params`
+  (same clean degrade; skipped by the generic meta reloader).
+  PSD: fill layers non-eligible → base + counted (§2.6).
+  - 0-symbol filters on the `nApplyFilter` registry (M3 rule):
+    `edgeBorder` `{"width":1..32 (default 4), color:"#RRGGBB",
+    mode:"inside"|"outside"|"center"}` — opaque liseré along the
+    layer alpha contour (two-pass chamfer distance field from
+    scratch, binary response, 1px coverage AA ramp,
+    premultiplied-safe; `outside` paints transparent pixels near
+    paint, `inside` never touches transparent pixels); `watercolor`
+    `{"darken":0..1 (0.4), "rough":0..16 (6), "bloom":0..1
+    (0.3)}` — denser irregular edges (semi-covered pixels
+    darkened + saturated with fixed-seed procedural grain) and
+    washed centers (slight lift); all-zero params =
+    byte-identical (locked by test).
+- §4 grd/abr/accord (0 symbol, app-side 100 %): `GrdParser` /
+  `AbrParser` (Kotlin from scratch, no lib): `.grd` container →
+  maison stops (`#RRGGBB:pos`, 2..8, sorted); any non-color record
+  (noise, complex transparency) = REFUSED with a message (never a
+  silent approximate gradient); `.abr` envelope + 8-bit bitmaps →
+  brush dab stamp (size/hardness/opacity; proprietary dynamics
+  ignored + ANNOUNCED). Honest `import_approx` dialog (lists what
+  was ignored). Accord chromatique (6.12): per-channel
+  mean/stddev source→target (simplified Reinhard, from scratch)
+  → 256-entry LUT applied through the EXISTING `curves`
+  adjustment fiche (V+2) — 0 engine: the match becomes an
+  editable `curves` fiche. Test fixtures are generated IN CODE
+  (never third-party binaries). Undo: library import = app-side
+  removal; accord = `curves` meta (hors undo).
+- §7 macros/align/history/info (0 symbol, app-side 100 %): macros
+  = journal of successful mutating JNI calls + params at the shim
+  wrapper level (navigation ops filtered at record time);
+  replay = re-emit in order on the current doc (miss = stop +
+  per-line report, never silent); `macros.json` v1 local
+  (name/rename/delete, no step editing — FUTURE). Aligner =
+  6 aligns + 3 distributes over the session-only LayerPanel
+  multi-selection, executed through the EXISTING full-mask +
+  `nSelectionBlit` move path (white full-page mask posed, blit
+  translated, 1 step per moved layer — 0 new symbol, V+1 §1.5
+  pattern). History panel = session-only list of committed undo
+  steps (name + time; tap-to-return = N normal undos, exact-LIFO
+  T3 respected, no branching). Info panel = read-only 1 Hz max
+  (cursor, canvas, dpi, tip, active layer + flags/badges, zoom,
+  approx tile memory).
+- §5 pages (0 symbol, app-side 100 %): `project.json` v2
+  (`work:{titre,auteur,annee,resume,langue,sens}`,
+  `folio:{...}`, `crop:{...}`, `startPage:left|right`) — v1
+  readers: absent fields = empty, never broken. Folio numbers
+  (`{n}`/`{n}/{total}`/roman, 4 corners + bottom-center) render
+  AT EXPORT (never into ORA pixels). Double view = side-by-side
+  read-only (synchronous zoom/pan; editing returns to single —
+  announced). Crop marks = overlay (bleed + trim + safe zone,
+  mm via `nInit` dpi) with export opt-in. Fanzine = A5-on-A4 /
+  A6-on-A5 imposition (order + 180° versos, on-screen map,
+  multiple-of-4 enforced by proposing blank padding, never
+  silent). Page reorder stays the session undoable op (depth 20).
+- §6 EPUB/PDF/sequences (0 symbol, app-side 100 %): EPUB = ZIP
+  from scratch via `java.util.zip` (`mimetype` STORED FIRST —
+  format constraint, locked by test; `container.xml` + OPF
+  (metadata §5 + spine in order + `page-progression-direction`
+  from `reading`) + one XHTML per page + PNG composites from
+  `nFrameCompositeInto` with §5 opt-ins); validation =
+  re-open + well-formed XML. PDF = `android.graphics.pdf.
+  PdfDocument` (platform API, no lib), 1 PDF page per
+  `.ocpages/` page, raster per page (announced), folio/crop per
+  opt-ins. Multipage sequences = `nExportPngSeq` per page at the
+  PROJECT level (`pNN_frame_MMMM.png`, holds exploded, T3 camera
+  included) zipped app-side; sticker APNG = 1 per page
+  (matte + ≤512px, T3 preset).
+- T5 JNI budget: EXACTLY 2 new symbols (both documented above
+  BEFORE code): nSetLayerFlags, nSetLayerFill. Everything else is
+  registry/JSON/app-side. A generic `nT5Op(handle, json)` was
+  considered and REFUSED (same clause as T1 §8 / T2 / T3 / T4).

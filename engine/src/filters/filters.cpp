@@ -1248,6 +1248,225 @@ static bool fThreshold(const std::vector<std::uint8_t>& in, int w, int h,
     return true;
 }
 
+// T5 edgeBorder (ARCHITECTURE.md "T5 additions" §2, clean-room):
+// opaque liseré along the layer alpha contour. Two-pass chamfer-34
+// distance field (from scratch) to the nearest opposite-class pixel;
+// binary response with a 1px coverage AA ramp. inside paints covered
+// pixels near the edge (transparent pixels byte-identical); outside
+// paints transparent pixels near paint (extends the silhouette —
+// alpha grows BY DESIGN here, like dropShadow); center paints both
+// at half width. Premultiplied-safe: painted rgb = color * coverage.
+static bool fEdgeBorder(const std::vector<std::uint8_t>& in, int w, int h,
+                        double widthD, const std::string& colorHex,
+                        const std::string& mode,
+                        std::vector<std::uint8_t>& out,
+                        std::string& error) {
+    if (!(widthD >= 1.0) || widthD > 32.0) {
+        error = "edgeBorder: width must be in [1,32]";
+        return false;
+    }
+    if (mode != "inside" && mode != "outside" && mode != "center") {
+        error = "edgeBorder: mode must be \"inside\"|\"outside\"|\"center\"";
+        return false;
+    }
+    std::uint8_t cr = 0, cg = 0, cb = 0;
+    if (colorHex.size() != 7 || colorHex[0] != '#') {
+        error = "edgeBorder: color must be \"#RRGGBB\"";
+        return false;
+    }
+    auto hex = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    };
+    int v[6];
+    for (int k = 0; k < 6; ++k) {
+        v[k] = hex(colorHex[1 + k]);
+        if (v[k] < 0) {
+            error = "edgeBorder: color must be \"#RRGGBB\"";
+            return false;
+        }
+    }
+    cr = static_cast<std::uint8_t>(v[0] * 16 + v[1]);
+    cg = static_cast<std::uint8_t>(v[2] * 16 + v[3]);
+    cb = static_cast<std::uint8_t>(v[4] * 16 + v[5]);
+    out = in;
+    const float width = static_cast<float>(widthD);
+    const float half = (mode == "center") ? width / 2.0f : width;
+    const bool paintIn = (mode != "outside");
+    const bool paintOut = (mode != "inside");
+    // Chamfer-34 distance fields (from scratch, two passes each):
+    // A = every pixel to the nearest COVERED pixel (paints the
+    // outside ring); B = every pixel to the nearest TRANSPARENT
+    // pixel (paints the inside liseré).
+    std::vector<float> dist(static_cast<std::size_t>(w) * h, 1e9f);
+    auto covered = [&](int x, int y) -> bool {
+        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        return in[(static_cast<std::size_t>(y) * w + x) * 4 + 3] > 0;
+    };
+    auto chamfer = [&](bool seedCovered) {
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const bool c = covered(x, y);
+                dist[static_cast<std::size_t>(y) * w + x] =
+                    (c == seedCovered) ? 0.0f : 1e9f;
+            }
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                if (dist[i] == 0.0f) continue;
+                float best = 1e9f;
+                if (x > 0) best = std::min(best, dist[i - 1] + 1.0f);
+                if (y > 0) best = std::min(best, dist[i - w] + 1.0f);
+                if (x > 0 && y > 0)
+                    best = std::min(best, dist[i - w - 1] + 1.41421f);
+                if (x + 1 < w && y > 0)
+                    best = std::min(best, dist[i - w + 1] + 1.41421f);
+                dist[i] = best;
+            }
+        }
+        for (int y = h - 1; y >= 0; --y) {
+            for (int x = w - 1; x >= 0; --x) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                if (dist[i] == 0.0f) continue;
+                float best = dist[i];
+                if (x + 1 < w) best = std::min(best, dist[i + 1] + 1.0f);
+                if (y + 1 < h) best = std::min(best, dist[i + w] + 1.0f);
+                if (x + 1 < w && y + 1 < h)
+                    best = std::min(best, dist[i + w + 1] + 1.41421f);
+                if (x > 0 && y + 1 < h)
+                    best = std::min(best, dist[i + w - 1] + 1.41421f);
+                dist[i] = best;
+            }
+        }
+    };
+    chamfer(true);  // A: distance to nearest paint
+    if (paintOut) {
+        // Transparent pixels: distance to nearest paint.
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t i =
+                    (static_cast<std::size_t>(y) * w + x) * 4;
+                if (in[i + 3] != 0) continue;
+                const float dd =
+                    dist[static_cast<std::size_t>(y) * w + x];
+                if (dd > half + 0.5f) continue;
+                float cov = half + 0.5f - dd;
+                if (cov < 0) cov = 0;
+                if (cov > 1) cov = 1;
+                // Premultiplied color at coverage (alpha grows BY
+                // DESIGN on transparent pixels, the dropShadow
+                // clause in applyFilter copies it out).
+                out[i] = static_cast<std::uint8_t>(
+                    std::lround(cr * cov));
+                out[i + 1] = static_cast<std::uint8_t>(
+                    std::lround(cg * cov));
+                out[i + 2] = static_cast<std::uint8_t>(
+                    std::lround(cb * cov));
+                out[i + 3] =
+                    static_cast<std::uint8_t>(std::lround(255 * cov));
+            }
+        }
+    }
+    chamfer(false);  // B: distance to nearest transparency
+    // Covered pixels: distance to nearest transparency (computed by
+    // the second pass above). Paint the liseré over the source color
+    // (alpha untouched — the M3 contract; the final clamp keeps
+    // rgb <= a).
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            if (in[i + 3] == 0) continue;
+            const float dd = dist[static_cast<std::size_t>(y) * w + x];
+            if (!paintIn || dd > half + 0.5f) continue;
+            float cov = half + 0.5f - dd;
+            if (cov < 0) cov = 0;
+            if (cov > 1) cov = 1;
+            out[i] = static_cast<std::uint8_t>(
+                std::lround(cr * cov + out[i] * (1.0f - cov)));
+            out[i + 1] = static_cast<std::uint8_t>(
+                std::lround(cg * cov + out[i + 1] * (1.0f - cov)));
+            out[i + 2] = static_cast<std::uint8_t>(
+                std::lround(cb * cov + out[i + 2] * (1.0f - cov)));
+        }
+    }
+    return true;
+}
+
+// T5 watercolor (ARCHITECTURE.md "T5 additions" §2, clean-room):
+// irregular denser edges (semi-covered pixels darkened + saturated
+// with fixed-seed Perlin grain, same Perlin2D as T4 perlinClouds)
+// and washed centers (slight lift). All-zero params = byte-identical.
+// Alpha never touched (the M3 contract).
+static bool fWatercolor(const std::vector<std::uint8_t>& in, int w, int h,
+                        double darkenD, double roughD, double bloomD,
+                        std::vector<std::uint8_t>& out,
+                        std::string& error) {
+    if (!(darkenD >= 0.0) || darkenD > 1.0) {
+        error = "watercolor: darken must be in [0,1]";
+        return false;
+    }
+    if (!(roughD >= 0.0) || roughD > 16.0) {
+        error = "watercolor: rough must be in [0,16]";
+        return false;
+    }
+    if (!(bloomD >= 0.0) || bloomD > 1.0) {
+        error = "watercolor: bloom must be in [0,1]";
+        return false;
+    }
+    out = in;
+    if (darkenD == 0.0 && roughD == 0.0 && bloomD == 0.0) return true;
+    const Perlin2D perlin(0);  // fixed seed (T4 grain, documented)
+    const double cell = roughD + 1.0;
+    auto coveredAt = [&](int x, int y) -> bool {
+        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        return in[(static_cast<std::size_t>(y) * w + x) * 4 + 3] > 0;
+    };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            const std::uint8_t a = in[i + 3];
+            if (a == 0) continue;
+            const bool interior =
+                coveredAt(x - 1, y) && coveredAt(x + 1, y) &&
+                coveredAt(x, y - 1) && coveredAt(x, y + 1);
+            const double n =
+                perlin.noise(x / cell, y / cell) * 0.5 + 0.5;  // 0..1
+            double r = in[i], g = in[i + 1], b = in[i + 2];
+            if (!interior) {
+                // Denser irregular edge: darken by the grain, then push
+                // chroma away from luma (saturate).
+                const double k = 1.0 - darkenD * (0.35 + 0.65 * n);
+                r *= k;
+                g *= k;
+                b *= k;
+                const double lum = 0.299 * r + 0.587 * g + 0.114 * b;
+                const double sk = 1.0 + bloomD * (0.4 + 0.6 * n);
+                r = lum + (r - lum) * sk;
+                g = lum + (g - lum) * sk;
+                b = lum + (b - lum) * sk;
+            } else if (bloomD > 0.0) {
+                // Washed center: slight lift toward paper white.
+                const double lift = bloomD * 14.0 * n;
+                r += lift;
+                g += lift;
+                b += lift;
+            }
+            auto qc = [](double v) -> std::uint8_t {
+                long q = std::lround(v);
+                if (q < 0) q = 0;
+                if (q > 255) q = 255;
+                return static_cast<std::uint8_t>(q);
+            };
+            out[i] = qc(r);
+            out[i + 1] = qc(g);
+            out[i + 2] = qc(b);
+        }
+    }
+    return true;
+}
+
 }  // namespace (anonymous helpers)
 
 // --- Registry ---
@@ -1264,7 +1483,7 @@ std::vector<std::string> filterNames() {
             "gradientMap", "denoise", "unsharp", "colorBalance", "threshold",
             "glow", "dropShadow", "crystallize", "normalMap", "retro",
             "pencil", "perlinClouds", "lensBlur", "fisheyeFilter",
-            "panoramaRemap"};
+            "panoramaRemap", "edgeBorder", "watercolor"};
 }
 
 bool applyFilter(Surface& s, const std::string& name,
@@ -1459,14 +1678,37 @@ bool applyFilter(Surface& s, const std::string& name,
             if (jsonStr(paramsJson, "mode", sv)) mode = sv;
         }
         ok = fPanorama(in, w, h, mode, fov, out, error);
+    } else if (name == "edgeBorder") {
+        double width = 4.0;
+        std::string color = "#000000", mode = "inside";
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "width", d)) width = d;
+            std::string sv;
+            if (jsonStr(paramsJson, "color", sv)) color = sv;
+            if (jsonStr(paramsJson, "mode", sv)) mode = sv;
+        }
+        ok = fEdgeBorder(in, w, h, width, color, mode, out, error);
+    } else if (name == "watercolor") {
+        double darken = 0.4, rough = 6.0, bloom = 0.3;
+        if (!paramsJson.empty()) {
+            if (jsonNum(paramsJson, "darken", d)) darken = d;
+            if (jsonNum(paramsJson, "rough", d)) rough = d;
+            if (jsonNum(paramsJson, "bloom", d)) bloom = d;
+        }
+        ok = fWatercolor(in, w, h, darken, rough, bloom, out, error);
     }
     if (!ok) return false;  // surface untouched
     // Alpha contract: never modify alpha; clamp RGB to [0, alpha].
     // EXCEPTION (T4 §2, documented): dropShadow composites a shadow
     // layer BEHIND the source, so its alpha lands in `out` too —
-    // copy it, then clamp RGB to the NEW alpha.
+    // copy it, then clamp RGB to the NEW alpha. T5 edgeBorder joins
+    // the exception in outside/center mode (the ring extends the
+    // silhouette onto transparent pixels); inside mode keeps the
+    // source alpha (out alpha = in alpha there), so the copy is a
+    // no-op for it.
     std::vector<std::uint8_t>& dst = s.bytes();
-    const bool shadowAlpha = (name == "dropShadow");
+    const bool shadowAlpha =
+        (name == "dropShadow" || name == "edgeBorder");
     for (std::size_t i = 0; i + 3 < dst.size() && i + 3 < out.size(); i += 4) {
         if (shadowAlpha) dst[i + 3] = out[i + 3];
         const std::uint8_t a = dst[i + 3];

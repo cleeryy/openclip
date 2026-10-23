@@ -241,6 +241,25 @@ private val FILTERS = listOf(
             FilterParam.Choice("mode", listOf("cyl", "rect"), "cyl"),
             FilterParam.Num("fov", 60f, 180f, 120f, int = true)
         )
+    ),
+    // T5 §2 bord + aquarelle (registre moteur, 0 JNI — mêmes règles ;
+    // edgeBorder étend l'alpha en mode outside/center par design,
+    // comme dropShadow).
+    FilterSpec(
+        "edgeBorder", R.string.filter_edge_border,
+        listOf(
+            FilterParam.Num("width", 1f, 32f, 4f, int = true),
+            FilterParam.Text("color", "#000000"),
+            FilterParam.Choice("mode", listOf("inside", "outside", "center"), "inside")
+        )
+    ),
+    FilterSpec(
+        "watercolor", R.string.filter_watercolor,
+        listOf(
+            FilterParam.Num("darken", 0f, 1f, 0.4f),
+            FilterParam.Num("rough", 0f, 16f, 6f, int = true),
+            FilterParam.Num("bloom", 0f, 1f, 0.3f)
+        )
     )
 )
 

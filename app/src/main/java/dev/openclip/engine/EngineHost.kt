@@ -141,4 +141,11 @@ object EngineHost {
     external fun nPuppetWarp(handle: Long, index: Int, json: String): Boolean
     external fun nSetRefScene(handle: Long, json: String): Boolean
     external fun nPaintRefMap(handle: Long, item: Int, jsonDabs: String): Boolean
+
+    // T5 additions (ARCHITECTURE.md): layer lock flags (meta hors undo;
+    // false + intact on bad index/unparsable JSON) + fill fiche
+    // (null/empty clears; {"bake":true} pixelizes through the
+    // blit-into-layer machinery, 1 undo step).
+    external fun nSetLayerFlags(handle: Long, index: Int, json: String): Boolean
+    external fun nSetLayerFill(handle: Long, index: Int, json: String?): Boolean
 }

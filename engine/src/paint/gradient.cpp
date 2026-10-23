@@ -79,7 +79,7 @@ bool validSpec(const GradientSpec& spec, std::string& error) {
 
 bool paintGradient(Surface& s, const GradientSpec& spec,
                    const std::uint8_t* mask, int maskStride,
-                   std::string& error) {
+                   std::string& error, bool alphaLock) {
     error.clear();
     const int w = s.width(), h = s.height();
     if (w <= 0 || h <= 0) {
@@ -107,6 +107,10 @@ bool paintGradient(Surface& s, const GradientSpec& spec,
         for (int x = 0; x < w; ++x) {
             if (mask &&
                 mask[static_cast<std::size_t>(y) * maskStride + x] == 0)
+                continue;
+            // T5 §1 verrou alpha (see fill.h).
+            if (alphaLock &&
+                bytes[(static_cast<std::size_t>(y) * w + x) * 4 + 3] == 0)
                 continue;
             double t = 0.0;
             if (spec.kind == "linear") {

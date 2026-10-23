@@ -83,6 +83,14 @@ internal data class LayerInfo(
     val hasAdjust: Boolean,
     val hasText: Boolean = false,
     val hasBubble: Boolean = false,
+    // T5 §1: lock flags (ARCHITECTURE.md "T5 additions" §1).
+    val locked: Boolean = false,
+    val alphaLock: Boolean = false,
+    val reference: Boolean = false,
+    val draft: Boolean = false,
+    // T5 §2: fill fiche (kind null = normal layer).
+    val hasFill: Boolean = false,
+    val fillKind: String? = null,
     val animKeys: Int = 0,
     val tagColor: Int? = null,
     val children: List<LayerInfo> = emptyList()
@@ -93,7 +101,11 @@ internal val BLEND_NAMES = listOf(
     "svg:normal", "svg:multiply", "svg:screen", "svg:overlay",
     "svg:plus", "svg:soft-light",
     // V+2 additions (engine blend.h, ARCHITECTURE.md "V+2 additions").
-    "svg:hard-light", "svg:difference", "svg:color", "svg:luminosity"
+    "svg:hard-light", "svg:difference", "svg:color", "svg:luminosity",
+    // T5 §3 additions (engine blend.h, ARCHITECTURE.md "T5 additions").
+    "svg:darken", "svg:lighten", "svg:linear-burn",
+    "svg:linear-dodge", "svg:vivid-light", "svg:linear-light",
+    "svg:pin-light", "svg:subtract", "svg:divide", "svg:exclusion"
 )
 
 internal fun blendDisplay(svg: String): String = svg.removePrefix("svg:")
@@ -162,6 +174,12 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
                     hasAdjust = c.optJSONObject("adjust") != null,
                 hasText = c.optJSONObject("text") != null,
                 hasBubble = c.optJSONObject("bubble") != null,
+                locked = c.optJSONObject("flags")?.optBoolean("locked", false) == true,
+                alphaLock = c.optJSONObject("flags")?.optBoolean("alphaLock", false) == true,
+                reference = c.optJSONObject("flags")?.optBoolean("reference", false) == true,
+                draft = c.optJSONObject("flags")?.optBoolean("draft", false) == true,
+                hasFill = c.optJSONObject("fill") != null,
+                fillKind = c.optJSONObject("fill")?.optString("kind"),
                 animKeys = 0
                 )
             )
@@ -183,6 +201,17 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
             o.optJSONObject("text") != null,
         hasBubble = s.optJSONObject("bubble") != null ||
             o.optJSONObject("bubble") != null,
+        locked = (s.optJSONObject("flags") ?: o.optJSONObject("flags"))
+            ?.optBoolean("locked", false) == true,
+        alphaLock = (s.optJSONObject("flags") ?: o.optJSONObject("flags"))
+            ?.optBoolean("alphaLock", false) == true,
+        reference = (s.optJSONObject("flags") ?: o.optJSONObject("flags"))
+            ?.optBoolean("reference", false) == true,
+        draft = (s.optJSONObject("flags") ?: o.optJSONObject("flags"))
+            ?.optBoolean("draft", false) == true,
+        hasFill = (s.optJSONObject("fill") ?: o.optJSONObject("fill")) != null,
+        fillKind = (s.optJSONObject("fill") ?: o.optJSONObject("fill"))
+            ?.optString("kind"),
         animKeys = s.optInt("anim", 0),
         children = kids
     )
@@ -206,6 +235,9 @@ fun LayerPanel(
     // Spec §4: tagColor is app-side only (workspaces persist it later).
     val tagColors = remember { mutableStateMapOf<Int, Int>() }
     var search by remember { mutableStateOf("") }
+    // T5 §1 (7.21): hide-drafts is a session-only display toggle
+    // (never touches the flags).
+    var draftHide by remember { mutableStateOf(false) }
     var strokeGen by remember { mutableStateOf(0) }
     var menuIndex by remember { mutableStateOf<Int?>(null) }
 
@@ -284,9 +316,10 @@ fun LayerPanel(
         }
     }
 
-    val shown = remember(layers, search) {
-        if (search.isBlank()) layers
+    val shown = remember(layers, search, draftHide) {
+        val base = if (search.isBlank()) layers
         else layers.filter { it.name.contains(search, ignoreCase = true) }
+        if (draftHide) base.filter { !it.draft } else base
     }
     val compact = layers.size > LayerPanelTestHooks.compactThreshold
     val listState = remember { androidx.compose.foundation.lazy.LazyListState() }
@@ -370,6 +403,22 @@ fun LayerPanel(
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.testTag("layer-count")
             )
+            TextButton(
+                onClick = { draftHide = !draftHide },
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("draft-hide-toggle")
+            ) {
+                Text(
+                    stringResource(
+                        if (draftHide) R.string.draft_show
+                        else R.string.draft_hide
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1
+                )
+            }
             if (compact) {
                 Text(
                     stringResource(
@@ -455,6 +504,28 @@ fun LayerPanel(
                             if (it.index == info.index) it.copy(tagColor = c) else it
                         }
                         menuIndex = null
+                    },
+                    onToggleFlag = { key ->
+                        val cur = when (key) {
+                            "locked" -> info.locked
+                            "alphaLock" -> info.alphaLock
+                            "reference" -> info.reference
+                            "draft" -> info.draft
+                            else -> false
+                        }
+                        surface.layerOp {
+                            setLayerFlags(
+                                info.index,
+                                "{\"" + key + "\":" + (!cur) + "}"
+                            )
+                        }
+                        menuIndex = null
+                        refresh()
+                    },
+                    alignSelected = T5AlignSelection.selected.contains(info.index),
+                    onToggleAlignSelect = {
+                        T5AlignSelection.toggle(info.index)
+                        refresh()
                     }
                 )
             }
@@ -615,7 +686,12 @@ private fun LayerRow(
     onMaskTarget: () -> Unit,
     onClipped: () -> Unit,
     onAddChild: () -> Unit,
-    onTag: (Int?) -> Unit
+    onTag: (Int?) -> Unit,
+    // T5 §1: flag toggles (locked/alphaLock/reference/draft) + §7
+    // align multi-selection (session-only, read by AlignPanel).
+    onToggleFlag: (String) -> Unit = {},
+    alignSelected: Boolean = false,
+    onToggleAlignSelect: () -> Unit = {}
 ) {
     var slider by remember(info.index, info.opacity) {
         mutableStateOf(info.opacity.coerceIn(0f, 1f))
@@ -747,6 +823,55 @@ private fun LayerRow(
                         .clickable { onMenu() }
                 )
             }
+            // T5 §1–§2 badges (visual; toggles live in rank 1b below).
+            if (info.locked) {
+                Text(
+                    "\uD83D\uDD12",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-locked-${info.index}")
+                        .semantics {
+                            contentDescription =
+                                "locked"
+                        }
+                )
+            }
+            if (info.alphaLock) {
+                Text(
+                    "\u03B1",
+                    color = Color(0xFF7FD4A8),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-alpha-${info.index}")
+                )
+            }
+            if (info.reference) {
+                Text(
+                    "R",
+                    color = Color(0xFFFFC845),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-ref-${info.index}")
+                )
+            }
+            if (info.draft) {
+                Text(
+                    "D",
+                    color = Color(0xFFB8B8C8),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-draft-${info.index}")
+                )
+            }
+            if (info.hasFill) {
+                Text(
+                    "F",
+                    color = Color(0xFF6FA3FF),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-fill-${info.index}")
+                )
+            }
             val visDesc = stringResource(
                 if (info.visible) R.string.layer_visible else R.string.layer_hidden
             )
@@ -779,6 +904,79 @@ private fun LayerRow(
                     )
             ) {
                 Text("≡")
+            }
+        }
+        // Rank 1b (T5 §1 + §7): 4 lock-flag toggles + align select.
+        // Ticks are meta hors undo (like holds/bulles — ticking is not
+        // a stroke); the engine guard refuses the writes themselves.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            val flagBtn = Modifier.height(48.dp)
+            TextButton(
+                onClick = { onToggleFlag("locked") },
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = flagBtn
+                    .testTag("layer-flag-locked-${info.index}")
+            ) {
+                Text(
+                    (if (info.locked) "[\uD83D\uDD12] " else "") +
+                        stringResource(R.string.layer_lock),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1
+                )
+            }
+            TextButton(
+                onClick = { onToggleFlag("alphaLock") },
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = flagBtn
+                    .testTag("layer-flag-alpha-${info.index}")
+            ) {
+                Text(
+                    (if (info.alphaLock) "[\u03B1] " else "") +
+                        stringResource(R.string.layer_alpha_lock),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1
+                )
+            }
+            TextButton(
+                onClick = { onToggleFlag("reference") },
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = flagBtn
+                    .testTag("layer-flag-ref-${info.index}")
+            ) {
+                Text(
+                    (if (info.reference) "[R] " else "") +
+                        stringResource(R.string.layer_reference),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1
+                )
+            }
+            TextButton(
+                onClick = { onToggleFlag("draft") },
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = flagBtn
+                    .testTag("layer-flag-draft-${info.index}")
+            ) {
+                Text(
+                    (if (info.draft) "[D] " else "") +
+                        stringResource(R.string.layer_draft),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1
+                )
+            }
+            TextButton(
+                onClick = onToggleAlignSelect,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = flagBtn
+                    .testTag("layer-select-${info.index}")
+            ) {
+                Text(
+                    if (alignSelected) "[\u2713]" else "+",
+                    style = MaterialTheme.typography.labelSmall
+                )
             }
         }
         // Rank 2: opacity slider + % + blend chip (folded in compact mode).

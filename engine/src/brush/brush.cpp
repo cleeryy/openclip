@@ -98,7 +98,8 @@ std::vector<Dab> interpolateStamps(const BrushParams& p,
     return out;
 }
 
-void paintDab(Surface& s, const Dab& d, const BrushParams& p) {
+void paintDab(Surface& s, const Dab& d, const BrushParams& p,
+                bool alphaLock) {
     if (d.opacity <= 0.0f || d.radius <= 0.0f) return;
     const int x0 = static_cast<int>(std::floor(d.x - d.radius));
     const int x1 = static_cast<int>(std::ceil(d.x + d.radius));
@@ -147,6 +148,9 @@ void paintDab(Surface& s, const Dab& d, const BrushParams& p) {
             const float m = falloff(t, p.hardness) * sa;
             if (m <= 1e-4f) continue;
             Pixel dst = s.get(x, y);
+            // T5 §1 verrou alpha: transparent destination pixels are
+            // skipped (ink is kept where the layer is transparent).
+            if (alphaLock && dst.a == 0) continue;
             const float da = dst.a / 255.0f;
             const float oa = m + da * (1.0f - m);
             if (oa <= 0.0f) continue;

@@ -43,7 +43,12 @@ std::vector<Dab> interpolateStamps(const BrushParams& p,
                                    std::uint8_t r, std::uint8_t g, std::uint8_t b);
 
 // Paint one soft round stamp (source-over) onto a premultiplied surface.
-void paintDab(Surface& s, const Dab& d, const BrushParams& p);
+// T5 alphaLock (ARCHITECTURE.md "T5 additions" §1): when true, pixels
+// whose destination alpha is zero are skipped (the maison transparency
+// lock — paint only lands on already-covered pixels). Default false =
+// byte-identical legacy path.
+void paintDab(Surface& s, const Dab& d, const BrushParams& p,
+              bool alphaLock = false);
 
 // V+1 alpha-erase (ARCHITECTURE.md "V+1 additions"): dest-out stamp —
 // reduces surface alpha in place (a' = a*(1-m)), rgb rescaled to stay

@@ -18,7 +18,20 @@ enum class BlendMode : std::uint8_t {
     HardLight,
     Difference,
     Color,
-    Luminosity
+    Luminosity,
+    // T5 additions (ARCHITECTURE.md "T5 additions" §3, clean-room,
+    // from scratch). linear-dodge is the documented twin of Add
+    // (same clamped sum, own name for the open nomenclature).
+    Darken,
+    Lighten,
+    LinearBurn,
+    LinearDodge,
+    VividLight,
+    LinearLight,
+    PinLight,
+    Subtract,
+    Divide,
+    Exclusion
 };
 
 // Parse an OpenRaster / SVG blend name ("svg:multiply", "svg:screen", ...).

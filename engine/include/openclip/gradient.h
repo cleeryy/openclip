@@ -41,9 +41,11 @@ struct GradientSpec {
 // > 8 stops, positions outside [0,1], free mode with pts/stops size
 // mismatch, zero-length linear segment or zero radial radius) or an
 // empty surface.
+// T5 §1 verrou alpha: like floodFillSeeded, transparent pixels are
+// skipped when alphaLock is true (default false = legacy path).
 bool paintGradient(Surface& s, const GradientSpec& spec,
                    const std::uint8_t* mask, int maskStride,
-                   std::string& error);
+                   std::string& error, bool alphaLock = false);
 
 }  // namespace openclip
 

@@ -46,6 +46,7 @@
 #include "openclip/cels.h"
 #include "openclip/filters.h"
 #include "openclip/fill.h"
+#include "openclip/fill_layer.h"
 #include "openclip/gif.h"
 #include "openclip/gradient.h"
 #include "openclip/guides.h"
@@ -299,6 +300,7 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
     const std::size_t layer = static_cast<std::size_t>(
         cur(s).activeLayer() < 0 ? 0 : cur(s).activeLayer());
     if (layer >= static_cast<std::size_t>(cur(s).layerCount())) return false;
+    if (cur(s).layer(layer).locked) return false;  // T5 §1: refused
     if (s->maskTargetOn && static_cast<int>(layer) == s->maskTarget &&
         cur(s).layer(layer).hasMask) {
         // Ink luminance drives mask alpha (white keeps, black hides);
@@ -323,6 +325,9 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
     for (int ty = ty0; ty <= ty1; ++ty)
         for (int tx = tx0; tx <= tx1; ++tx)
             hist(s).touchTile(cur(s), layer, tx, ty);
+    // T5 §1 verrou alpha: the dab only lands on covered pixels
+    // (dst.a > 0) — ink is kept where the layer is transparent.
+    const bool aLock = cur(s).layer(layer).alphaLock;
     if (s->alphaEraser) {
         openclip::eraseDab(cur(s).layer(layer).surface,
                            openclip::dabFromPressure(s->brush, dab.x, dab.y,
@@ -330,7 +335,8 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
                                                     dab.g, dab.b),
                            s->brush);
     } else {
-        openclip::paintDab(cur(s).layer(layer).surface, dab, s->brush);
+        openclip::paintDab(cur(s).layer(layer).surface, dab, s->brush,
+                           aLock);
     }
     return true;
 }
@@ -730,7 +736,22 @@ bool knownBlendName(const std::string& n) {
            n == "hard-light" || n == "hard_light" || n == "hardlight" ||
            n == "difference" || n == "color" || n == "luminosity" ||
            n == "svg:hard-light" || n == "svg:difference" ||
-           n == "svg:color" || n == "svg:luminosity";
+           n == "svg:color" || n == "svg:luminosity" ||
+           // T5 additions (blend.h, ARCHITECTURE.md "T5 additions" §3).
+           n == "darken" || n == "lighten" || n == "linear-burn" ||
+           n == "linear_burn" || n == "linearburn" ||
+           n == "linear-dodge" || n == "linear_dodge" ||
+           n == "lineardodge" || n == "vivid-light" ||
+           n == "vivid_light" || n == "vividlight" ||
+           n == "linear-light" || n == "linear_light" ||
+           n == "linearlight" || n == "pin-light" || n == "pin_light" ||
+           n == "pinlight" || n == "subtract" || n == "divide" ||
+           n == "exclusion" || n == "svg:darken" ||
+           n == "svg:lighten" || n == "svg:linear-burn" ||
+           n == "svg:linear-dodge" || n == "svg:vivid-light" ||
+           n == "svg:linear-light" || n == "svg:pin-light" ||
+           n == "svg:subtract" || n == "svg:divide" ||
+           n == "svg:exclusion";
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -888,6 +909,29 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
     out += l.hasMask ? "true" : "false";
     out += ",\"clipped\":";
     out += l.clipped ? "true" : "false";
+    // T5 §1: lock flags (every entry; the app shows badges + guards).
+    out += ",\"flags\":{\"locked\":";
+    out += l.locked ? "true" : "false";
+    out += ",\"alphaLock\":";
+    out += l.alphaLock ? "true" : "false";
+    out += ",\"reference\":";
+    out += l.reference ? "true" : "false";
+    out += ",\"draft\":";
+    out += l.draft ? "true" : "false";
+    out += "}";
+    // T5 §2: fill fiche (absent = normal layer; the app shows the F
+    // badge + FillPanel re-edit).
+    if (l.hasFill()) {
+        out += ",\"fill\":{\"kind\":";
+        appendJsonStr(out, l.fillKind);
+        out += ",\"color\":";
+        appendJsonStr(out, l.fillColor.empty() ? "#FFFFFF" : l.fillColor);
+        out += ",\"stops\":";
+        appendJsonStr(out, l.fillStops);
+        out += ",\"params\":";
+        appendJsonStr(out, l.fillParams);
+        out += "}";
+    }
     // T3: key count badge (top-level only, -1 = child entry).
     if (animKeys >= 0) {
         out += ",\"anim\":";
@@ -1142,6 +1186,10 @@ Java_dev_openclip_engine_EngineHost_nBlitPngIntoLayer(JNIEnv* env, jclass,
     openclip::Layer& ly =
         cur(s).layer(static_cast<std::size_t>(index));
     if (ly.isGroup) return JNI_FALSE;
+    // T5 §1–§2: locked layers refuse; fill layers carry no committable
+    // pixels (bake the fiche via nSetLayerFill instead); alphaLock
+    // refuses the whole-surface replace (it would ignore coverage).
+    if (ly.locked || ly.hasFill() || ly.alphaLock) return JNI_FALSE;
     openclip::History& h = hist(s);
     h.beginStroke();
     for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
@@ -1540,9 +1588,11 @@ static void resetFrameLocalState(Session* s, bool structural) {
 // index (other tracks clamp into their range, resolveStackIndex),
 // samples the session layer anims at each track's displayed cel,
 // then applies the camera once when enabled. Helpers never enter
-// (onion/ref stay caller-side, like today).
+// (onion/ref stay caller-side, like today). T5: `forExport` routes
+// through compositeAnimExport (reference/draft layers skipped —
+// ARCHITECTURE.md "T5 additions" §1); the editor path keeps them.
 static bool compositeCell(Session* s, std::size_t ti, int want,
-                          openclip::Surface& out) {
+                          openclip::Surface& out, bool forExport = false) {
     if (!s || s->tracks.empty() || ti >= s->tracks.size()) return false;
     const int w = cur(s).width(), h = cur(s).height();
     if (w <= 0 || h <= 0) return false;
@@ -1572,7 +1622,11 @@ static bool compositeCell(Session* s, std::size_t ti, int want,
             samples[li] = sm;
         }
         temps.emplace_back();
-        c.compositeAnim(temps.back(), samples);
+        // T5 §1: export composites skip reference/draft layers.
+        if (forExport)
+            c.compositeAnimExport(temps.back(), samples);
+        else
+            c.compositeAnim(temps.back(), samples);
         stack.push_back({&temps.back(), true});
     }
     openclip::compositeTrackStack(stack, w, h, out);
@@ -1680,6 +1734,20 @@ Java_dev_openclip_engine_EngineHost_nApplyFilter(JNIEnv* env, jclass,
         return JNI_FALSE;
     }
     openclip::Layer& ly = cur(s).layer(layer);
+    if (ly.locked) {  // T5 §1: refused writes leave no undo residue
+        h.cancelStroke(cur(s));
+        return JNI_FALSE;
+    }
+    if (ly.alphaLock &&
+        (fname == "dropShadow" ||
+         (fname == "edgeBorder" &&
+          (params.find("\"outside\"") != std::string::npos ||
+           params.find("\"center\"") != std::string::npos)))) {
+        // T5 §1: alpha-extending filters are refused on alphaLock
+        // layers (they paint where the layer is transparent).
+        h.cancelStroke(cur(s));
+        return JNI_FALSE;
+    }
     for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
         for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
             h.touchTile(cur(s), layer, tx, ty);
@@ -1711,6 +1779,10 @@ Java_dev_openclip_engine_EngineHost_nApplyTone(JNIEnv* env, jclass,
         return JNI_FALSE;
     }
     openclip::Layer& ly = cur(s).layer(layer);
+    if (ly.locked) {  // T5 §1: refused writes leave no undo residue
+        h.cancelStroke(cur(s));
+        return JNI_FALSE;
+    }
     for (int ty = 0; ty < ly.surface.tilesY(); ++ty)
         for (int tx = 0; tx < ly.surface.tilesX(); ++tx)
             h.touchTile(cur(s), layer, tx, ty);
@@ -1744,7 +1816,20 @@ bool activePaintLayer(Session* s, std::size_t& idx) {
     idx = static_cast<std::size_t>(active);
     const openclip::Layer& ly = cur(s).layer(idx);
     if (ly.isGroup || ly.isVector || !ly.adjustType.empty()) return false;
+    // T5 §1–§2: locked layers refuse every write; fill layers carry no
+    // committable pixels (their surface is ignored while the fiche
+    // lives — bake via nSetLayerFill instead).
+    if (ly.locked || ly.hasFill()) return false;
     return true;
+}
+
+// T5 §1 central guard (ARCHITECTURE.md "T5 additions" §1): ONE check
+// at each write entry point instead of N scattered `if`s. Indexed ops
+// (blit, selection blit) and descriptor-less ops (filter, tone) call
+// this directly; activePaintLayer covers the T1/V+3 tool path.
+bool layerWritable(Session* s, std::size_t idx) {
+    if (!s || idx >= cur(s).layerCount()) return false;
+    return !cur(s).layer(idx).locked;
 }
 
 // Undoable whole-surface paint helper (filter pattern): snapshots
@@ -1913,6 +1998,9 @@ Java_dev_openclip_engine_EngineHost_nFloodFill(JNIEnv* env, jclass,
     const bool merged = jsonBool(j, "sampleMerged", false);
     int stride = 0;
     const std::uint8_t* mask = paintMask(s, stride);
+    // T5 §1 verrou alpha (kernel-level, see fill.h): paint only lands
+    // on covered pixels.
+    const bool aLock = cur(s).layer(layer).alphaLock;
     if (merged) {
         openclip::Surface comp;
         cur(s).composite(comp);
@@ -1925,12 +2013,13 @@ Java_dev_openclip_engine_EngineHost_nFloodFill(JNIEnv* env, jclass,
         return paintUndoable(s, layer, [&](openclip::Surface& surf) {
             std::string err;
             return openclip::floodFillSeeded(surf, x, y, lum, r, g, b, p,
-                                             mask, stride, err);
+                                             mask, stride, err, aLock);
         }) ? JNI_TRUE : JNI_FALSE;
     }
     return paintUndoable(s, layer, [&](openclip::Surface& surf) {
         std::string err;
-        return openclip::floodFill(surf, x, y, r, g, b, p, mask, stride, err);
+        return openclip::floodFill(surf, x, y, r, g, b, p, mask, stride, err,
+                                   aLock);
     }) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -2009,9 +2098,10 @@ Java_dev_openclip_engine_EngineHost_nPaintGradient(JNIEnv* env, jclass,
     spec.dither = jsonBool(j, "dither", true);
     int stride = 0;
     const std::uint8_t* mask = paintMask(s, stride);
+    const bool aLock = cur(s).layer(layer).alphaLock;  // T5 §1
     return paintUndoable(s, layer, [&](openclip::Surface& surf) {
         std::string err;
-        return openclip::paintGradient(surf, spec, mask, stride, err);
+        return openclip::paintGradient(surf, spec, mask, stride, err, aLock);
     }) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -2060,9 +2150,10 @@ Java_dev_openclip_engine_EngineHost_nStampShape(JNIEnv* env, jclass,
     }
     int stride = 0;
     const std::uint8_t* mask = paintMask(s, stride);
+    const bool aLock = cur(s).layer(layer).alphaLock;  // T5 §1
     return paintUndoable(s, layer, [&](openclip::Surface& surf) {
         std::string err;
-        return openclip::stampShape(surf, spec, mask, stride, err);
+        return openclip::stampShape(surf, spec, mask, stride, err, aLock);
     }) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -2736,7 +2827,11 @@ Java_dev_openclip_engine_EngineHost_nFrameCompositeInto(JNIEnv* env, jclass,
     if (width <= 0 || height <= 0) return -2;
     if (index < 0 || index >= static_cast<jint>(trk(s).frames.size())) return -2;
     openclip::Surface comp;
-    if (!compositeCell(s, s->activeTrack, index, comp)) return -2;
+    // T5 §1: nFrameCompositeInto is the export composite (no onion, no
+    // ref wireframe, no reference/draft layers).
+    if (!compositeCell(s, s->activeTrack, static_cast<int>(index), comp,
+                       true))
+        return -2;
     std::vector<std::uint8_t> px = comp.bytes();
     return blitArgb(env, px, out, width, height);
 }
@@ -2872,6 +2967,7 @@ Java_dev_openclip_engine_EngineHost_nSelectionBlit(JNIEnv* env, jclass,
     openclip::Layer& ly =
         cur(s).layer(static_cast<std::size_t>(active));
     if (ly.isVector) return JNI_FALSE;
+    if (ly.locked) return JNI_FALSE;  // T5 §1: refused, layer intact
     const std::string j = toStd(env, json);
     openclip::TransformSpec spec;
     spec.dx = jsonNum(j, "dx", 0.0);
@@ -3101,7 +3197,8 @@ bool pullExportFrame(Session* s, int cel, int maxW,
     if (maxW < 1) maxW = 1;
     if (maxW > 4096) maxW = 4096;
     openclip::Surface comp;
-    if (!compositeCell(s, s->activeTrack, cel, comp)) return false;
+    // T5 §1: engine-side sequence exports skip reference/draft layers.
+    if (!compositeCell(s, s->activeTrack, cel, comp, true)) return false;
     const int sw = comp.width(), sh = comp.height();
     if (sw <= 0 || sh <= 0) return false;
     const auto& px = comp.bytes();
@@ -3441,7 +3538,8 @@ Java_dev_openclip_engine_EngineHost_nExportPngSeq(JNIEnv* env, jclass,
     std::vector<const openclip::Surface*> ticks;
     ticks.reserve(plan.size());
     for (std::size_t k = 0; k < plan.size(); ++k) {
-        if (!compositeCell(s, s->activeTrack, plan[k], surfs[k]))
+        // T5 §1: PNG sequences are exports (no reference/draft).
+        if (!compositeCell(s, s->activeTrack, plan[k], surfs[k], true))
             return JNI_FALSE;
         ticks.push_back(&surfs[k]);
     }
@@ -3579,6 +3677,130 @@ Java_dev_openclip_engine_EngineHost_nSetLayerMeta(JNIEnv* env, jclass,
         return JNI_TRUE;
     }
     l.meta[k] = v;
+    return JNI_TRUE;
+}
+
+// ---- T5 additions (symbols per ARCHITECTURE.md "T5 additions") ----
+
+// §1: per-layer lock flags (meta hors undo). M3 rule: unknown keys
+// ignored, missing keys = unchanged. False + intact on bad index or
+// unparsable JSON (not a JSON object at all).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerFlags(JNIEnv* env, jclass,
+                                                   jlong handle, jint index,
+                                                   jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !json) return JNI_FALSE;
+    if (index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    if (j.find('{') == std::string::npos ||
+        j.find('}') == std::string::npos)
+        return JNI_FALSE;
+    openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
+    auto present = [&](const char* key) -> bool {
+        return j.find(std::string("\"") + key + "\"") != std::string::npos;
+    };
+    if (present("locked")) l.locked = jsonBool(j, "locked", l.locked);
+    if (present("alphaLock"))
+        l.alphaLock = jsonBool(j, "alphaLock", l.alphaLock);
+    if (present("reference"))
+        l.reference = jsonBool(j, "reference", l.reference);
+    if (present("draft")) l.draft = jsonBool(j, "draft", l.draft);
+    return JNI_TRUE;
+}
+
+// §2: fill fiche bake — render the live fiche into the surface through
+// the blit-into-layer machinery (full-layer tile snapshots, 1 undo
+// step), then clear the fiche. Same bytes as nBlitPngIntoLayer would
+// commit, no PNG round trip (documented in ARCHITECTURE.md §T5).
+static bool bakeFillInto(Session* s, std::size_t idx) {
+    openclip::Layer& l = cur(s).layer(idx);
+    openclip::FillSpec spec;
+    std::string err;
+    if (!openclip::parseFillSpec(l, spec, err)) return false;
+    openclip::Surface rendered;
+    if (!openclip::renderFill(spec, cur(s).width(), cur(s).height(),
+                              rendered, err))
+        return false;
+    openclip::History& h = hist(s);
+    h.beginStroke();
+    for (int ty = 0; ty < l.surface.tilesY(); ++ty)
+        for (int tx = 0; tx < l.surface.tilesX(); ++tx)
+            h.touchTile(cur(s), idx, tx, ty);
+    l.surface.bytes().swap(rendered.bytes());
+    h.endStroke(cur(s));
+    l.fillKind.clear();
+    l.fillColor.clear();
+    l.fillStops.clear();
+    l.fillParams.clear();
+    return true;
+}
+
+// §2: fill fiche on a top-level layer (null/empty clears — the kept
+// surface shows again). JSON {kind, color?, mode?, x0?,y0?,x1?,y1?,
+// stops? (gradient, 2..8), hue?, scale?, shine?} (M3 rule for unknown
+// keys) or {"bake":true} to pixelize. False + intact on bad index,
+// unparsable JSON, unknown kind, bad color/mode, or stops < 2.
+// Meta hors undo (moving a stop is not a stroke).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerFill(JNIEnv* env, jclass,
+                                                  jlong handle, jint index,
+                                                  jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (index < 0 ||
+        index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    const std::string j = json ? toStd(env, json) : std::string();
+    openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
+    if (j.empty()) {
+        l.fillKind.clear();
+        l.fillColor.clear();
+        l.fillStops.clear();
+        l.fillParams.clear();
+        return JNI_TRUE;
+    }
+    if (jsonBool(j, "bake", false))
+        return bakeFillInto(s, static_cast<std::size_t>(index)) ? JNI_TRUE
+                                                                : JNI_FALSE;
+    if (j.find('{') == std::string::npos ||
+        j.find('}') == std::string::npos)
+        return JNI_FALSE;
+    const std::string kind = jsonStr(j, "kind");
+    if (kind != "solid" && kind != "gradient" && kind != "foil")
+        return JNI_FALSE;
+    std::string color = jsonStr(j, "color");
+    if (color.empty()) color = "#FFFFFF";
+    std::uint8_t cr = 0, cg = 0, cb = 0;
+    if (!parseColor(color, cr, cg, cb)) return JNI_FALSE;
+    std::string mode = jsonStr(j, "mode");
+    if (mode.empty()) mode = "linear";
+    if (mode != "linear" && mode != "radial") return JNI_FALSE;
+    std::string stops;
+    if (kind == "gradient") {
+        std::vector<openclip::GradientStop> parsed;
+        if (!parsePaintStops(j, parsed)) return JNI_FALSE;
+        char buf[32];
+        for (const auto& st : parsed) {
+            std::snprintf(buf, sizeof buf, "#%02X%02X%02X:%g", st.r,
+                          st.g, st.b, st.pos);
+            if (!stops.empty()) stops += ",";
+            stops += buf;
+        }
+    }
+    char params[128];
+    std::snprintf(params, sizeof params, "%s|%g|%g|%g|%g|%g|%g|%g",
+                  mode.c_str(), jsonNum(j, "x0", 0),
+                  jsonNum(j, "y0", 0),
+                  jsonNum(j, "x1", (double)cur(s).width()),
+                  jsonNum(j, "y1", 0), jsonNum(j, "hue", 0),
+                  jsonNum(j, "scale", 4), jsonNum(j, "shine", 0.5));
+    l.fillKind = kind;
+    l.fillColor = color;
+    l.fillStops = stops;
+    l.fillParams = params;
     return JNI_TRUE;
 }
 

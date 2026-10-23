@@ -101,6 +101,15 @@ import dev.openclip.ui.WorkspacePose
 import dev.openclip.ui.WorkspaceStore
 import dev.openclip.ui.parseHexColor
 import dev.openclip.ui.ExportDialog
+import dev.openclip.ui.FillPanel
+import dev.openclip.ui.ImportPanel
+import dev.openclip.ui.ColorMatchDialog
+import dev.openclip.ui.T5PagesPanel
+import dev.openclip.ui.T5ExportDialog
+import dev.openclip.ui.MacroPanel
+import dev.openclip.ui.AlignPanel
+import dev.openclip.ui.HistoryPanel
+import dev.openclip.ui.InfoPanel
 import dev.openclip.ui.BrushHelpDialog
 import dev.openclip.ui.FeatherDialog
 import dev.openclip.ui.GesturesHelpDialog
@@ -292,6 +301,18 @@ class MainActivity : ComponentActivity() {
         val status = remember { mutableStateOf("") }
         val showExport = remember { mutableStateOf(false) }
         val exportFormat = remember { mutableStateOf("ora") }
+        // T5 échanges + pages + productivité (spec docs/t5-exchange.md).
+        val showT5Fill = remember { mutableStateOf(false) }
+        val showT5Import = remember { mutableStateOf(false) }
+        val showT5Match = remember { mutableStateOf(false) }
+        val showT5Pages = remember { mutableStateOf(false) }
+        val showT5Export = remember { mutableStateOf(false) }
+        val showT5Macro = remember { mutableStateOf(false) }
+        val showT5Align = remember { mutableStateOf(false) }
+        val showT5History = remember { mutableStateOf(false) }
+        val showT5Info = remember { mutableStateOf(false) }
+        val exchangePick = remember { mutableStateOf<((java.io.File?) -> Unit)?>(null) }
+        val pendingShare = remember { mutableStateOf<java.io.File?>(null) }
         val ctx = LocalContext.current
         // T2 §1: user font library lives in filesDir/fonts (session
         // setup, once per composition root — rescan on import).
@@ -719,6 +740,40 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // T5 §4/§6: exchange file pick (grd/abr) + share-out for
+        // EPUB/PDF/sequence/sticker/fanzine cache files (SAF).
+        val openExchange = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            val cb = exchangePick.value
+            exchangePick.value = null
+            if (uri != null && cb != null) {
+                val dst = java.io.File(
+                    ctx.cacheDir, "t5-in-${System.currentTimeMillis()}"
+                )
+                copyTo(ctx, uri, dst)
+                cb(dst)
+            } else {
+                cb?.invoke(null)
+            }
+        }
+        val createT5 = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream")
+        ) { uri: Uri? ->
+            val f = pendingShare.value
+            pendingShare.value = null
+            if (uri != null && f != null) {
+                copyFromTo(ctx, f, uri)
+                try {
+                    f.delete()
+                } catch (_: Exception) {
+                }
+                status.value = ctx.getString(R.string.export_ok)
+            } else if (uri != null) {
+                status.value = ctx.getString(R.string.export_failed)
+            }
+        }
+
         // T2 §1: user font import (SAF font/* -> fonts/ library;
         // libre files only — confirmed by the user at import, origin
         // logged like third_party/README.md; honest refusals, no crash).
@@ -1074,6 +1129,15 @@ class MainActivity : ComponentActivity() {
                     ctx.getString(R.string.selection_active_hint)
                 } else {
                     ""
+                }
+            }
+            // T5 §1: refused-write guard hint (barred ring + status).
+            cv.onGuardHint = { key ->
+                status.value = when (key) {
+                    "fill_locked_hint" -> ctx.getString(R.string.fill_locked_hint)
+                    "selection_adjust_guard" ->
+                        ctx.getString(R.string.selection_adjust_guard)
+                    else -> ctx.getString(R.string.layer_locked_hint)
                 }
             }
             // T2 §2: inline canvas editor (anchored to the text
@@ -2000,7 +2064,51 @@ class MainActivity : ComponentActivity() {
                             )
                         ),
                         windowMenu,
-                        helpMenu
+                        helpMenu,
+                        // T5 échanges + pages + productivité (spec
+                        // docs/t5-exchange.md) : dialogs, session-only
+                        // where specified.
+                        StudioMenu(
+                            title = stringResource(R.string.menu_t5),
+                            items = listOf(
+                                StudioMenuItem(
+                                    label = stringResource(R.string.fill_title),
+                                    onClick = { showT5Fill.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.import_grd),
+                                    onClick = { showT5Import.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.match_title),
+                                    onClick = { showT5Match.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.pages_work),
+                                    onClick = { showT5Pages.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.export_epub),
+                                    onClick = { showT5Export.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.macro_title),
+                                    onClick = { showT5Macro.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.align_title),
+                                    onClick = { showT5Align.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.history_title),
+                                    onClick = { showT5History.value = true }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.info_title),
+                                    onClick = { showT5Info.value = true }
+                                )
+                            )
+                        ),
                     ),
                     compact = compact,
                     docTitle = docs.firstOrNull { it.docId == activeId }?.name,
@@ -3081,6 +3189,133 @@ class MainActivity : ComponentActivity() {
                         includeText = includeText.value,
                         onIncludeText = { includeText.value = it }
                     )
+                }
+                // ---- T5 dialogs (spec docs/t5-exchange.md) ----
+                if (showT5Fill.value) {
+                    activeSurface()?.let { s ->
+                        FillPanel(
+                            surface = s,
+                            onDismiss = { showT5Fill.value = false },
+                            onStatus = { status.value = it },
+                            onChanged = {
+                                val aid = activeDocId.value
+                                if (aid != null) docRegistry.markDirty(aid, true)
+                                refreshKey.value++
+                            }
+                        )
+                    } ?: run { showT5Fill.value = false }
+                }
+                if (showT5Import.value) {
+                    activeSurface()?.let { s ->
+                        ImportPanel(
+                            surface = s,
+                            filesDir = ctx.filesDir,
+                            cacheDir = ctx.cacheDir,
+                            onPickFile = { mime, cb ->
+                                exchangePick.value = cb
+                                openExchange.launch(arrayOf(mime))
+                            },
+                            onDismiss = { showT5Import.value = false },
+                            onStatus = { status.value = it },
+                            onChanged = {
+                                val aid = activeDocId.value
+                                if (aid != null) docRegistry.markDirty(aid, true)
+                                refreshKey.value++
+                            }
+                        )
+                    } ?: run { showT5Import.value = false }
+                }
+                if (showT5Match.value) {
+                    activeSurface()?.let { s ->
+                        ColorMatchDialog(
+                            surface = s,
+                            onDismiss = { showT5Match.value = false },
+                            onStatus = { status.value = it },
+                            onChanged = {
+                                val aid = activeDocId.value
+                                if (aid != null) docRegistry.markDirty(aid, true)
+                                refreshKey.value++
+                            }
+                        )
+                    } ?: run { showT5Match.value = false }
+                }
+                if (showT5Pages.value) {
+                    activeSurface()?.let { s ->
+                        T5PagesPanel(
+                            surface = s,
+                            docKey = activeDocId.value ?: "solo",
+                            cacheDir = ctx.cacheDir,
+                            dpi = dpi,
+                            onDismiss = { showT5Pages.value = false },
+                            onStatus = { status.value = it },
+                            onChanged = { refreshKey.value++ },
+                            onSharePdf = { f ->
+                                pendingShare.value = f
+                                createT5.launch("fanzine-${System.currentTimeMillis()}.pdf")
+                            }
+                        )
+                    } ?: run { showT5Pages.value = false }
+                }
+                if (showT5Export.value) {
+                    activeSurface()?.let { s ->
+                        T5ExportDialog(
+                            surface = s,
+                            docKey = activeDocId.value ?: "solo",
+                            cacheDir = ctx.cacheDir,
+                            dpi = dpi,
+                            onDismiss = { showT5Export.value = false },
+                            onExportFile = { _, f, name ->
+                                pendingShare.value = f
+                                createT5.launch(name)
+                            },
+                            onStatus = { status.value = it }
+                        )
+                    } ?: run { showT5Export.value = false }
+                }
+                if (showT5Macro.value) {
+                    activeSurface()?.let { s ->
+                        MacroPanel(
+                            surface = s,
+                            cacheDir = ctx.cacheDir,
+                            onDismiss = { showT5Macro.value = false },
+                            onStatus = { status.value = it }
+                        )
+                    } ?: run { showT5Macro.value = false }
+                }
+                if (showT5Align.value) {
+                    activeSurface()?.let { s ->
+                        AlignPanel(
+                            surface = s,
+                            cacheDir = ctx.cacheDir,
+                            onDismiss = { showT5Align.value = false },
+                            onStatus = { status.value = it },
+                            onChanged = {
+                                val aid = activeDocId.value
+                                if (aid != null) docRegistry.markDirty(aid, true)
+                                refreshKey.value++
+                            }
+                        )
+                    } ?: run { showT5Align.value = false }
+                }
+                if (showT5History.value) {
+                    HistoryPanel(
+                        onDismiss = { showT5History.value = false },
+                        onJump = { steps ->
+                            val s = activeSurface()
+                            if (s != null) {
+                                repeat(steps) { s.undo() }
+                                refreshKey.value++
+                            }
+                        }
+                    )
+                }
+                if (showT5Info.value) {
+                    activeSurface()?.let { s ->
+                        InfoPanel(
+                            surface = s,
+                            onDismiss = { showT5Info.value = false }
+                        )
+                    } ?: run { showT5Info.value = false }
                 }
             }
 

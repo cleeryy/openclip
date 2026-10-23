@@ -34,9 +34,11 @@ struct ShapeSpec {
 // surface byte-identical on degenerate spec (unknown kind, zero-area
 // frame, polygon sides outside [3,12], negative corner, stroke width
 // outside [1,64], fill and stroke both off) or an empty surface.
+// T5 §1 verrou alpha: like floodFillSeeded, transparent pixels are
+// skipped when alphaLock is true (default false = legacy path).
 bool stampShape(Surface& s, const ShapeSpec& spec,
                 const std::uint8_t* mask, int maskStride,
-                std::string& error);
+                std::string& error, bool alphaLock = false);
 
 }  // namespace openclip
 

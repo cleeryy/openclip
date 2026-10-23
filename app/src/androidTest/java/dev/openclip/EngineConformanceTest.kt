@@ -6,6 +6,7 @@
 package dev.openclip
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfDocument
 import android.os.SystemClock
 import android.view.KeyEvent
@@ -2669,6 +2670,12 @@ class EngineConformanceTest {
             // Refresh the panel so the debounced worker picks up both
             // layers, then let it solo-render (poll: emulator timing).
             dockTop()
+            // T5: taller rows (flag toggles) can leave the panel
+            // below the fold — scroll the outer dock so the list
+            // viewport is on screen (inner-list scrollTo cannot fix
+            // an outer-dock offset).
+            composeRule.onNodeWithTag("layer-list").performScrollTo()
+            composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-thumb-0").performClick()
             composeRule.waitForIdle()
             var tries = 0
@@ -2738,6 +2745,12 @@ class EngineConformanceTest {
             // Refresh the panel past the just-added layers so the drop
             // guard sees the real size.
             dockTop()
+            // T5: taller rows (flag toggles) can leave the panel
+            // below the fold — scroll the outer dock so the list
+            // viewport is on screen (inner-list scrollTo cannot fix
+            // an outer-dock offset).
+            composeRule.onNodeWithTag("layer-list").performScrollTo()
+            composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-thumb-0").performClick()
             composeRule.waitForIdle()
             val from = n - 2
@@ -2814,6 +2827,12 @@ class EngineConformanceTest {
             val before = pullFull(es)
             // The panel only learns the new layer through a UI refresh.
             dockTop()
+            // T5: taller rows (flag toggles) can leave the panel
+            // below the fold — scroll the outer dock so the list
+            // viewport is on screen (inner-list scrollTo cannot fix
+            // an outer-dock offset).
+            composeRule.onNodeWithTag("layer-list").performScrollTo()
+            composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-thumb-0").performClick()
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-blend-$idx").performScrollTo()
@@ -2971,6 +2990,12 @@ class EngineConformanceTest {
         try {
             ensureDockOpen()
             dockTop()
+            // T5: taller rows (flag toggles) can leave the panel
+            // below the fold — scroll the outer dock so the list
+            // viewport is on screen (inner-list scrollTo cannot fix
+            // an outer-dock offset).
+            composeRule.onNodeWithTag("layer-list").performScrollTo()
+            composeRule.waitForIdle()
             val start = layerNames(es).size
             onUi {
                 for (i in start until 50) it.addLayerNamed("Layer $i")
@@ -2991,11 +3016,17 @@ class EngineConformanceTest {
             // Compact: a non-active row folds its rank 2.
             val act = activeIndex(es)
             val folded = if (act != 0) 0 else 1
+            // T5: re-scroll the outer dock (the counter scroll above
+            // may have moved the list viewport off screen).
+            composeRule.onNodeWithTag("layer-list").performScrollTo()
+            composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-row-$folded").performScrollTo()
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-row-$folded").assertIsDisplayed()
             composeRule.onNodeWithTag("layer-blend-$folded").assertDoesNotExist()
             // The active row keeps its controls.
+            composeRule.onNodeWithTag("layer-list").performScrollTo()
+            composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-row-$act").performScrollTo()
             composeRule.onNodeWithTag("layer-blend-$act").assertIsDisplayed()
             // Name search filters (unique match "Layer 49": substring proof,
@@ -11173,5 +11204,604 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         }
         return false
     }
-}
+    // ================= T5 échanges + pages + productivité =================
 
+    private fun t5Hash(es: EngineSurface): IntArray {
+        val b = pullFull(es)
+        try {
+            return intPixels(b)
+        } finally {
+            b.recycle()
+        }
+    }
+
+    private fun t5PagesDir(es: EngineSurface, n: Int, tag: String): java.io.File {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dir = java.io.File(ctx.cacheDir, "t5pages-$tag-${System.currentTimeMillis()}")
+        dir.mkdirs()
+        java.io.File(dir, "thumbs").mkdirs()
+        val inks = listOf("#FF0000", "#00FF00", "#0000FF")
+        repeat(n) { k ->
+            es.floodFillAt(10 + k, 10, inks[k % 3], "{}")
+            Thread.sleep(300)
+            var ok = false
+            val latch = java.util.concurrent.CountDownLatch(1)
+            es.saveTo(
+                java.io.File(
+                    dir, String.format(java.util.Locale.US, "%03d.ora", k + 1)
+                ).absolutePath, "ora"
+            ) { saved ->
+                ok = saved
+                latch.countDown()
+            }
+            assertTrue("page save must succeed", latch.await(30, java.util.concurrent.TimeUnit.SECONDS) && ok)
+        }
+        val pages = (1..n).map { k ->
+            OcpPage(String.format(java.util.Locale.US, "%03d.ora", k), "p$k", 256, 256)
+        }
+        java.io.File(dir, "project.json").writeText(MultipageProject.toJson("ltr", pages))
+        return dir
+    }
+
+    // §1: verrou — écriture refusée + hint, couche intacte.
+    @Test
+    fun t5LockRefusesStrokeAndHint() {
+        val id = openFreshDoc("t5-lock")
+        val es = freshSurface(id)
+        try {
+            assertTrue(es.floodFillAt(10, 10, "#FF0000", "{}"))
+            Thread.sleep(400)
+            val h0 = t5Hash(es)
+            assertTrue(es.setLayerFlags(0, "{\"locked\":true}"))
+            assertTrue(es.layerState().contains("\"locked\":true"))
+            assertFalse("flood on locked layer refused", es.floodFillAt(20, 20, "#0000FF", "{}"))
+            es.lastRefusal = null
+            viewStrokeEng(es, 30f, 30f, 100f, 100f)
+            Thread.sleep(900)
+            assertEquals("layer_locked_hint", es.lastRefusal)
+            assertTrue("locked layer byte-identical", t5Hash(es).contentEquals(h0))
+            assertTrue(es.setLayerFlags(0, "{\"locked\":false}"))
+            assertTrue(es.floodFillAt(20, 20, "#0000FF", "{}"))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §1: verrou alpha — transparent intact, couvert peint.
+    @Test
+    fun t5AlphaLockKeepsTransparent() {
+        val id = openFreshDoc("t5-alock")
+        val es = freshSurface(id)
+        try {
+            val ink = es.addLayerNamed("ink")
+            assertTrue(ink >= 0)
+            es.setActiveLayer(ink)
+            assertTrue(es.stampShapeJson("{\"kind\":\"rect\",\"x0\":0,\"y0\":0,\"x1\":20,\"y1\":20,\"fill\":\"#FF0000\"}"))
+            Thread.sleep(300)
+            assertTrue(es.setLayerFlags(ink, "{\"alphaLock\":true}"))
+            val h0 = t5Hash(es)
+            // Graine transparente : aucun pixel transparent ne se couvre
+            // (les bords semi-couverts dans la tolérance du luma se
+            // peignent — couverture préservée, jamais créée).
+            assertTrue(es.floodFillAt(200, 200, "#0000FF", "{}"))
+            Thread.sleep(300)
+            val h1 = t5Hash(es)
+            assertEquals(h0.size, h1.size)
+            for (i in h0.indices) {
+                if ((h0[i] ushr 24) == 0) {
+                    assertTrue(
+                        "pixel $i stays transparent",
+                        (h1[i] ushr 24) == 0
+                    )
+                }
+            }
+            // Graine couverte : la peinture passe.
+            assertTrue(es.floodFillAt(5, 5, "#0000FF", "{}"))
+            Thread.sleep(300)
+            assertFalse(t5Hash(es).contentEquals(h0))
+            assertTrue(es.setLayerFlags(ink, "{\"alphaLock\":false}"))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §1: reference/draft — présentes dans l'éditeur, absentes de l'export.
+    @Test
+    fun t5DraftReferenceExportExclusion() {
+        val id = openFreshDoc("t5-rd")
+        val es = freshSurface(id)
+        try {
+            assertTrue(es.floodFillAt(10, 10, "#FF0000", "{}"))
+            val ref = es.addLayerNamed("ref")
+            es.setActiveLayer(ref)
+            assertTrue(es.setLayerFill(ref, "{\"kind\":\"solid\",\"color\":\"#00FF00\"}"))
+            assertTrue(es.setLayerFlags(ref, "{\"reference\":true}"))
+            val dr = es.addLayerNamed("draft")
+            es.setActiveLayer(dr)
+            assertTrue(es.setLayerFill(dr, "{\"kind\":\"solid\",\"color\":\"#0000FF\"}"))
+            assertTrue(es.setLayerFlags(dr, "{\"draft\":true}"))
+            Thread.sleep(300)
+            // Présentes couche par couche (éditeur).
+            val soloRef = es.soloRenderFull(ref)
+            assertNotNull(soloRef)
+            assertTrue("ref layer renders green", soloRef!!.getPixel(10, 10) == -16711936)
+            soloRef.recycle()
+            // Absentes du composite d'export (rouge seul).
+            val exp = es.pullExportBitmap()
+            assertNotNull(exp)
+            assertTrue("export stays red", exp!!.getPixel(10, 10) == -65536)
+            exp.recycle()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §2: fiche fill — pose, pixeliser undoable, états.
+    @Test
+    fun t5FillPoseBakeUndo() {
+        val id = openFreshDoc("t5-fill")
+        val es = freshSurface(id)
+        try {
+            val li = es.addLayerNamed("t5fill")
+            es.setActiveLayer(li)
+            assertTrue(es.setLayerFill(li, "{\"kind\":\"solid\",\"color\":\"#FF0000\"}"))
+            assertTrue(es.layerState().contains("\"fill\":{"))
+            Thread.sleep(300)
+            var b = es.pullExportBitmap()
+            assertNotNull(b)
+            assertEquals(-65536, b!!.getPixel(10, 10))
+            b.recycle()
+            assertTrue(es.rasterizeFill(li))
+            assertFalse("fiche cleared after bake", es.layerState().contains("\"fill\":{"))
+            b = es.pullExportBitmap()
+            assertNotNull(b)
+            assertEquals(-65536, b!!.getPixel(10, 10))
+            b.recycle()
+            assertTrue(es.undo())
+            Thread.sleep(300)
+            b = es.pullExportBitmap()
+            assertNotNull(b)
+            assertEquals("undo restores empty surface (white base)", -1, b!!.getPixel(10, 10))
+            b.recycle()
+            // Fiche invalide : false + intact.
+            assertFalse(es.setLayerFill(li, "{\"kind\":\"gradient\",\"stops\":[\"#FFFFFF:0\"]}"))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §2: les 2 nouveaux filtres appliquent + annulent.
+    @Test
+    fun t5NewFiltersApplyUndo() {
+        val id = openFreshDoc("t5-filt")
+        val es = freshSurface(id)
+        try {
+            val li = es.addLayerNamed("t5shape")
+            es.setActiveLayer(li)
+            assertTrue(es.stampShapeJson("{\"kind\":\"rect\",\"x0\":40,\"y0\":40,\"x1\":120,\"y1\":120}"))
+            Thread.sleep(300)
+            val h0 = t5Hash(es)
+            assertTrue(es.applyFilterSync("edgeBorder", "{\"width\":4,\"color\":\"#FF0000\",\"mode\":\"inside\"}"))
+            Thread.sleep(200)
+            assertFalse(t5Hash(es).contentEquals(h0))
+            assertTrue(es.undo())
+            Thread.sleep(200)
+            assertTrue(t5Hash(es).contentEquals(h0))
+            assertTrue(es.applyFilterSync("watercolor", "{\"darken\":0.6,\"rough\":6,\"bloom\":0.4}"))
+            Thread.sleep(200)
+            assertFalse(t5Hash(es).contentEquals(h0))
+            assertTrue(es.undo())
+            Thread.sleep(200)
+            assertTrue(t5Hash(es).contentEquals(h0))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §3: les 24 blends sont acceptés.
+    @Test
+    fun t5BlendsAllAccept() {
+        val id = openFreshDoc("t5-blends")
+        val es = freshSurface(id)
+        try {
+            val names = listOf(
+                "svg:normal", "svg:multiply", "svg:screen", "svg:overlay",
+                "svg:plus", "svg:soft-light", "svg:hard-light",
+                "svg:difference", "svg:color", "svg:luminosity",
+                "svg:darken", "svg:lighten", "svg:linear-burn",
+                "svg:linear-dodge", "svg:vivid-light", "svg:linear-light",
+                "svg:pin-light", "svg:subtract", "svg:divide", "svg:exclusion",
+                "darken", "linear_dodge", "pin-light", "exclusion"
+            )
+            assertEquals(24, names.size)
+            for (n in names) assertTrue("blend $n accepted", es.setLayerBlend(0, n))
+            assertTrue(es.layerState().contains("exclusion"))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §4: fixture .grd in-code : parse OK + troncature refusée.
+    @Test
+    fun t5GrdFixtureParses() {
+        val (grads, msgs) = dev.openclip.ui.GrdParser.parse(
+            dev.openclip.ui.GrdParser.fixtureTwoStops()
+        )
+        assertEquals(1, grads.size)
+        assertEquals(2, grads[0].stops.size)
+        assertTrue(grads[0].stops[0].startsWith("#000000"))
+        assertTrue("no warnings on the clean fixture: $msgs", msgs.isEmpty())
+        val (g2, m2) = dev.openclip.ui.GrdParser.parse(byteArrayOf(0, 3, 0))
+        assertTrue(g2.isEmpty())
+        assertTrue(m2.isNotEmpty())
+    }
+
+    // §4: fixture .abr in-code : pointe lue + version inconnue refusée.
+    @Test
+    fun t5AbrFixtureParses() {
+        val (tips, msgs) = dev.openclip.ui.AbrParser.parse(
+            dev.openclip.ui.AbrParser.fixtureTip()
+        )
+        assertEquals(1, tips.size)
+        assertEquals(4, tips[0].w)
+        assertEquals(4, tips[0].h)
+        assertTrue("center pinned", tips[0].bits[5] != 0.toByte())
+        assertTrue("dynamics announced", msgs.contains("dynamics ignored"))
+        val (t2, m2) = dev.openclip.ui.AbrParser.parse(byteArrayOf(0, 6, 0, 1))
+        assertTrue(t2.isEmpty())
+        assertTrue(m2.isNotEmpty())
+    }
+
+    // §4: accord — 3 fiches curves posées + composite rapproché.
+    @Test
+    fun t5ColorMatchCurvesAndCloser() {
+        val id = openFreshDoc("t5-match")
+        val es = freshSurface(id)
+        try {
+            assertTrue(es.floodFillAt(10, 10, "#FF0000", "{}"))
+            val blue = es.addLayerNamed("blue")
+            es.setActiveLayer(blue)
+            assertTrue(es.floodFillAt(10, 10, "#0000FF", "{}"))
+            Thread.sleep(300)
+            val srcBmp = es.soloRenderFull(0)!!
+            val tgtBmp = es.soloRenderFull(blue)!!
+            val before = dev.openclip.ui.ColorMatch.meanDistance(srcBmp, tgtBmp)
+            assertTrue("red vs blue are far", before > 50)
+            val luts = dev.openclip.ui.ColorMatch.lut(
+                dev.openclip.ui.ColorMatch.stats(tgtBmp),
+                dev.openclip.ui.ColorMatch.stats(srcBmp)
+            )
+            val chans = arrayOf("r", "g", "b")
+            var okCount = 0
+            for (k in 0..2) {
+                val idx = es.addLayerNamed("match-" + chans[k])
+                if (idx >= 0 && es.setLayerAdjustment(
+                        idx, dev.openclip.ui.ColorMatch.curvesJson(luts[k], chans[k])
+                    )
+                ) okCount++
+            }
+            assertEquals(3, okCount)
+            Thread.sleep(400)
+            val afterBmp = es.pullExportBitmap()!!
+            val after = dev.openclip.ui.ColorMatch.meanDistance(srcBmp, afterBmp)
+            assertTrue("composite closer to source ($before -> $after)", after < before)
+            srcBmp.recycle()
+            tgtBmp.recycle()
+            afterBmp.recycle()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §5: project.json v1 migré sans perte + v2 relu.
+    @Test
+    fun t5ProjectV1Tolerant() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dir = java.io.File(ctx.cacheDir, "t5proj-${System.currentTimeMillis()}")
+        dir.mkdirs()
+        java.io.File(dir, "project.json").writeText(
+            "{\"version\":1,\"reading\":\"rtl\",\"pages\":[]}"
+        )
+        val (w, f, _) = dev.openclip.ui.T5Project.read(dir)
+        assertEquals("", w.titre)
+        assertEquals("off", f.style)
+        dev.openclip.ui.T5Project.write(
+            dir, dev.openclip.ui.T5Work(titre = "T"),
+            dev.openclip.ui.T5Folio("total", "bottom-center"),
+            dev.openclip.ui.T5Crop(3f, 10f), "left"
+        )
+        val back = org.json.JSONObject(java.io.File(dir, "project.json").readText())
+        assertEquals("T", back.getJSONObject("work").getString("titre"))
+        // Le lecteur v1 lit toujours reading + pages (jamais cassé).
+        val (reading, _) = MultipageProject.parse(java.io.File(dir, "project.json").readText())
+        assertEquals("rtl", reading)
+        dir.deleteRecursively()
+    }
+
+    // §5: foliotation — numéros distincts par page + romain.
+    @Test
+    fun t5FolioNumbersDistinct() {
+        assertEquals("IV", dev.openclip.ui.t5Roman(4))
+        assertEquals("2/5", dev.openclip.ui.t5FolioText(2, 5, "total"))
+        assertNull(dev.openclip.ui.t5FolioText(2, 5, "off"))
+        val b = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+        b.eraseColor(-1)
+        val f = dev.openclip.ui.T5Folio("total", "bottom-center")
+        val p1 = dev.openclip.ui.t5RenderFolio(b, 1, 2, f)
+        val p2 = dev.openclip.ui.t5RenderFolio(b, 2, 2, f)
+        assertFalse(
+            "folio numbers differ",
+            intPixels(p1).contentEquals(intPixels(p2))
+        )
+    }
+
+    // §5: fanzine — 8 pages imposées + bourrage documenté.
+    @Test
+    fun t5ImposeEightPages() {
+        val (sheets, pad) = dev.openclip.ui.t5Impose(8)
+        assertEquals(0, pad)
+        assertEquals(2, sheets.size)
+        assertEquals(dev.openclip.ui.T5Sheet(8, 1, 2, 7), sheets[0])
+        assertEquals(dev.openclip.ui.T5Sheet(6, 3, 4, 5), sheets[1])
+        val (sheets5, pad5) = dev.openclip.ui.t5Impose(5)
+        assertEquals(3, pad5)
+        assertEquals(2, sheets5.size)
+    }
+
+    // §5: repères — overlay 3 rects + rendu opt-in agrandi.
+    @Test
+    fun t5CropOverlaysAndRender() {
+        val ov = dev.openclip.ui.t5CropOverlays(200, 200, 160f, 3f, 10f)
+        assertEquals(3, ov.size)
+        val b = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+        b.eraseColor(-1)
+        val c = dev.openclip.ui.t5RenderCrop(
+            b, 160f, dev.openclip.ui.T5Crop(3f, 10f),
+            dev.openclip.ui.T5Folio("off", "bottom-center"), 1, 1
+        )
+        assertTrue(c.width > 200 && c.height > 200)
+    }
+
+    // §6: EPUB 3 pages — mimetype premier STORED + spine = 3.
+    @Test
+    fun t5EpubThreePagesValid() {
+        val id = openFreshDoc("t5-epub")
+        val es = freshSurface(id)
+        try {
+            val dir = t5PagesDir(es, 3, "epub")
+            val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+            val dst = java.io.File(ctx.cacheDir, "t5-${System.currentTimeMillis()}.epub")
+            assertTrue(
+                dev.openclip.ui.t5ExportEpub(
+                    es, dir, ctx.cacheDir, dst,
+                    dev.openclip.ui.T5Folio("total", "bottom-center"), null,
+                    dev.openclip.ui.T5Work(titre = "T"), "ltr", 160f
+                )
+            )
+            val (zipOk, mimeOk, spine) = dev.openclip.ui.t5ValidateEpub(dst)
+            assertTrue("zip opens", zipOk)
+            assertTrue("mimetype first + stored", mimeOk)
+            assertEquals(3, spine)
+            dst.delete()
+            dir.deleteRecursively()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §6: PDF 3 pages — dimensions ≈ canvas/dpi.
+    @Test
+    fun t5PdfThreePagesSized() {
+        val id = openFreshDoc("t5-pdf")
+        val es = freshSurface(id)
+        try {
+            val dir = t5PagesDir(es, 3, "pdf")
+            val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+            val dst = java.io.File(ctx.cacheDir, "t5-${System.currentTimeMillis()}.pdf")
+            assertTrue(
+                dev.openclip.ui.t5ExportPdf(
+                    es, dir, ctx.cacheDir, dst,
+                    dev.openclip.ui.T5Folio("off", "bottom-center"), null, 160f
+                )
+            )
+            val fd = android.os.ParcelFileDescriptor.open(
+                dst, android.os.ParcelFileDescriptor.MODE_READ_ONLY
+            )
+            val renderer = android.graphics.pdf.PdfRenderer(fd)
+            assertEquals(3, renderer.pageCount)
+            val pg = renderer.openPage(0)
+            val (cw, _) = es.canvasDims()
+            val expect = (cw * 72f / 160f).toInt()
+            assertTrue("page width ≈ canvas/dpi", pg.width in expect - 4..expect + 4)
+            pg.close()
+            renderer.close()
+            fd.close()
+            dst.delete()
+            dir.deleteRecursively()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §6: séquence multipage — pNN_frame_MMMM présents, holds éclatés.
+    @Test
+    fun t5SequenceMultipageZip() {
+        val id = openFreshDoc("t5-seq")
+        val es = freshSurface(id)
+        try {
+            val dir = t5PagesDir(es, 3, "seq")
+            val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+            val dst = java.io.File(ctx.cacheDir, "t5-${System.currentTimeMillis()}.zip")
+            assertTrue(dev.openclip.ui.t5ExportSequence(es, dir, ctx.cacheDir, dst))
+            java.util.zip.ZipFile(dst).use { z ->
+                val names = z.entries().toList().map { it.name }.sorted()
+                assertEquals(3, names.size)
+                assertTrue(names.contains("p01_frame_0001.png"))
+                assertTrue(names.contains("p02_frame_0001.png"))
+                assertTrue(names.contains("p03_frame_0001.png"))
+            }
+            dst.delete()
+            dir.deleteRecursively()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §6: stickers APNG — 1 par page, ≤ 512px.
+    @Test
+    fun t5Stickers512() {
+        val id = openFreshDoc("t5-stick")
+        val es = freshSurface(id)
+        try {
+            val dir = t5PagesDir(es, 3, "stick")
+            val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+            val out = java.io.File(ctx.cacheDir, "t5stick-${System.currentTimeMillis()}")
+            assertEquals(3, dev.openclip.ui.t5ExportStickers(es, dir, ctx.cacheDir, out))
+            val opts = BitmapFactory.Options()
+            opts.inJustDecodeBounds = true
+            for (f in out.listFiles()!!) {
+                BitmapFactory.decodeFile(f.absolutePath, opts)
+                assertTrue(opts.outWidth in 1..512)
+                assertTrue(opts.outHeight in 1..512)
+            }
+            out.deleteRecursively()
+            dir.deleteRecursively()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §7: macro 3 ops rejouée → composite égal à l'original.
+    @Test
+    fun t5MacroReplayEqual() {
+        val id = openFreshDoc("t5-macro")
+        val es = freshSurface(id)
+        try {
+            assertTrue(es.floodFillAt(10, 10, "#FF0000", "{}"))
+            Thread.sleep(300)
+            val h0 = t5Hash(es)
+            dev.openclip.ui.MacroJournal.start()
+            assertTrue(es.setLayerOpacity(0, 0.5f))
+            assertTrue(es.setLayerBlend(0, "svg:multiply"))
+            assertTrue(es.applyFilterSync("threshold", "{\"level\":128}"))
+            val ops = dev.openclip.ui.MacroJournal.stop()
+            assertEquals(3, ops.size)
+            Thread.sleep(300)
+            val h1 = t5Hash(es)
+            assertFalse(h1.contentEquals(h0))
+            // Reset : 1 undo (filtre) + métas manuelles (hors undo).
+            assertTrue(es.undo())
+            es.setLayerOpacity(0, 1f)
+            es.setLayerBlend(0, "svg:normal")
+            Thread.sleep(300)
+            assertTrue("reset restores", t5Hash(es).contentEquals(h0))
+            val errs = dev.openclip.ui.replayMacro(
+                es, dev.openclip.ui.Macro("m", ops)
+            )
+            assertTrue("replay clean: $errs", errs.isEmpty())
+            Thread.sleep(300)
+            assertTrue("replay equals original", t5Hash(es).contentEquals(h1))
+        } finally {
+            dev.openclip.ui.MacroJournal.cancel()
+            closeFreshDoc(id)
+        }
+    }
+
+    // §7: macro invalide → arrêt + rapport.
+    @Test
+    fun t5MacroInvalidStopsAndReports() {
+        val id = openFreshDoc("t5-macroinv")
+        val es = freshSurface(id)
+        try {
+            val bad = dev.openclip.ui.Macro(
+                "bad", listOf(dev.openclip.ui.MacroOp("nope", "{}"))
+            )
+            assertTrue(dev.openclip.ui.replayMacro(es, bad).isNotEmpty())
+            val badIdx = dev.openclip.ui.Macro(
+                "bad2", listOf(
+                    dev.openclip.ui.MacroOp(
+                        "setLayerBlend", "{\"index\":99,\"name\":\"svg:multiply\"}"
+                    )
+                )
+            )
+            assertTrue(dev.openclip.ui.replayMacro(es, badIdx).isNotEmpty())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §7: aligner 3 calques (gauche) → positions attendues.
+    @Test
+    fun t5AlignLeftCanvas() {
+        val id = openFreshDoc("t5-align")
+        val es = freshSurface(id)
+        try {
+            val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+            val ids = (1..3).map { es.addLayerNamed("a$it") }
+            ids.forEachIndexed { k, idx ->
+                es.setActiveLayer(idx)
+                assertTrue(
+                    es.stampShapeJson(
+                        "{\"kind\":\"rect\",\"x0\":${40 + k * 40},\"y0\":40,\"x1\":${60 + k * 40},\"y1\":60}"
+                    )
+                )
+            }
+            Thread.sleep(300)
+            dev.openclip.ui.T5AlignSelection.clear()
+            ids.forEach { dev.openclip.ui.T5AlignSelection.selected.add(it) }
+            assertEquals(3, dev.openclip.ui.t5Align(es, ctx.cacheDir, "left", true))
+            Thread.sleep(300)
+            for (i in ids) {
+                val x0 = dev.openclip.ui.t5LayerBBox(es, i)?.get(0) ?: 99
+                assertTrue("layer $i at left (x0=$x0)", x0 <= 1)
+            }
+            dev.openclip.ui.T5AlignSelection.clear()
+        } finally {
+            dev.openclip.ui.T5AlignSelection.clear()
+            closeFreshDoc(id)
+        }
+    }
+
+    // §7: historique — liste + tap-revenir restaure le composite.
+    @Test
+    fun t5HistoryJumpRestores() {
+        val id = openFreshDoc("t5-hist")
+        val es = freshSurface(id)
+        try {
+            assertTrue(es.floodFillAt(10, 10, "#FF0000", "{}"))
+            Thread.sleep(300)
+            val h0 = t5Hash(es)
+            val n0 = dev.openclip.ui.HistoryLog.size()
+            assertTrue(es.applyFilterSync("threshold", "{\"level\":200}"))
+            assertTrue(es.applyFilterSync("posterize", "{\"levels\":2}"))
+            Thread.sleep(200)
+            assertEquals(n0 + 2, dev.openclip.ui.HistoryLog.size())
+            assertFalse(t5Hash(es).contentEquals(h0))
+            assertTrue(es.undo())
+            assertTrue(es.undo())
+            Thread.sleep(200)
+            assertEquals(n0, dev.openclip.ui.HistoryLog.size())
+            assertTrue("jump back restores", t5Hash(es).contentEquals(h0))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // §7: info — dims/zoom cohérents, export joignable.
+    @Test
+    fun t5InfoDimsCoherent() {
+        val id = openFreshDoc("t5-info")
+        val es = freshSurface(id)
+        try {
+            val (w, h) = es.canvasDims()
+            assertTrue(w >= 200 && h >= 200)
+            val bmp = es.pullExportBitmap()
+            assertNotNull(bmp)
+            assertEquals(w, bmp!!.width)
+            assertEquals(h, bmp.height)
+            bmp.recycle()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+}

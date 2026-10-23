@@ -87,7 +87,7 @@ inline std::uint8_t clamp255(double v) {
 
 bool stampShape(Surface& s, const ShapeSpec& spec,
                 const std::uint8_t* mask, int maskStride,
-                std::string& error) {
+                std::string& error, bool alphaLock) {
     error.clear();
     const int w = s.width(), h = s.height();
     if (w <= 0 || h <= 0) {
@@ -140,6 +140,10 @@ bool stampShape(Surface& s, const ShapeSpec& spec,
         for (int x = bx0; x <= bx1; ++x) {
             if (mask &&
                 mask[static_cast<std::size_t>(y) * maskStride + x] == 0)
+                continue;
+            // T5 §1 verrou alpha (see fill.h).
+            if (alphaLock &&
+                bytes[(static_cast<std::size_t>(y) * w + x) * 4 + 3] == 0)
                 continue;
             int fillHits = 0, strokeHits = 0;
             for (int sy = 0; sy < kAA; ++sy)

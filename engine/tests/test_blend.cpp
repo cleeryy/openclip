@@ -181,3 +181,148 @@ TEST(blend_names_v2) {
     CHECK(std::string(blendToName(BlendMode::Luminosity)) ==
           "svg:luminosity");
 }
+
+// T5: the ten new modes — names (bare + svg: + snake) and invariants.
+TEST(blend_names_t5) {
+    CHECK(blendFromName("darken") == BlendMode::Darken);
+    CHECK(blendFromName("svg:darken") == BlendMode::Darken);
+    CHECK(blendFromName("lighten") == BlendMode::Lighten);
+    CHECK(blendFromName("linear-burn") == BlendMode::LinearBurn);
+    CHECK(blendFromName("svg:linear-burn") == BlendMode::LinearBurn);
+    CHECK(blendFromName("linear_burn") == BlendMode::LinearBurn);
+    CHECK(blendFromName("linear-dodge") == BlendMode::LinearDodge);
+    CHECK(blendFromName("linear_dodge") == BlendMode::LinearDodge);
+    CHECK(blendFromName("vivid-light") == BlendMode::VividLight);
+    CHECK(blendFromName("svg:vivid-light") == BlendMode::VividLight);
+    CHECK(blendFromName("vivid_light") == BlendMode::VividLight);
+    CHECK(blendFromName("linear-light") == BlendMode::LinearLight);
+    CHECK(blendFromName("pin-light") == BlendMode::PinLight);
+    CHECK(blendFromName("pin_light") == BlendMode::PinLight);
+    CHECK(blendFromName("subtract") == BlendMode::Subtract);
+    CHECK(blendFromName("divide") == BlendMode::Divide);
+    CHECK(blendFromName("exclusion") == BlendMode::Exclusion);
+    CHECK(std::string(blendToName(BlendMode::Darken)) == "svg:darken");
+    CHECK(std::string(blendToName(BlendMode::Lighten)) == "svg:lighten");
+    CHECK(std::string(blendToName(BlendMode::LinearBurn)) ==
+          "svg:linear-burn");
+    CHECK(std::string(blendToName(BlendMode::LinearDodge)) ==
+          "svg:linear-dodge");
+    CHECK(std::string(blendToName(BlendMode::VividLight)) ==
+          "svg:vivid-light");
+    CHECK(std::string(blendToName(BlendMode::LinearLight)) ==
+          "svg:linear-light");
+    CHECK(std::string(blendToName(BlendMode::PinLight)) == "svg:pin-light");
+    CHECK(std::string(blendToName(BlendMode::Subtract)) == "svg:subtract");
+    CHECK(std::string(blendToName(BlendMode::Divide)) == "svg:divide");
+    CHECK(std::string(blendToName(BlendMode::Exclusion)) ==
+          "svg:exclusion");
+}
+
+// T5: darken/lighten are commutative per channel (min/max).
+TEST(blend_darken_lighten_commutative) {
+    Pixel s{200, 50, 128, 255}, d{100, 180, 64, 255}, o1, o2;
+    blendPixel(s, d, BlendMode::Darken, o1);
+    blendPixel(d, s, BlendMode::Darken, o2);
+    CHECK_EQ(o1.r, 100);
+    CHECK_EQ(o1.g, 50);
+    CHECK_EQ(o1.b, 64);
+    CHECK_EQ(o1.r, o2.r);
+    CHECK_EQ(o1.g, o2.g);
+    CHECK_EQ(o1.b, o2.b);
+    blendPixel(s, d, BlendMode::Lighten, o1);
+    blendPixel(d, s, BlendMode::Lighten, o2);
+    CHECK_EQ(o1.r, 200);
+    CHECK_EQ(o1.g, 180);
+    CHECK_EQ(o1.b, 128);
+    CHECK_EQ(o1.r, o2.r);
+    CHECK_EQ(o1.g, o2.g);
+    CHECK_EQ(o1.b, o2.b);
+}
+
+// T5: linear-dodge is the documented twin of Add (same clamped sum).
+TEST(blend_linear_dodge_twins_add) {
+    Pixel s{200, 100, 30, 255}, d{100, 180, 240, 255}, o1, o2;
+    blendPixel(s, d, BlendMode::Add, o1);
+    blendPixel(s, d, BlendMode::LinearDodge, o2);
+    CHECK_EQ(o1.r, o2.r);
+    CHECK_EQ(o1.g, o2.g);
+    CHECK_EQ(o1.b, o2.b);
+    CHECK_EQ(o1.r, 255);  // 200+100 clamps
+    CHECK_EQ(o1.g, 255);  // 100+180 clamps
+    CHECK_EQ(o1.b, 255);  // 30+240 clamps
+}
+
+// T5: subtract clamps at zero (unlike Difference which mirrors);
+// divide by white is identity.
+TEST(blend_subtract_divide) {
+    Pixel s{200, 200, 200, 255}, d{100, 100, 100, 255}, o;
+    blendPixel(s, d, BlendMode::Subtract, o);
+    CHECK_EQ(o.r, 0);
+    blendPixel(s, d, BlendMode::Difference, o);
+    CHECK_EQ(o.r, 100);  // |200-100| mirrors, subtract clamps
+    Pixel w{255, 255, 255, 255}, g{128, 64, 32, 255};
+    blendPixel(w, g, BlendMode::Divide, o);
+    CHECK_EQ(o.r, 128);
+    CHECK_EQ(o.g, 64);
+    CHECK_EQ(o.b, 32);
+    Pixel blk{0, 0, 0, 255};
+    blendPixel(blk, g, BlendMode::Divide, o);
+    CHECK_EQ(o.r, 255);  // divide by zero (d>0) -> white
+    blendPixel(blk, blk, BlendMode::Divide, o);
+    CHECK_EQ(o.r, 0);  // 0/0 -> black
+}
+
+// T5: exclusion with 50% gray over 50% gray keeps gray; black src is
+// the neutral (identity), like Normal.
+TEST(blend_exclusion_neutral) {
+    Pixel g{128, 128, 128, 255}, o;
+    blendPixel(g, g, BlendMode::Exclusion, o);
+    // 2*s*(1-s) with s=128/255 lands one LSB under 128 (locked: 127).
+    CHECK_EQ(o.r, 127);
+    Pixel blk{0, 0, 0, 255}, d{90, 140, 200, 255};
+    blendPixel(blk, d, BlendMode::Exclusion, o);
+    CHECK_EQ(o.r, d.r);
+    CHECK_EQ(o.g, d.g);
+    CHECK_EQ(o.b, d.b);
+}
+
+// T5: mid-gray source is the documented neutral for vivid, linear
+// and pin light (identity on any destination).
+TEST(blend_midgray_neutral_lights) {
+    Pixel mid{128, 128, 128, 255}, d{90, 140, 200, 255}, o;
+    for (auto m : {BlendMode::VividLight, BlendMode::LinearLight,
+                   BlendMode::PinLight}) {
+        blendPixel(mid, d, m, o);
+        // 128/255 = 0.502: vivid -> burn(1.004->d) = d; linear ->
+        // d + 0.004 -> off by one at most; pin -> min(1.004, d) = d.
+        CHECK(std::abs((int)o.r - (int)d.r) <= 1);
+        CHECK(std::abs((int)o.g - (int)d.g) <= 1);
+        CHECK(std::abs((int)o.b - (int)d.b) <= 1);
+    }
+    // linear-burn neutral is white, subtract neutral is black.
+    Pixel w{255, 255, 255, 255}, blk{0, 0, 0, 255};
+    blendPixel(w, d, BlendMode::LinearBurn, o);
+    CHECK_EQ(o.r, d.r);
+    CHECK_EQ(o.g, d.g);
+    CHECK_EQ(o.b, d.b);
+    blendPixel(blk, d, BlendMode::Subtract, o);
+    CHECK_EQ(o.r, d.r);
+    CHECK_EQ(o.g, d.g);
+    CHECK_EQ(o.b, d.b);
+}
+
+// T5: transparent source stays a no-op for every new mode.
+TEST(blend_transparent_src_noop_t5) {
+    Pixel s{0, 0, 0, 0}, d{10, 20, 30, 200}, o;
+    for (auto m : {BlendMode::Darken, BlendMode::Lighten,
+                   BlendMode::LinearBurn, BlendMode::LinearDodge,
+                   BlendMode::VividLight, BlendMode::LinearLight,
+                   BlendMode::PinLight, BlendMode::Subtract,
+                   BlendMode::Divide, BlendMode::Exclusion}) {
+        blendPixel(s, d, m, o);
+        CHECK_EQ(o.r, d.r);
+        CHECK_EQ(o.g, d.g);
+        CHECK_EQ(o.b, d.b);
+        CHECK_EQ(o.a, d.a);
+    }
+}

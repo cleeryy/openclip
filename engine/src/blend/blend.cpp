@@ -85,6 +85,65 @@ float blendChannel(BlendMode m, float s, float d) {
             const float r = s - d;
             return r < 0.0f ? -r : r;
         }
+        case BlendMode::Darken:
+            // T5: assombrir (per-channel min, commutative).
+            return s < d ? s : d;
+        case BlendMode::Lighten:
+            // T5: éclaircir (per-channel max, commutative).
+            return s < d ? d : s;
+        case BlendMode::LinearBurn: {
+            // T5: densité linéaire − (clamped sum minus one).
+            const float r = s + d - 1.0f;
+            return r < 0.0f ? 0.0f : r;
+        }
+        case BlendMode::LinearDodge: {
+            // T5: documented twin of Add (clamped sum, own name).
+            const float r = s + d;
+            return r > 1.0f ? 1.0f : r;
+        }
+        case BlendMode::VividLight: {
+            // T5: vive — burn under mid gray, dodge above.
+            if (s <= 0.5f) {
+                const float r = 2.0f * s + d - 1.0f;
+                return r < 0.0f ? 0.0f : r;
+            }
+            const float r = 2.0f * (s - 0.5f) + d;
+            return r > 1.0f ? 1.0f : r;
+        }
+        case BlendMode::LinearLight: {
+            // T5: linéaire — signed double-strength offset, clamped.
+            const float r = d + 2.0f * s - 1.0f;
+            if (r < 0.0f) return 0.0f;
+            if (r > 1.0f) return 1.0f;
+            return r;
+        }
+        case BlendMode::PinLight: {
+            // T5: ponctuelle — darken under mid gray, lighten above.
+            if (s <= 0.5f) {
+                const float t = 2.0f * s;
+                return t < d ? t : d;
+            }
+            const float t = 2.0f * (s - 0.5f);
+            return t > d ? t : d;
+        }
+        case BlendMode::Subtract: {
+            // T5: soustraire (clamped at zero, signed unlike
+            // Difference which mirrors).
+            const float r = d - s;
+            return r < 0.0f ? 0.0f : r;
+        }
+        case BlendMode::Divide: {
+            // T5: diviser (clamped; divide-by-zero yields white
+            // unless both are zero).
+            if (s <= 0.0f) return d <= 0.0f ? 0.0f : 1.0f;
+            const float r = d / s;
+            return r > 1.0f ? 1.0f : r;
+        }
+        case BlendMode::Exclusion: {
+            // T5: incrustation partielle (50% gray is neutral:
+            // s=0.5 yields d).
+            return s + d - 2.0f * s * d;
+        }
         case BlendMode::Color:
         case BlendMode::Luminosity:
             // Non-separable: handled on whole pixels in blendPixel.
@@ -164,6 +223,29 @@ BlendMode blendFromName(const char* name) {
     if (!std::strcmp(n, "difference")) return BlendMode::Difference;
     if (!std::strcmp(n, "color")) return BlendMode::Color;
     if (!std::strcmp(n, "luminosity")) return BlendMode::Luminosity;
+    // T5 additions (bare or svg:-prefixed via the colon rule above;
+    // snake_case aliases accepted on input, canonical output stays
+    // kebab-case like the V+2 names).
+    if (!std::strcmp(n, "darken")) return BlendMode::Darken;
+    if (!std::strcmp(n, "lighten")) return BlendMode::Lighten;
+    if (!std::strcmp(n, "linear-burn") || !std::strcmp(n, "linear_burn") ||
+        !std::strcmp(n, "linearburn"))
+        return BlendMode::LinearBurn;
+    if (!std::strcmp(n, "linear-dodge") || !std::strcmp(n, "linear_dodge") ||
+        !std::strcmp(n, "lineardodge"))
+        return BlendMode::LinearDodge;
+    if (!std::strcmp(n, "vivid-light") || !std::strcmp(n, "vivid_light") ||
+        !std::strcmp(n, "vividlight"))
+        return BlendMode::VividLight;
+    if (!std::strcmp(n, "linear-light") || !std::strcmp(n, "linear_light") ||
+        !std::strcmp(n, "linearlight"))
+        return BlendMode::LinearLight;
+    if (!std::strcmp(n, "pin-light") || !std::strcmp(n, "pin_light") ||
+        !std::strcmp(n, "pinlight"))
+        return BlendMode::PinLight;
+    if (!std::strcmp(n, "subtract")) return BlendMode::Subtract;
+    if (!std::strcmp(n, "divide")) return BlendMode::Divide;
+    if (!std::strcmp(n, "exclusion")) return BlendMode::Exclusion;
     return BlendMode::Normal;
 }
 
@@ -187,6 +269,29 @@ const char* blendToName(BlendMode m) {
             return "svg:color";
         case BlendMode::Luminosity:
             return "svg:luminosity";
+        // T5 additions (canonical kebab-case svg: names; the ORA
+        // round trip keeps these, third-party readers degrade to
+        // Normal per the M5 rule).
+        case BlendMode::Darken:
+            return "svg:darken";
+        case BlendMode::Lighten:
+            return "svg:lighten";
+        case BlendMode::LinearBurn:
+            return "svg:linear-burn";
+        case BlendMode::LinearDodge:
+            return "svg:linear-dodge";
+        case BlendMode::VividLight:
+            return "svg:vivid-light";
+        case BlendMode::LinearLight:
+            return "svg:linear-light";
+        case BlendMode::PinLight:
+            return "svg:pin-light";
+        case BlendMode::Subtract:
+            return "svg:subtract";
+        case BlendMode::Divide:
+            return "svg:divide";
+        case BlendMode::Exclusion:
+            return "svg:exclusion";
         case BlendMode::Normal:
         default:
             return "svg:normal";

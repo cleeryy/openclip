@@ -424,6 +424,50 @@ class EngineSurface @JvmOverloads constructor(
     fun viewScale(): Float = viewScaleMul
     fun viewAngle(): Float = viewAngleDeg
     fun viewZoomPercent(): Int = (viewScaleMul * 100f).toInt()
+
+    // T5 §6: synchronous export pull (nFrameCompositeInto = the export
+    // composite: no onion, no ref wireframe, no reference/draft —
+    // ARCHITECTURE.md "T5 additions" §1). Used by EPUB/PDF/webtoon/
+    // sequence/double-view pulls.
+    fun pullExportBitmap(frame: Int = 0): Bitmap? {
+        if (handle == 0L) return null
+        suspendRender = true
+        try {
+            return synchronized(engineLock) {
+                val px = IntArray(engineWidth * engineHeight)
+                val n = try {
+                    EngineHost.nFrameCompositeInto(
+                        handle, frame, px, engineWidth, engineHeight
+                    )
+                } catch (_: Exception) {
+                    0
+                }
+                if (n <= 0) null
+                else {
+                    val b = Bitmap.createBitmap(
+                        engineWidth, engineHeight, Bitmap.Config.ARGB_8888
+                    )
+                    b.setPixels(px, 0, engineWidth, 0, 0, engineWidth, engineHeight)
+                    b
+                }
+            }
+        } finally {
+            suspendRender = false
+            needsComposite = true
+        }
+    }
+
+    // T5 §7 Info panel (read-only, 1 Hz max app-side): canvas dims,
+    // cursor in engine px (hover or last stroke point), tip radius.
+    fun canvasDims(): Pair<Int, Int> = engineWidth to engineHeight
+    fun cursorEngine(): Pair<Float, Float>? {
+        if (!hoverActive) return null
+        return try {
+            screenToEngine(hoverX, hoverY)
+        } catch (_: Exception) {
+            null
+        }
+    }
     fun isLoupeVisible(): Boolean =
         SystemClock.uptimeMillis() - lastNavTime < LOUPE_MS
 
@@ -729,12 +773,30 @@ class EngineSurface @JvmOverloads constructor(
 
     fun setLayerOpacity(index: Int, opacity: Float): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerOpacity(handle, index, opacity)
-            .also { if (it) needsComposite = true } else false
+            .also {
+                if (it) {
+                    needsComposite = true
+                    MacroJournal.record(
+                        "setLayerOpacity",
+                        org.json.JSONObject().put("index", index)
+                            .put("opacity", opacity.toDouble()).toString()
+                    )
+                }
+            } else false
     }
 
     fun setLayerBlend(index: Int, name: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerBlend(handle, index, name)
-            .also { if (it) needsComposite = true } else false
+            .also {
+                if (it) {
+                    needsComposite = true
+                    MacroJournal.record(
+                        "setLayerBlend",
+                        org.json.JSONObject().put("index", index)
+                            .put("name", name).toString()
+                    )
+                }
+            } else false
     }
 
     fun setLayerName(index: Int, name: String): Boolean = synchronized(engineLock) {
@@ -743,7 +805,16 @@ class EngineSurface @JvmOverloads constructor(
 
     fun setLayerAdjustment(index: Int, json: String?): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSetLayerAdjustment(handle, index, json)
-            .also { if (it) needsComposite = true } else false
+            .also {
+                if (it) {
+                    needsComposite = true
+                    if (json != null) MacroJournal.record(
+                        "setLayerAdjustment",
+                        org.json.JSONObject().put("index", index)
+                            .put("json", json).toString()
+                    )
+                }
+            } else false
     }
 
     fun loadGlbReference(path: String): Int = synchronized(engineLock) {
@@ -780,7 +851,12 @@ class EngineSurface @JvmOverloads constructor(
             .also {
                 if (it) {
                     needsComposite = true
-                    notifyStrokeChanged()
+                    MacroJournal.record(
+                        "puppetWarp",
+                        org.json.JSONObject().put("index", index)
+                            .put("json", json).toString()
+                    )
+                    notifyStrokeChanged("puppet")
                 }
             } else false
     }
@@ -803,7 +879,8 @@ class EngineSurface @JvmOverloads constructor(
             .also {
                 if (it) {
                     needsComposite = true
-                    notifyStrokeChanged()
+                    MacroJournal.record("applyTone", name)
+                    notifyStrokeChanged("tone:" + name)
                 }
             } else false
     }
@@ -1090,7 +1167,13 @@ class EngineSurface @JvmOverloads constructor(
 
     fun selectionBlit(json: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSelectionBlit(handle, json)
-            .also { if (it) needsComposite = true } else false
+            .also {
+                if (it) {
+                    needsComposite = true
+                    MacroJournal.record("selectionBlit", json)
+                    notifyStrokeChanged("move")
+                }
+            } else false
     }
 
     fun vectorPaths(index: Int): String = synchronized(engineLock) {
@@ -1251,11 +1334,21 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     fun undo(): Boolean = synchronized(engineLock) {
-        if (handle != 0L) EngineHost.nUndo(handle).also { if (it) needsComposite = true } else false
+        if (handle != 0L) EngineHost.nUndo(handle).also {
+            if (it) {
+                needsComposite = true
+                HistoryLog.popOne()
+            }
+        } else false
     }
 
     fun redo(): Boolean = synchronized(engineLock) {
-        if (handle != 0L) EngineHost.nRedo(handle).also { if (it) needsComposite = true } else false
+        if (handle != 0L) EngineHost.nRedo(handle).also {
+            if (it) {
+                needsComposite = true
+                HistoryLog.push("redo")
+            }
+        } else false
     }
 
     private data class EngineOp(val run: () -> Unit)
@@ -1314,6 +1407,10 @@ class EngineSurface @JvmOverloads constructor(
                 when (r.kind) {
                     "load" -> {
                         val b = EngineHost.nLoadDocument(handle, r.path)
+                        // A load resets undo (M4 contract) — the
+                        // session history goes with it (spec §7.1:
+                        // document closed = history emptied).
+                        if (b) HistoryLog.clear()
                         if (b) needsComposite = true
                         b
                     }
@@ -2079,9 +2176,44 @@ class EngineSurface @JvmOverloads constructor(
         }
     }
 
-    private fun notifyStrokeChanged() {
+    private fun notifyStrokeChanged(historyLabel: String? = null) {
+        // T5 §7: every committed undo step publishes to the session
+        // history log (name + time; tap-to-return = N normal undos).
+        if (historyLabel != null) HistoryLog.push(historyLabel)
         val cb = onStrokeChanged ?: return
         post { cb() }
+    }
+
+    // T5 §1: app-side guard (the engine refuses too — belt and
+    // suspenders). True when the ACTIVE layer refuses ink right now
+    // (locked / fill fiche / adjustment); publishes the hint key for
+    // the barred-ring UI + status line, and records it for tests.
+    @Volatile var lastRefusal: String? = null
+    var onGuardHint: ((hintKey: String) -> Unit)? = null
+
+    fun inkRefused(): Boolean {
+        try {
+            val root = org.json.JSONObject(layerState())
+            val arr = root.optJSONArray("layers") ?: return false
+            val active = root.optInt("active", 0)
+            if (active < 0 || active >= arr.length()) return false
+            val entry = arr.optJSONObject(active) ?: return false
+            val s = entry.optJSONObject("self") ?: entry
+            val flags = s.optJSONObject("flags")
+            val locked = flags?.optBoolean("locked", false) == true
+            val fill = s.optJSONObject("fill") != null
+            val adjust = s.optJSONObject("adjust") != null
+            if (locked || fill || adjust) {
+                val key = if (locked) "layer_locked_hint"
+                else if (fill) "fill_locked_hint"
+                else "selection_adjust_guard"
+                lastRefusal = key
+                onGuardHint?.invoke(key)
+                return true
+            }
+        } catch (_: Exception) {
+        }
+        return false
     }
 
     private fun requestParentDisallowInterceptTouchEvent() {
@@ -2278,6 +2410,11 @@ class EngineSurface @JvmOverloads constructor(
                                         SystemClock.uptimeMillis() - pt.t
                                     showHud(pt.pressure)
                                     needsComposite = true
+                                } else if (inkRefused()) {
+                                    // T5 §1: barred ring — the hint is
+                                    // published by inkRefused(); the
+                                    // gesture leaves no ink and no undo.
+                                    showHud(pt.pressure)
                                 } else {
                                     strokeId = EngineHost.nStrokeBegin(
                                         handle, pt.x, pt.y, pt.pressure
@@ -2304,9 +2441,15 @@ class EngineSurface @JvmOverloads constructor(
                                     vecErasePts.add(Pair(pt.x, pt.y))
                                     showHud(pt.pressure)
                                 } else if (strokeId == 0L) {
-                                    strokeId = EngineHost.nStrokeBegin(
-                                        handle, pt.x, pt.y, pt.pressure
-                                    )
+                                    // T5 §1: never start ink on a
+                                    // refusing layer (DOWN already
+                                    // swallowed the gesture; this is
+                                    // the belt).
+                                    if (!inkRefused()) {
+                                        strokeId = EngineHost.nStrokeBegin(
+                                            handle, pt.x, pt.y, pt.pressure
+                                        )
+                                    }
                                     showHud(pt.pressure)
                                 } else {
                                     EngineHost.nStrokeMove(
@@ -2322,29 +2465,30 @@ class EngineSurface @JvmOverloads constructor(
                                         Triple(pt.x, pt.y, pt.pressure)
                                     )
                                     finishVectorTool()
-                                    notifyStrokeChanged()
+                                    notifyStrokeChanged("vector")
                                 } else if (smartActive) {
                                     smartPts.add(Triple(pt.x, pt.y, pt.pressure))
                                     finishSmartCapture()
-                                    notifyStrokeChanged()
+                                    notifyStrokeChanged("smart")
                                 } else if (refPaintActive) {
                                     refPaintPts.add(Triple(pt.x, pt.y, pt.pressure))
                                     finishRefPaint()
-                                    notifyStrokeChanged()
+                                    notifyStrokeChanged("refpaint")
                                 } else if (vecEraseActive) {
                                     vecErasePts.add(Pair(pt.x, pt.y))
                                     fireVectorErase()
                                     vecEraseActive = false
                                     vecEraseIndex = -1
                                     vecErasePts.clear()
-                                    notifyStrokeChanged()
+                                    notifyStrokeChanged("vectorase")
                                 } else if (strokeId != 0L) {
                                     EngineHost.nStrokeMove(
                                         handle, strokeId, pt.x, pt.y, pt.pressure
                                     )
                                     EngineHost.nStrokeEnd(handle, strokeId)
                                     strokeId = 0L
-                                    notifyStrokeChanged()
+                                    // T5 §7: committed ink step.
+                                    notifyStrokeChanged("stroke")
                                 }
                                 hudUntilMs = SystemClock.uptimeMillis() + HUD_TTL_MS
                                 postHud(force = true)
@@ -2385,7 +2529,7 @@ class EngineSurface @JvmOverloads constructor(
                                         )
                                         EngineHost.nStrokeEnd(handle, strokeId)
                                         strokeId = 0L
-                                        notifyStrokeChanged()
+                                        notifyStrokeChanged("stroke")
                                     }
                                     needsComposite = true
                                 }
@@ -2418,7 +2562,14 @@ class EngineSurface @JvmOverloads constructor(
                     }
                     if (ok) {
                         needsComposite = true
-                        notifyStrokeChanged()
+                        // T5 §7: journal + history on the committed step.
+                        MacroJournal.record(
+                            "applyFilter",
+                            org.json.JSONObject()
+                                .put("name", req.name)
+                                .put("params", req.paramsJson).toString()
+                        )
+                        notifyStrokeChanged("filter:" + req.name)
                     }
                     val cb = req.onResult
                     post { cb(ok) }
@@ -2789,7 +2940,7 @@ class EngineSurface @JvmOverloads constructor(
         }
         EngineHost.nStrokeEnd(handle, id)
         needsComposite = true
-        notifyStrokeChanged()
+        notifyStrokeChanged("stroke")
     }
 
     /**
@@ -2868,6 +3019,8 @@ class EngineSurface @JvmOverloads constructor(
      */
     fun dismissSmartShape() {
         if (smartGhostFit == null) return
+        // T5 §7: the replayed stroke publishes its own "stroke"
+        // entry (replaySmartStroke above); no double push here.
         replaySmartStroke(smartOrigPts)
         smartGhostFit = null
         smartOrigPts = emptyList()
@@ -3310,7 +3463,12 @@ class EngineSurface @JvmOverloads constructor(
             if (handle == 0L) return false
             if (!EngineHost.nFloodFill(handle, ex, ey, colorHex, json)) return false
             needsComposite = true
-            notifyStrokeChanged()
+            MacroJournal.record(
+                "floodFill",
+                org.json.JSONObject().put("x", ex).put("y", ey)
+                    .put("color", colorHex).put("json", json).toString()
+            )
+            notifyStrokeChanged("fill")
             true
         }
 
@@ -3319,7 +3477,8 @@ class EngineSurface @JvmOverloads constructor(
         if (handle == 0L) return false
         if (!EngineHost.nPaintGradient(handle, json)) return false
         needsComposite = true
-        notifyStrokeChanged()
+        MacroJournal.record("paintGradient", json)
+        notifyStrokeChanged("gradient")
         true
     }
 
@@ -3328,9 +3487,63 @@ class EngineSurface @JvmOverloads constructor(
         if (handle == 0L) return false
         if (!EngineHost.nStampShape(handle, json)) return false
         needsComposite = true
-        notifyStrokeChanged()
+        MacroJournal.record("stampShape", json)
+        notifyStrokeChanged("shape")
         true
     }
+
+    // T5 §1–§2 + §7 (ARCHITECTURE.md "T5 additions"): lock flags
+    // fiche + fill fiche. Both are meta hors undo (like adjustments);
+    // success still refreshes the composite and the history/journal.
+    fun setLayerFlags(index: Int, json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetLayerFlags(handle, index, json)
+            .also {
+                if (it) {
+                    needsComposite = true
+                    MacroJournal.record(
+                        "setLayerFlags",
+                        org.json.JSONObject().put("index", index)
+                            .put("json", json).toString()
+                    )
+                    notifyStrokeChanged("flags")
+                }
+            } else false
+    }
+
+    fun setLayerFill(index: Int, json: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetLayerFill(handle, index, json)
+            .also {
+                if (it) {
+                    needsComposite = true
+                    if (json != null) MacroJournal.record(
+                        "setLayerFill",
+                        org.json.JSONObject().put("index", index)
+                            .put("json", json).toString()
+                    )
+                    notifyStrokeChanged("fillfiche")
+                }
+            } else false
+    }
+
+    /** T5 §2: pixelize the live fill fiche (1 undo step, engine-side). */
+    fun rasterizeFill(index: Int): Boolean =
+        setLayerFill(index, "{\"bake\":true}")
+
+    // T5 §7: synchronous filter for macro replay (the queued
+    // applyFilter is UI-async; replay needs ordered results).
+    fun applyFilterSync(name: String, paramsJson: String): Boolean =
+        synchronized(engineLock) {
+            if (handle == 0L) return false
+            if (!EngineHost.nApplyFilter(handle, name, paramsJson)) return false
+            needsComposite = true
+            MacroJournal.record(
+                "applyFilter",
+                org.json.JSONObject().put("name", name)
+                    .put("params", paramsJson).toString()
+            )
+            notifyStrokeChanged("filter:" + name)
+            true
+        }
 
     /** Index du calque actif (baguette source=calque). */
     fun activeLayerIndex(): Int {
@@ -3938,7 +4151,7 @@ class EngineSurface @JvmOverloads constructor(
             .also {
                 if (it) {
                     needsComposite = true
-                    notifyStrokeChanged()
+                    notifyStrokeChanged("blit")
                 }
             } else false
     }
@@ -4042,7 +4255,7 @@ class EngineSurface @JvmOverloads constructor(
             }
             if (ok) {
                 ok = setLayerText(idx, spec.toJson())
-                if (ok) notifyStrokeChanged()
+                if (ok) notifyStrokeChanged("text")
             }
             val done = ok
             post { onResult(done) }

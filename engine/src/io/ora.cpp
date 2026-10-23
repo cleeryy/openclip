@@ -207,6 +207,32 @@ void writeVectorSibling(Layer& l, std::ostringstream& xml,
     l.vectorStored = true;
 }
 
+// T5 lock flags (ARCHITECTURE.md "T5 additions" §1): written only
+// when set (absent = false); third-party readers ignore unknown attrs
+// and degrade to the visible pixels.
+void writeFlagsAttrs(const Layer& l, std::ostringstream& xml) {
+    if (l.locked) xml << " x-openclip-locked=\"1\"";
+    if (l.alphaLock) xml << " x-openclip-alphalock=\"1\"";
+    if (l.reference) xml << " x-openclip-reference=\"1\"";
+    if (l.draft) xml << " x-openclip-draft=\"1\"";
+}
+
+// T5 fill fiche (ARCHITECTURE.md "T5 additions" §2): kind + stops +
+// params spans; absent = normal layer (clean degrade like M8).
+void writeFillAttrs(const Layer& l, std::ostringstream& xml) {
+    if (!l.hasFill()) return;
+    xml << " x-openclip-fill=\"" << xmlEscape(l.fillKind) << "\"";
+    if (!l.fillColor.empty())
+        xml << " x-openclip-fill-color=\""
+            << xmlEscape(l.fillColor) << "\"";
+    if (!l.fillStops.empty())
+        xml << " x-openclip-fill-stops=\""
+            << xmlEscape(l.fillStops) << "\"";
+    if (!l.fillParams.empty())
+        xml << " x-openclip-fill-params=\""
+            << xmlEscape(l.fillParams) << "\"";
+}
+
 // V+2: generic opaque fiche map (nSetLayerMeta). Written verbatim,
 // reloaded by applyMetaAttrs below (unknown x-openclip-* attrs on
 // load are kept too, so third-party round trips preserve fiches).
@@ -244,6 +270,8 @@ void writeLayerOne(Layer& l, std::ostringstream& xml,
         }
         writeTextAttrs(l, xml);
         writeBubbleAttrs(l, xml);
+        writeFlagsAttrs(l, xml);
+        writeFillAttrs(l, xml);
         writeMetaAttrs(l, xml);
         xml << ">\n";
         writeLayerList(l.children, xml, entries, idx, indent + 1,
@@ -268,6 +296,8 @@ void writeLayerOne(Layer& l, std::ostringstream& xml,
     }
     writeTextAttrs(l, xml);
     writeBubbleAttrs(l, xml);
+    writeFlagsAttrs(l, xml);
+    writeFillAttrs(l, xml);
     writeMetaAttrs(l, xml);
     writeVectorSibling(l, xml, entries, idx);
     xml << "/>\n";
@@ -327,6 +357,34 @@ void applyAdjustAttrs(const std::string& xml, std::size_t tagStart,
     if (t == "curves") tagAttr(xml, tagStart, "adjust-curve", l.adjustCurve);
 }
 
+// T5: reload the lock flags + fill fiche (ARCHITECTURE.md "T5
+// additions" §1–§2). Absent attrs = defaults (normal raster layer);
+// never a broken layer (the M8 identity contract).
+void applyFlagsFillAttrs(const std::string& xml, std::size_t tagStart,
+                         Layer& l) {
+    std::string v;
+    l.locked = tagAttr(xml, tagStart, "x-openclip-locked", v) && v == "1";
+    l.alphaLock =
+        tagAttr(xml, tagStart, "x-openclip-alphalock", v) && v == "1";
+    l.reference =
+        tagAttr(xml, tagStart, "x-openclip-reference", v) && v == "1";
+    l.draft = tagAttr(xml, tagStart, "x-openclip-draft", v) && v == "1";
+    l.fillKind.clear();
+    l.fillColor.clear();
+    l.fillStops.clear();
+    l.fillParams.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-fill", v) && !v.empty() &&
+        (v == "solid" || v == "gradient" || v == "foil")) {
+        l.fillKind = v;
+        if (tagAttr(xml, tagStart, "x-openclip-fill-color", v))
+            l.fillColor = v.substr(0, 32);
+        if (tagAttr(xml, tagStart, "x-openclip-fill-stops", v))
+            l.fillStops = v.substr(0, 1024);
+        if (tagAttr(xml, tagStart, "x-openclip-fill-params", v))
+            l.fillParams = v.substr(0, 1024);
+    }
+}
+
 // V+2: reload the generic fiche map. Every x-openclip-* attr on the
 // tag is kept verbatim (capped values, capped count — DoS hygiene on
 // foreign files), so round trips preserve fiches even written by
@@ -371,10 +429,17 @@ void applyMetaAttrs(const std::string& xml, std::size_t tagStart,
             name == "x-openclip-bubble-stroke" ||
             name == "x-openclip-bubble-strokew" ||
             name == "x-openclip-bubble-text" ||
-            name == "x-openclip-vector") {
+            name == "x-openclip-vector" ||
+            name == "x-openclip-locked" ||
+            name == "x-openclip-alphalock" ||
+            name == "x-openclip-reference" ||
+            name == "x-openclip-draft" || name == "x-openclip-fill" ||
+            name == "x-openclip-fill-color" ||
+            name == "x-openclip-fill-stops" ||
+            name == "x-openclip-fill-params") {
             p = e;
-            continue;  // text/bubble/vector fiches have their own
-                       // attrs (above)
+            continue;  // text/bubble/vector/flags/fill fiches have
+                       // their own attrs (above)
         }
         std::string v;
         if (tagAttr(xml, p, name.c_str(), v)) {
@@ -765,6 +830,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 applyAdjustAttrs(xml, lOpen, l);
                 applyTextAttrs(xml, lOpen, l);
                 applyBubbleAttrs(xml, lOpen, l);
+                applyFlagsFillAttrs(xml, lOpen, l);
                 applyMetaAttrs(xml, lOpen, l);
                 // T2 vector sibling: present + parsed = vector layer
                 // restored; missing/unreadable = PNG alone as a normal
@@ -822,6 +888,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 applyAdjustAttrs(xml, lOpen, g);
                 applyTextAttrs(xml, lOpen, g);
                 applyBubbleAttrs(xml, lOpen, g);
+                applyFlagsFillAttrs(xml, lOpen, g);
                 applyMetaAttrs(xml, lOpen, g);
                 out.push_back(std::move(g));
                 continue;
@@ -866,6 +933,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
             g.passThrough = (iso != "isolated");
             applyAdjustAttrs(xml, lOpen, g);
             applyTextAttrs(xml, lOpen, g);
+            applyFlagsFillAttrs(xml, lOpen, g);
             applyMetaAttrs(xml, lOpen, g);
             if (!loadLayerList(xml, close + 1, gEnd, entries, tmp, depth + 1,
                                g.children, error))
@@ -1007,7 +1075,8 @@ bool loadOra(Canvas& c, const std::string& path, std::string& error) {
 
 bool exportPng(const Canvas& c, const std::string& path, std::string& error) {
     Surface out;
-    c.composite(out);
+    // T5 §1: PNG is an export — reference/draft layers stay out.
+    c.compositeExport(out);
     const int w = out.width(), h = out.height();
     if (w <= 0 || h <= 0) {
         error = "png: canvas empty";

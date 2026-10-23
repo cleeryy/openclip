@@ -76,10 +76,12 @@ TEST(filters_registry_known) {
     CHECK(canApply("lensBlur"));  // T4 §3
     CHECK(canApply("fisheyeFilter"));  // T4 §3
     CHECK(canApply("panoramaRemap"));  // T4 §3
+    CHECK(canApply("edgeBorder"));  // T5 §2
+    CHECK(canApply("watercolor"));  // T5 §2
     CHECK(!canApply("nope"));
     CHECK(!canApply("GaussianBlur"));
     CHECK(!canApply(""));
-    CHECK_EQ(openclip::filterNames().size(), (std::size_t)24);
+    CHECK_EQ(openclip::filterNames().size(), (std::size_t)26);
 }
 
 TEST(filters_unknown_no_side_effects) {
@@ -763,4 +765,74 @@ TEST(filters_panorama_roundtrip_invalid) {
         }
     CHECK(applyFailsIntact(s, "panoramaRemap", "{\"mode\":\"cube\"}"));
     CHECK(applyFailsIntact(s, "panoramaRemap", "{\"fov\":30}"));
+}
+
+TEST(filters_edge_border_modes) {
+    // 16x16 with an opaque 8x8 white square centered (4..11).
+    Surface s(16, 16);
+    for (int y = 4; y < 12; ++y)
+        for (int x = 4; x < 12; ++x)
+            s.set(x, y, Pixel{255, 255, 255, 255});
+    // inside: transparent pixels stay transparent, edge covered pixels
+    // turn red.
+    Surface t = s;
+    CHECK(applyOk(t, "edgeBorder",
+                  "{\"width\":2,\"color\":\"#FF0000\",\"mode\":\"inside\"}"));
+    CHECK_EQ(t.get(0, 0).a, 0);  // far transparent: intact
+    CHECK_EQ(t.get(4, 4).r, 255);
+    CHECK_EQ(t.get(4, 4).g, 0);  // edge pixel: red liseré
+    CHECK_EQ(t.get(7, 7).r, 255);
+    CHECK_EQ(t.get(7, 7).g, 255);  // deep interior: untouched
+    // outside: ring appears on transparent pixels, source intact.
+    t = s;
+    CHECK(applyOk(t, "edgeBorder",
+                  "{\"width\":2,\"color\":\"#FF0000\",\"mode\":\"outside\"}"));
+    CHECK_EQ(t.get(7, 7).g, 255);  // source intact
+    CHECK(t.get(3, 7).a != 0);     // ring pixel painted
+    CHECK_EQ(t.get(3, 7).r, 255);
+    CHECK_EQ(t.get(0, 0).a, 0);  // far away: intact
+    // center: both sides painted (half width each side: the corner
+    // sits at 50% coverage).
+    t = s;
+    CHECK(applyOk(t, "edgeBorder",
+                  "{\"width\":2,\"color\":\"#FF0000\",\"mode\":\"center\"}"));
+    CHECK(t.get(3, 7).a != 0);
+    CHECK_EQ(t.get(4, 4).g, 128);
+    // Invalid params: false + byte-identical surface.
+    CHECK(applyFailsIntact(s, "edgeBorder", "{\"width\":0}"));
+    CHECK(applyFailsIntact(s, "edgeBorder", "{\"width\":33}"));
+    CHECK(applyFailsIntact(s, "edgeBorder", "{\"mode\":\"diagonal\"}"));
+    CHECK(applyFailsIntact(s, "edgeBorder", "{\"color\":\"red\"}"));
+    // Registry knows both new names.
+    CHECK(openclip::canApply("edgeBorder"));
+    CHECK(openclip::canApply("watercolor"));
+}
+
+TEST(filters_watercolor_zero_identical_edges_denser) {
+    // Opaque gray disc on transparency.
+    Surface s(24, 24);
+    for (int y = 0; y < 24; ++y)
+        for (int x = 0; x < 24; ++x) {
+            const int dx = x - 12, dy = y - 12;
+            if (dx * dx + dy * dy <= 64)
+                s.set(x, y, Pixel{160, 140, 120, 255});
+        }
+    Surface t = s;
+    CHECK(applyOk(t, "watercolor",
+                  "{\"darken\":0,\"rough\":0,\"bloom\":0}"));
+    CHECK(t.bytes() == s.bytes());  // all-zero = byte-identical
+    t = s;
+    CHECK(applyOk(t, "watercolor",
+                  "{\"darken\":0.6,\"rough\":6,\"bloom\":0.4}"));
+    CHECK(!(t.bytes() == s.bytes()));  // something changed
+    // Alpha never touched.
+    for (int y = 0; y < 24; ++y)
+        for (int x = 0; x < 24; ++x)
+            CHECK_EQ(t.get(x, y).a, s.get(x, y).a);
+    // Fully transparent pixels stay transparent.
+    CHECK_EQ(t.get(0, 0).a, 0);
+    // Invalid params: false + intact.
+    CHECK(applyFailsIntact(s, "watercolor", "{\"darken\":2}"));
+    CHECK(applyFailsIntact(s, "watercolor", "{\"rough\":17}"));
+    CHECK(applyFailsIntact(s, "watercolor", "{\"bloom\":-1}"));
 }

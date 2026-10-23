@@ -76,7 +76,7 @@ inline std::uint8_t clamp255(double v) {
 bool floodFillSeeded(Surface& s, int x, int y, double seedLum,
                      std::uint8_t r, std::uint8_t g, std::uint8_t b,
                      const FillParams& p, const std::uint8_t* mask,
-                     int maskStride, std::string& error) {
+                     int maskStride, std::string& error, bool alphaLock) {
     error.clear();
     const int w = s.width(), h = s.height();
     if (w <= 0 || h <= 0 || x < 0 || y < 0 || x >= w || y >= h) {
@@ -123,6 +123,9 @@ bool floodFillSeeded(Surface& s, int x, int y, double seedLum,
             if (mask && mask[static_cast<std::size_t>(yy) * maskStride + xx] == 0)
                 continue;  // outside the selection: untouched
             std::size_t i = static_cast<std::size_t>(at) * 4;
+            // T5 §1 verrou alpha: transparent destination pixels are
+            // skipped (ink is kept where the layer is transparent).
+            if (alphaLock && bytes[i + 3] == 0) continue;
             if (p.antialias && !inside[at]) {
                 // Expanded fringe: half-strength source-over (soft rim,
                 // premultiplied-safe: dst*(1-sa) + ink*sa, alpha up).
@@ -199,7 +202,8 @@ bool magicWand(const Surface& src, int x, int y, float tolerance,
 
 bool floodFill(Surface& s, int x, int y, std::uint8_t r, std::uint8_t g,
                std::uint8_t b, const FillParams& p,
-               const std::uint8_t* mask, int maskStride, std::string& error) {
+               const std::uint8_t* mask, int maskStride, std::string& error,
+               bool alphaLock) {
     const int w = s.width(), h = s.height();
     if (w <= 0 || h <= 0 || x < 0 || y < 0 || x >= w || y >= h) {
         error = "floodFill: seed outside the surface";
@@ -209,7 +213,7 @@ bool floodFill(Surface& s, int x, int y, std::uint8_t r, std::uint8_t g,
     const double seedLum =
         luma(&bytes[(static_cast<std::size_t>(y) * w + x) * 4]);
     return floodFillSeeded(s, x, y, seedLum, r, g, b, p, mask, maskStride,
-                           error);
+                           error, alphaLock);
 }
 
 }  // namespace openclip

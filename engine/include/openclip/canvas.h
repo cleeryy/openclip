@@ -33,6 +33,28 @@ struct Layer {
     BlendMode blend = BlendMode::Normal;
     Surface surface;
 
+    // T5: per-layer flags (ARCHITECTURE.md "T5 additions" §1). Plain
+    // data like the M8 fiches: survive resize/copy/ORA. locked =
+    // every write refused (false + intact); alphaLock = paint commits
+    // only where dst alpha > 0; reference/draft = editor-visible but
+    // excluded from every export composite.
+    bool locked = false;
+    bool alphaLock = false;
+    bool reference = false;
+    bool draft = false;
+
+    // T5: fill fiche (ARCHITECTURE.md "T5 additions" §2). Empty
+    // fillKind = normal layer. A set kind renders COMPOSITE-time
+    // (never committed pixels): the surface is kept but ignored while
+    // the fiche lives, restored untouched when it clears. Mask/clip/
+    // opacity/visibility apply exactly like normal layers. Meta hors
+    // undo. Opaque to the composite except through fill_layer.h.
+    std::string fillKind;    // "" | "solid" | "gradient" | "foil"
+    std::string fillColor;   // #RRGGBB (solid; gradient/foil tint)
+    std::string fillStops;   // canonical "#RRGGBB:pos,..." (gradient)
+    std::string fillParams;  // raw span "mode|x0|y0|x1|y1|hue|scale|shine"
+    bool hasFill() const { return !fillKind.empty(); }
+
     // M5: per-layer alpha mask (straight alpha in mask.a; rgb ignored).
     // Composite multiplies layer alpha by mask.a/255 per pixel when set.
     Surface mask;
@@ -159,12 +181,20 @@ public:
     // composite children into a temp surface first, then blend the temp
     // with the group's blend mode and opacity.
     void composite(Surface& out) const;
+    // T5: export walk — like composite() but top-level reference/draft
+    // layers are skipped (ARCHITECTURE.md "T5 additions" §1). ORA keeps
+    // everything (working round trip); PNG/PSD/file exports use this.
+    void compositeExport(Surface& out) const;
     // T3: same walk with per-top-level-layer animation samples
     // (samples.size() < layerCount() = missing entries are off).
     // Identity samples paint exactly like composite() (locked by
     // test: no keys = byte-identical). Groups ignore samples.
     void compositeAnim(Surface& out,
                        const std::vector<LayerAnimSample>& samples) const;
+    // T5: compositeAnim with the §1 export exclusion (reference/draft
+    // top-level layers skipped — the export composite).
+    void compositeAnimExport(
+        Surface& out, const std::vector<LayerAnimSample>& samples) const;
 
     // True when the active top-level index paints (not a group).
     bool activeIsRaster() const;
