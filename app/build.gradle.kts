@@ -37,7 +37,16 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Rebrand P7: R8 + resource shrinking on the published APK.
+            // Keep rules in app/proguard-rules.pro (JNI EngineHost +
+            // ONNX Runtime); validated by scripts/check_jni_symbols.sh +
+            // emulator boot + full suite after every rule change.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             signingConfig = signingConfigs.getByName("debug")
         }
     }

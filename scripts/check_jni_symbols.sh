@@ -47,8 +47,12 @@ if [ "${1:-}" != "--source-mode" ]; then
   mapfile -t sos < <(find "$REPO/app/build" -name 'libopenclip.so' 2>/dev/null)
   [ "${#sos[@]}" -gt 0 ] || { echo "PASS(source-only): no built .so found to cross-check"; exit 0; }
   for so in "${sos[@]}"; do
+    # NOTE: nm output is captured before grep (never `nm | grep -q`
+    # under `set -o pipefail`): grep -q closes the pipe on first match
+    # and nm then dies of SIGPIPE, which pipefail reports as failure.
+    syms="$(nm -D "$so" 2>/dev/null)" || { echo "MISMATCH: nm failed on $so"; exit 1; }
     while IFS= read -r sym; do
-      nm -D "$so" 2>/dev/null | grep -qF "Java_dev_openclip_engine_EngineHost_${sym}" \
+      grep -qF "Java_dev_openclip_engine_EngineHost_${sym}" <<< "$syms" \
         || { echo "MISMATCH: $sym not exported in $so"; exit 1; }
     done <<< "$kt_all"
   done
