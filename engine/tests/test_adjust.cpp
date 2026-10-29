@@ -175,7 +175,7 @@ TEST(adjust_ora_roundtrip_keeps_descriptor) {
     c.layer(adj).adjustType = "saturation";
     c.layer(adj).adjustAmount = -1.0;
     c.layer(adj).adjustStops = "[\"#000000:0\",\"#FFFFFF:1\"]";
-    const std::string path = "/tmp/openclip_test_adjust.ora";
+    const std::string path = testh::tmpPath("openclip_test_adjust.ora");
     std::string err;
     if (!openclip::saveOra(c, path, err)) {
         std::printf("  save failed: %s\n", err.c_str());
@@ -210,7 +210,7 @@ TEST(adjust_ora_unknown_type_ignored_on_load) {
     const int adj = buildStack(c);
     c.layer(adj).adjustType = "mystery";
     c.layer(adj).adjustAmount = 1.0;
-    const std::string path = "/tmp/openclip_test_adjust2.ora";
+    const std::string path = testh::tmpPath("openclip_test_adjust2.ora");
     std::string err;
     if (!openclip::saveOra(c, path, err)) {
         std::printf("  save failed: %s\n", err.c_str());
@@ -278,7 +278,7 @@ TEST(curves_channel_and_ora_roundtrip) {
     CHECK_EQ(out.get(4, 4).r, 155);  // red inverted...
     CHECK_EQ(out.get(4, 4).g, 100);  // ...green untouched...
     CHECK_EQ(out.get(4, 4).b, 100);  // ...blue untouched.
-    const std::string path = "/tmp/openclip_test_curves.ora";
+    const std::string path = testh::tmpPath("openclip_test_curves.ora");
     std::string err;
     if (!openclip::saveOra(c, path, err)) {
         std::printf("  save failed: %s\n", err.c_str());

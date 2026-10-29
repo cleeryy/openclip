@@ -87,7 +87,7 @@ int countChunk(const std::vector<std::uint8_t>& png, const char t[4]) {
 
 // §4: PNG signature + acTL present, loop + frame count round trip.
 TEST(apngMagicAndActl) {
-    const std::string p = "/tmp/opencode/apng_t3_test.png";
+    const std::string p = testh::tmpPath("apng_t3_test.png");
     std::vector<ApngFrame> fs;
     fs.push_back(solidFrame(16, 16, 255, 0, 0, 8));
     fs.push_back(solidFrame(16, 16, 0, 255, 0, 25));
@@ -107,7 +107,7 @@ TEST(apngMagicAndActl) {
 
 // §4: delays follow holds (celDelayCs ticks land in fcTL).
 TEST(apngDelaysFollowHolds) {
-    const std::string p = "/tmp/opencode/apng_t3_delay.png";
+    const std::string p = testh::tmpPath("apng_t3_delay.png");
     std::vector<ApngFrame> fs;
     fs.push_back(solidFrame(8, 8, 255, 255, 255,
                             openclip::celDelayCs(3, 12.0)));  // 25
@@ -140,7 +140,7 @@ TEST(apngDelaysFollowHolds) {
 
 // §4: single frame = valid APNG (acTL + 1 fcTL + IDAT, no fdAT).
 TEST(apngSingleFrameValid) {
-    const std::string p = "/tmp/opencode/apng_t3_single.png";
+    const std::string p = testh::tmpPath("apng_t3_single.png");
     std::vector<ApngFrame> fs;
     fs.push_back(solidFrame(8, 8, 1, 2, 3, 8));
     std::string err;
@@ -151,9 +151,9 @@ TEST(apngSingleFrameValid) {
     CHECK_EQ(countChunk(bytes, "fdAT"), 0);
     // Failures: empty + mismatch + bad loop leave no usable file.
     std::vector<ApngFrame> empty;
-    CHECK(!writeApng("/tmp/opencode/apng_t3_no.png", empty, 0, err));
+    CHECK(!writeApng(testh::tmpPath("apng_t3_no.png"), empty, 0, err));
     fs.push_back(solidFrame(4, 4, 0, 0, 0, 8));
-    CHECK(!writeApng("/tmp/opencode/apng_t3_no.png", fs, 0, err));
+    CHECK(!writeApng(testh::tmpPath("apng_t3_no.png"), fs, 0, err));
     std::remove(p.c_str());
 }
 
@@ -173,10 +173,10 @@ TEST(pngSeqBadDirNoOp) {
     openclip::Surface s(4, 4);
     s.clear();
     std::string err;
-    CHECK(!writePngSeq("/tmp/opencode/no-such-dir-xyz", "frame", {&s},
+    CHECK(!writePngSeq(testh::tmpPath("no-such-dir-xyz"), "frame", {&s},
                        "", err));
     CHECK(!err.empty());
-    CHECK(writePngSeq("/tmp/opencode/no-such-dir-xyz", "frame", {}, "",
+    CHECK(writePngSeq(testh::tmpPath("no-such-dir-xyz"), "frame", {}, "",
                       err) == false);
 }
 

@@ -237,7 +237,7 @@ TEST(vector_corners_round_trip) {
         "\"tip\":\"flat\",\"size\":1.5,\"corners\":[0,1,0],"
         "\"kind\":\"stroke\"}";
     CHECK_EQ(openclip::appendVectorPath(c, h, li, j, 1.0f, "stroke", err), 1);
-    const std::string path = "/tmp/oc_vecstyle.ora";
+    const std::string path = testh::tmpPath("oc_vecstyle.ora");
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
     CHECK(openclip::loadOra(d, path, err));
@@ -263,7 +263,7 @@ TEST(vector_sibling_missing_falls_back) {
     Canvas c(32, 32);
     const std::size_t li = c.addLayer("vec");
     c.layer(li).isVector = true;
-    const std::string path = "/tmp/oc_vecnosib.ora";
+    const std::string path = testh::tmpPath("oc_vecnosib.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;

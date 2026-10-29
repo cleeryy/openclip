@@ -67,7 +67,7 @@ bool compositeEquals(const Canvas& a, const Canvas& b) {
 
 TEST(ora_round_trip_nested_groups) {
     Canvas c = pattern(24, 16);
-    const std::string p = "/tmp/oc_ora_nested.ora";
+    const std::string p = testh::tmpPath("oc_ora_nested.ora");
     std::string err;
     CHECK(openclip::saveOra(c, p, err));
     if (!err.empty()) std::printf("    (save err: %s)\n", err.c_str());
@@ -96,11 +96,12 @@ TEST(ora_round_trip_nested_groups) {
         }
     }
     CHECK(rasterSeen && groupSeen);
+    std::remove(p.c_str());
 }
 
 TEST(document_detect_and_ora_save_load) {
     Canvas c = pattern(20, 14);
-    const std::string p = "/tmp/oc_doc.ora";
+    const std::string p = testh::tmpPath("oc_doc.ora");
     std::string err;
     CHECK(openclip::saveDocument(c, p, "ora", err));
     CHECK_EQ(static_cast<int>(openclip::detectFormat(p)),
@@ -108,6 +109,7 @@ TEST(document_detect_and_ora_save_load) {
     Canvas d;
     CHECK(openclip::loadDocument(d, p, err));
     CHECK(compositeEquals(c, d));
+    std::remove(p.c_str());
 }
 
 static void buildPsdFixture(std::vector<std::uint8_t>& b, int w, int h,
@@ -154,7 +156,7 @@ static void buildPsdFixture(std::vector<std::uint8_t>& b, int w, int h,
 TEST(psd_baseline_import) {
     std::vector<std::uint8_t> fx;
     buildPsdFixture(fx, 8, 6, 3, 8, 4);
-    const std::string p = "/tmp/oc_fixture.psd";
+    const std::string p = testh::tmpPath("oc_fixture.psd");
     std::FILE* f = std::fopen(p.c_str(), "wb");
     std::fwrite(fx.data(), 1, fx.size(), f);
     std::fclose(f);
@@ -172,10 +174,11 @@ TEST(psd_baseline_import) {
     CHECK_EQ((int)s.get(0, 4).g, 4);
     CHECK_EQ((int)s.get(3, 3).b, 128);
     CHECK_EQ((int)s.get(2, 2).a, 255);
+    std::remove(p.c_str());
 }
 
 TEST(psd_rejects_garbage_and_unsupported) {
-    const std::string pj = "/tmp/oc_junk.psd";
+    const std::string pj = testh::tmpPath("oc_junk.psd");
     std::FILE* f = std::fopen(pj.c_str(), "wb");
     std::fwrite("garbage!!", 1, 9, f);
     std::fclose(f);
@@ -190,34 +193,38 @@ TEST(psd_rejects_garbage_and_unsupported) {
 
     std::vector<std::uint8_t> fx;
     buildPsdFixture(fx, 4, 4, 0, 8, 1);  // bitmap mode refused
-    const std::string p2 = "/tmp/oc_badmode.psd";
+    const std::string p2 = testh::tmpPath("oc_badmode.psd");
     std::FILE* g = std::fopen(p2.c_str(), "wb");
     std::fwrite(fx.data(), 1, fx.size(), g);
     std::fclose(g);
     CHECK(!openclip::loadDocument(c, p2, err));
+    std::remove(pj.c_str());
+    std::remove(p2.c_str());
 }
 
 TEST(document_unknown_format_and_missing_file) {
     Canvas c(6, 6);
     std::string err;
-    CHECK(!openclip::saveDocument(c, "/tmp/oc_x.fzz", "tiffz", err));
-    CHECK(!openclip::loadDocument(c, "/tmp/oc_missing_file.ora", err));
+    CHECK(!openclip::saveDocument(c, testh::tmpPath("oc_x.fzz"), "tiffz", err));
+    CHECK(!openclip::loadDocument(c, testh::tmpPath("oc_missing_file.ora"), err));
 }
 
 TEST(psd_save_png_save_roundtrip_smoke) {
     Canvas c = pattern(10, 8);
     std::string err;
-    CHECK(openclip::savePsd(c, "/tmp/oc_out.psd", err));
+    CHECK(openclip::savePsd(c, testh::tmpPath("oc_out.psd"), err));
     if (!err.empty()) std::printf("    (psd err: %s)\n", err.c_str());
     Canvas d;
-    CHECK(openclip::loadDocument(d, "/tmp/oc_out.psd", err));
+    CHECK(openclip::loadDocument(d, testh::tmpPath("oc_out.psd"), err));
     CHECK_EQ(d.width(), 10);
     CHECK(compositeEquals(c, d));
-    CHECK(openclip::saveDocument(c, "/tmp/oc_out.png", "png", err));
+    CHECK(openclip::saveDocument(c, testh::tmpPath("oc_out.png"), "png", err));
     Canvas e;
-    CHECK(openclip::loadDocument(e, "/tmp/oc_out.png", err));
+    CHECK(openclip::loadDocument(e, testh::tmpPath("oc_out.png"), err));
     CHECK_EQ(e.width(), 10);
     CHECK(compositeEquals(c, e));
+    std::remove(testh::tmpPath("oc_out.psd").c_str());
+    std::remove(testh::tmpPath("oc_out.png").c_str());
 }
 
 // V+2 layered PSD: two eligible raster layers + one masked layer.
@@ -237,7 +244,7 @@ TEST(psd_layered_roundtrip_names_pixels) {
             c.layer(1).surface.set(x, y, Pixel{200, 100, 50, 255});
     c.addLayer("hidden-detail");
     c.layer(2).addMask(8, 8);  // masked -> merged into the base record
-    const std::string path = "/tmp/oc_layers.psd";
+    const std::string path = testh::tmpPath("oc_layers.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -450,7 +457,7 @@ TEST(psd_layer_channel_payload_has_layer_pixels) {
                 c.layer(li).surface.set(
                     x, y,
                     Pixel{want[li][0], want[li][1], want[li][2], want[li][3]});
-    const std::string path = "/tmp/oc_channel.psd";
+    const std::string path = testh::tmpPath("oc_channel.psd");
     std::string err;
     CHECK(openclip::savePsd(c, path, err));
     std::vector<std::uint8_t> d;
@@ -502,7 +509,7 @@ TEST(psd_unknown_blend_counts_norm) {
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)
             c.layer(0).surface.set(x, y, Pixel{9, 9, 9, 255});
-    const std::string path = "/tmp/oc_diff.psd";
+    const std::string path = testh::tmpPath("oc_diff.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -524,7 +531,7 @@ TEST(psd_group_flattens_with_count) {
     const std::size_t g = c.addGroup("grp");
     (void)g;
     Canvas d;
-    const std::string path = "/tmp/oc_grp.psd";
+    const std::string path = testh::tmpPath("oc_grp.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -550,7 +557,7 @@ TEST(meta_ora_roundtrip_verbatim) {
     c.layer(0).meta["x-openclip-panel"] = "rect:1,2,5,6";
     c.layer(0).meta["x-openclip-panel-order"] = "3";
     c.layer(0).meta["x-openclip-speed"] = "1,2,3,4,5,6";
-    const std::string path = "/tmp/oc_meta.ora";
+    const std::string path = testh::tmpPath("oc_meta.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -582,7 +589,7 @@ TEST(text_runs_round_trip) {
     l.textFontFile = "LibreCaslon.ttf";
     l.textDir = "v";
     l.textHyphen = "1";
-    const std::string path = "/tmp/oc_textruns.ora";
+    const std::string path = testh::tmpPath("oc_textruns.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -605,7 +612,7 @@ TEST(text_runs_malformed_ignored) {
     l.textContent = "Hello world, this is long enough";
     l.textRuns = "[{\"start\":999,\"len\":5},not-json";
     l.textDir = "sideways";  // unknown direction refused
-    const std::string path = "/tmp/oc_textbad.ora";
+    const std::string path = testh::tmpPath("oc_textbad.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -629,7 +636,7 @@ TEST(text_fontfile_missing_fallback) {
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
             l.surface.set(x, y, Pixel{9, 9, 9, 255});
-    const std::string path = "/tmp/oc_textfont.ora";
+    const std::string path = testh::tmpPath("oc_textfont.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -665,7 +672,7 @@ TEST(psd_type_tool_present) {
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
             l.surface.set(x, y, Pixel{1, 2, 3, 255});
-    const std::string path = "/tmp/oc_tysh.psd";
+    const std::string path = testh::tmpPath("oc_tysh.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -704,7 +711,7 @@ TEST(psd_runs_flatten_counted) {
     l.textRuns =
         "[{\"start\":0,\"len\":5,\"style\":\"bold\"},{\"start\":6,\"len\":5,"
         "\"style\":\"italic\"}]";
-    const std::string path = "/tmp/oc_tyruns.psd";
+    const std::string path = testh::tmpPath("oc_tyruns.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -764,7 +771,7 @@ TEST(bubble_ora_round_trip) {
     l.bubbleStroke = "#201808";
     l.bubbleStrokeW = 3.0f;
     l.bubbleTextLayer = 2;
-    const std::string path = "/tmp/oc_bubble.ora";
+    const std::string path = testh::tmpPath("oc_bubble.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;

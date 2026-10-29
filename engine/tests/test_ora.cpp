@@ -33,7 +33,7 @@ TEST(ora_roundtrip) {
     paintDab(c.layer(1).surface,
              dabFromPressure(p, 20, 20, 1.0f, 0, 255, 0), p);
 
-    const std::string path = "/tmp/openclip_test.ora";
+    const std::string path = testh::tmpPath("openclip_test.ora");
     std::string err;
     if (!saveOra(c, path, err)) {
         std::printf("  save failed: %s\n", err.c_str());
@@ -74,7 +74,7 @@ TEST(png_export_writes_file) {    Canvas c(16, 16);
     BrushParams p;
     paintDab(c.layer(0).surface,
              dabFromPressure(p, 8, 8, 1.0f, 255, 255, 255), p);
-    const std::string path = "/tmp/openclip_test.png";
+    const std::string path = testh::tmpPath("openclip_test.png");
     std::string err;
     if (!exportPng(c, path, err)) {
         std::printf("  export failed: %s\n", err.c_str());
@@ -101,7 +101,7 @@ TEST(ora_save_unwritable_path_fails_cleanly) {
     Canvas c(8, 8);
     c.addLayer("l");
     std::string err;
-    CHECK(!saveOra(c, "/tmp/openclip_no_such_dir_xyz/test.ora", err));
+    CHECK(!saveOra(c, testh::tmpPath("openclip_no_such_dir_xyz/test.ora"), err));
     CHECK(!err.empty());
     // Suite is still alive after the failure path.
     CHECK_EQ(c.layerCount(), (std::size_t)1);

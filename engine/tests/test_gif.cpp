@@ -18,9 +18,7 @@ using openclip::writeGif;
 
 namespace {
 
-std::string tmpPath(const char* name) {
-    return std::string("/tmp/opencode/") + name;
-}
+using testh::tmpPath;
 
 // Minimal GIF reader (test-only, from scratch): collects dims, loop
 // count (0 = once/no ext, else plays), per-frame delays and decoded
@@ -333,8 +331,9 @@ TEST(gif_failures_clean) {
     fs.push_back(solid(5, 4, 1, 1, 1, 5));
     CHECK(!writeGif(tmpPath("v2_mismatch.gif"), fs, 0, false, err));
     CHECK(!err.empty());
-    CHECK(!writeGif("/nonexistent-dir-xyz/v2.gif", fs, 0, false, err));
+    CHECK(!writeGif(testh::tmpPath("nonexistent-dir-xyz/v2.gif"), fs, 0, false, err));
     CHECK(!err.empty());
-    std::FILE* fp = std::fopen("/nonexistent-dir-xyz/v2.gif", "rb");
+    std::FILE* fp = std::fopen(
+        testh::tmpPath("nonexistent-dir-xyz/v2.gif").c_str(), "rb");
     CHECK(fp == nullptr);
 }
