@@ -146,6 +146,12 @@ resource shrinking with keep rules for the JNI surface and ONNX Runtime
 (`app/proguard-rules.pro`), validated by the JNI symbol gate and a full
 emulator run after every rule change.
 
+Release tags publish three APKs — `calque-<tag>-arm64-v8a.apk`
+(tablets, ~38 MB), `calque-<tag>-x86_64.apk` (emulators, ~45 MB) and
+`calque-<tag>-universal.apk` — each with a `.sha256` companion. The
+legacy `openclip-<tag>.apk` name is kept as an alias of the universal
+build so older download links keep working.
+
 ## Prerequisites
 
 - Engine: a C++17 compiler and `make` (Linux host, no Android needed).
