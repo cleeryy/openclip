@@ -63,11 +63,11 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - [ ] Instrumented test émulateur CI : build+connectés verts exigés sur master (gate `publish`)
 - [x] Release pipeline tags v* → APKs sur GitHub Releases (v0.1.0-alpha publié le 2026-10-18 : asset `openclip-v*.apk` debug-signed + `.sha256`, prerelease auto sur tags à tiret, téléchargement anonyme vérifié)
 
-## V+1 — Fondations (sélection, texte, gomme alpha)
-- [ ] Sélection rect/ellipse/lasso app-side (masque session-only, marching ants overlay, menu Tout/Inverser/+1px/Désélectionner, mix sous masque via duplicate→load→delete) — spec `docs/v1-selection-texte-gomme.md` §1
-- [ ] Calque texte éditable (layout Canvas système, import pixels, fiche `x-openclip-*` ORA, `nSetLayerText`+`nBlitPngIntoLayer` documentés `ARCHITECTURE.md` d'abord) — spec §2
-- [ ] Vraie gomme alpha `alpha-erase` dest-out moteur (alias legacy `eraser` conservé, migration prefs sans migration pixels, bandeau supprimé) — spec §3
-- [ ] Gates : engine 80/80, émulateur 87 (86 spec + 1 capture), preuve `/tmp/opencode/openclip-v1.png` relue
+## V+1 — Fondations (sélection, texte, gomme alpha) — CLOS (engine 80/80, emu 87/87, preuve `/tmp/opencode/openclip-v1.png`)
+- [x] Sélection rect/ellipse/lasso app-side (masque session-only, marching ants overlay, menu Tout/Inverser/+1px/Désélectionner, mix sous masque via duplicate→load→delete) — spec `docs/v1-selection-texte-gomme.md` §1
+- [x] Calque texte éditable (layout Canvas système, import pixels, fiche `x-openclip-*` ORA, `nSetLayerText`+`nBlitPngIntoLayer` documentés `ARCHITECTURE.md` d'abord) — spec §2
+- [x] Vraie gomme alpha `alpha-erase` dest-out moteur (alias legacy `eraser` conservé, migration prefs sans migration pixels, bandeau supprimé) — spec §3
+- [x] Gates : engine 80/80, émulateur 87 (86 spec + 1 capture), preuve `/tmp/opencode/openclip-v1.png` relue
 
 ---
 ## Journal de progression
@@ -107,3 +107,77 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 - 2026-10-23: T3 animation productive CLOSE — keyframes {dx,dy,scale,angle,opacity} (anim.h + nSetLayerAnim/nLayerAnim), caméra sortie keyframée, 4 pistes (labels/feuille + pistes parallèles, sidecar anim.json v1), APNG from-scratch + séquence PNG ZIP + stickers + audio seul (MP4 exclu) ; bug produit trouvé et fixé (nAddTrack blanches opaques → pistes neuves transparentes, ARCHITECTURE.md §T3) ; engine 193/193, prepush vert, emu OK (218 tests) phone, preuve /tmp/opencode/openclip-t3.png relue (dialogue Tracks + rangée Keys/Camera/Tracks/Sheet).
 - 2026-10-23: T5 échanges + pages + productivité CLOS (DERNIÈRE tranche, spec docs/t5-exchange.md, ordre §3→§1→§2→§4→§7→§5→§6) — §3 10 blends (darken/lighten/linear-burn/linear-dodge jumeau documenté de add/linear-light/vivid-light/pin-light/subtract/divide/exclusion, neutres verrouillés, PSD dark/lite/lbrn/lddg/vLit/lLit/pLit/fsub/fdiv + exclusion→norm) + §1 verrous (nSetLayerFlags, garde centrale shim, alphaLock noyaux dab/flood/gradient/shape, refus blit+dropShadow/edgeBorder-outside sur alphaLock, R/D exclus des exports via compositeCell forExport, ORA x-openclip-locked/alphalock/reference/draft, PSD fusionnés+comptés) + §2 fills (fill_layer.h solid/dégradé/foil Perlin graine fixe, composite-time, nSetLayerFill + bake via blit-path, ORA x-openclip-fill*, PSD base+compté) + filtres edgeBorder (chamfer-34 + AA 1px, outside étend l'alpha par design) et watercolor (Perlin T4 graine fixe, tout-zéro = identique) + §4 parseurs grd/abr maison (sous-ensembles documentés, refus + message, fixtures in-code) + accord Reinhard→3 fiches curves + gradients.json + §7 macros (journal whitelist + macros.json v1 + rejouer avec garde, tracés exclus annoncés) + aligner (masque-plein + nSelectionBlit, 1 pas/calque) + historique session + info 1Hz + §5 project.json v2 tolérant v1 (work/folio/crop/startPage), folio à l'export (romain inclus), vue double lecture seule, repères mm→dpi + opt-in, fanzine imposé multiple-de-4 + §6 EPUB (mimetype STORED premier verrouillé par test, OPF spine+rtl, XHTML strict) + PDF PdfDocument + séquences multipage pNN_frame_MMMM + stickers ≤512px ; EXACTEMENT 2 symboles JNI (nSetLayerFlags, nSetLayerFill) documentés en ARCHITECTURE.md §T5 AVANT code, générique nT5Op refusé ; engine 237/237, prepush vert, emu phone OK (248 tests) + tablette 247/248 (clipMaskBadges flake connu, vert en isolé), preuve /tmp/opencode/openclip-t5.png relue (menu Exchange + toggles Lock/Alpha lock/Reference/Draft + Hide drafts). Leçon : rangées +48dp → scroll externe layer-list requis dans 4 tests UI (clics silencieux sous la barre nav sinon) ; seed lum noir == rect noir (alphaLock) ; préfixe frame_ + _%04d = double underscore.
 - 2026-10-23: T4 transfos + filtres créatifs CLOS (spec docs/t4-transform.md, ordre §2→§3→§1→§5→§4) — registre +10 filtres (glow, dropShadow [alpha composite derrière par design], crystallize hex, normalMap, retro, pencil, perlinClouds ; lensBlur disque, fisheyeFilter, panoramaRemap cyl/rect round-trip ±2LSB) + warp sélection (warp.h persp/skew/bulge, croissance JSON nSelectionBlit, coutures verrouillées) + marionnette (puppet.h MLS rigide, calque entier) + forme intelligente app-side (SmartShape.kt RDP/moments, fantôme + valider 1 undo / garder rejoué identique, toggle PinnedBrushBar défaut OFF) + décor 3D (refscene.h : primitives procédurales, peinture texture 1024² picking écran, overlay teinté sous wireframe, commit wire:0/flat:1 via pont flatten, persistance decor.json par replay de dabs) ; EXACTEMENT 3 symboles JNI (nPuppetWarp, nSetRefScene, nPaintRefMap) documentés en ARCHITECTURE.md §T4 AVANT code, générique nT4Op refusé ; engine 217/217 (30 tests), prepush vert, emu phone OK (226 tests) + tablette OK (227 avec test capture), preuve /tmp/opencode/openclip-t4.png relue (panneau Warp : Perspective/Tilt/Distort/Puppet + garde sans sélection). Reruns verts après 5 échecs initiaux (resample acc=target, scanner quad imbriqué, buildPrimitive qui wipait visible, double conversion coords, quad neutre depuis bbox mesurée) + 1 flake clipMaskBadges (vert en isolé).
+
+## V+3 — Confort pro (clos, gate absorbé par le run T1 : engine 148/148, emu 181)
+- [x] Mélangeur couleurs sur canvas (mode `mix` moteur, rayon de mélange, preuve emu `mixerSmearsStroke`) — spec `docs/v3-confort.md`
+- [x] Épreuvage / profils couleur (pipeline sortie seul, aucun blob ICC tiers) + roue harmonies
+- [x] Canaux de sélection nommés (persistance maison) + accrochage / simplification des tracés
+- [x] Texte sur tracé (via les ponts texte + vecteur existants) + mannequin articulé posable (glTF libre, pose)
+- [x] TIFF import, PDF première page, SVG `<path>` subset, débruitage local classique
+- [x] Gate : suite complète au run T1 (engine 148/148, emu 181), commit b87a4b7
+
+## T1 — Fondations dessin (clos : engine 148/148, emu 181 run détaché ; gate 183 couvert par T2, commit c1b059e)
+- [x] Seau scanline (tolérance + AA sous masque) + baguette magique — `fill.h`, JNI `nFloodFill` / `nMagicWand`
+- [x] Dégradé linéaire/radial/libre — `gradient.h`, JNI `nPaintGradient`
+- [x] Figures géométriques undoables (rect/ellipse/polygone) — `shapes.h`, JNI `nStampShape`
+- [x] Feather / masque rapide app-side + unsharp / balance couleurs / seuillage (`nApplyFilter`)
+- [x] 4 symboles JNI documentés `ARCHITECTURE.md` §T1 AVANT code ; preuve `/tmp/opencode/openclip-t1.png`
+
+## T2 — Texte + vectoriel avancé (clos : engine 170/170, emu 202/202 phone, commit ac4fbe3)
+- [x] Runs multi-polices + import fontes libres (SAF), contour, fiche `x-openclip-*` (sans embarquement de fonte)
+- [x] Saisie inline ancrée, vertical, césure FR/EN, layout maison
+- [x] Retrace / connexion / largeur par tracé + trajectoires permanentes (sibling ORA `data/vectorNNN.json`, cap 256 Ko)
+- [x] Export PSD `TySh` subset + calque bulle dédié (composite-time)
+- [x] 4 symboles JNI documentés §T2 AVANT code ; gate tablette OK (202) ; preuve `/tmp/opencode/openclip-t2.png`
+
+## T3 — Animation productive (clos : engine 193/193, emu 218/218, commit 232854e)
+- [x] Keyframes calque {dx,dy,scale,angle,opacity} + caméra de sortie keyframée — `anim.h`, JNI `nSetLayerAnim` / `nLayerAnim`
+- [x] 4 pistes parallèles + étiquettes + feuille d'exposition (sidecar `anim.json` v1)
+- [x] APNG from-scratch + séquence PNG ZIP + stickers ≤ 512 px + audio seul (MP4 exclu)
+- [x] Fix produit : `nAddTrack` créait des pistes blanches opaques → pistes neuves transparentes (documenté §T3)
+- [x] 15 symboles JNI documentés `ARCHITECTURE.md` §T3 AVANT code (2 keys + 3 caméra + 8 pistes + 2 exports), générique `nAnimOp` refusé
+- [x] Preuve `/tmp/opencode/openclip-t3.png` (dialogue Tracks + rangée Keys/Camera/Tracks/Sheet)
+
+## T4 — Transfos + filtres créatifs (clos : engine 217/217, emu 226 phone / 227 tablette, commit ea19d60)
+- [x] Warp sélection (perspective / skew / bulge) — `warp.h`, croissance JSON via `nSelectionBlit`, coutures verrouillées
+- [x] Marionnette MLS rigide sur calque entier — `puppet.h`, JNI `nPuppetWarp`
+- [x] Forme intelligente app-side (RDP + moments, fantôme, 1 undo au valider) — `SmartShape.kt`
+- [x] +10 filtres (glow, drop shadow, crystallize, normal map, retro, pencil, Perlin clouds, lens blur, fisheye, panorama remap)
+- [x] Décor 3D : primitives procédurales + peinture texture 1024² — `refscene.h`, JNI `nSetRefScene` / `nPaintRefMap`, persistance `decor.json`
+- [x] 3 symboles JNI documentés §T4 AVANT code ; preuve `/tmp/opencode/openclip-t4.png`
+
+## T5 — Échanges + pages + productivité (clos : engine 237/237, emu 248/248 phone, commit f667b39)
+- [x] +10 modes de fusion (20 au total, neutres verrouillés, mapping PSD documenté)
+- [x] Verrous/flags calque (lock, alpha lock, reference, draft ; R/D exclus des exports) — `nSetLayerFlags`
+- [x] Fills composite-time (solid / dégradé / foil) + edge border + aquarelle — `fill_layer.h`, `nSetLayerFill`
+- [x] Parseurs `.grd` / `.abr` maison (sous-ensembles documentés, refus + message, fixtures in-code) + accord Reinhard → curves
+- [x] Macros rejouables (whitelist + `macros.json` v1), aligner, historique session, panneau info 1 Hz
+- [x] Pages : `project.json` v2 tolérant v1 (work/folio/crop/startPage), folio à l'export, vue double lecture seule, repères mm, fanzine multiple de 4
+- [x] Exports : EPUB (mimetype STORED premier verrouillé par test), PDF, séquences multipage `pNN_frame_MMMM`, stickers ≤ 512 px
+- [x] Exactement 2 symboles JNI documentés §T5 AVANT code ; tablette 247/248 (`clipMaskBadges` flake connu, vert en isolé) ; preuve `/tmp/opencode/openclip-t5.png`
+
+## REBRAND — Calque (clos, commit 932c883)
+- [x] Nom launcher EN+FR **Calque**, icône adaptative trois feuillets + monochrome, fond encre `#141419`
+- [x] Accent cinabre `#E0573A` réservé au CTA premier (Export, Import/Export SVG) et aux pastilles dirty/i-N
+- [x] Fonte display Space Grotesk (OFL, licence dans `app/src/main/assets/fonts/`) ; exports `calque-<ts>.*`
+- [x] Package `dev.openclip`, clés `x-openclip-*`, repo et `Theme.OpenClip` **gelés** — install `-r` par-dessus l'alpha, données/SAF conservés
+- [x] Spec `docs/rebrand.md` (décision, migration, captures avant/après hors git)
+
+## VISUEL — Passe V1→V18 (close, commit 25ff4ab, audit `docs/audit-visuel.md`)
+- [x] V1–V4 lisibilité : pastilles de la barre pinceau, `POKE` du footer, nom/save ×3 en mode compact, rangée d'outils coupée
+- [x] V5–V9 dock et tiroirs : dock adaptatif (canvas non réduit à une bandelette), ligne calque sans double bordure, wraps cohérents, tête de dock, contenu sous header/rail
+- [x] V10–V12 affordances : undo/redo réellement actifs, rail Timeline lisible, overlays/pose sans modèle
+- [x] V13–V14 perfs perçues : cache vignettes timeline borné LRU 24 + recycle, `setBrush` throttlé (~33 ms + push final)
+- [x] V15 relevé (`status`/`refreshKey`) : aucune régression constatée, mesure de recomposition non instrumentée
+- [x] V16 paysage téléphone (chrome replié), V17 contrastes (aucune violation avérée), V18 icône launcher (traité par le rebrand)
+- [x] Gate : suite instrumentée associée dans les runs T1→T5 (engine 148 → 237, emu 181 → 248)
+
+## PERF — P7 release (close, commit 25ceab6)
+- [x] R8 minification + shrink ressources sur `release` (`app/build.gradle.kts`, `app/proguard-rules.pro`)
+- [x] Règles keep JNI (`EngineHost`, natives) + ONNX Runtime ; validation par `check_jni_symbols.sh` + boot émulateur + suite complète
+- [x] `check_jni_symbols.sh` : capture `nm` avant `grep` (plus de SIGPIPE sous `pipefail`)
+- [ ] Mesures post-R8 (taille APK, `reportFullyDrawn`) à consigner au tag `v0.2.0-alpha`
+- [x] P1 (throttle ~33 ms + push final, V14) et P2 (LRU 24 avec `recycle()`, V13) livrés ; P5/P6 refusés (risque > gain) ; P4 (scope `status`/`refreshKey`, V15) non mesuré — cf. `docs/rebrand.md` §7
+
+## Journal — 2026-10-29
+- Alpha `0.2.0-alpha` : documentation consolidée (README produit, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, templates GitHub, ROADMAP/TASKS/parity-gap à jour) — refs issue #3. Gates rappelés : engine 237/237, emu 248/248 local.

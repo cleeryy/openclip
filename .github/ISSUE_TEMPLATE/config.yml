@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Roadmap and parity plan
+    url: https://github.com/cleeryy/openclip/blob/master/docs/ROADMAP.md
+    about: Delivered milestones, tranches and validation milestones.
+  - name: Contributing guide and gates
+    url: https://github.com/cleeryy/openclip/blob/master/CONTRIBUTING.md
+    about: Branch/PR workflow, mandatory local gates, commit and code style.
+  - name: Security policy
+    url: https://github.com/cleeryy/openclip/blob/master/SECURITY.md
+    about: Report a vulnerability privately — do not open a public issue.
+  - name: Releases
+    url: https://github.com/cleeryy/openclip/releases
+    about: Download the latest alpha APK and read the release notes.

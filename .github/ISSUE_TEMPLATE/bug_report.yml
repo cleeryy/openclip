@@ -1,0 +1,97 @@
+name: Bug report
+description: Report a crash, a wrong result, or a regression in Calque
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Calque is alpha software; precise steps and a
+        minimal document make the difference. Please do **not** attach
+        proprietary app files, commercial fonts, or private artwork — generate
+        a minimal fixture instead (blank document with a few layers is fine).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and this is not a duplicate
+          required: true
+        - label: I am running an official build from GitHub Releases (or my own build from `master`)
+          required: true
+        - label: I read the known-open-items section of the ROADMAP
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Tag (e.g. `v0.1.0-alpha.3`), `versionName`, or the commit SHA you built from.
+      placeholder: "v0.2.0-alpha (commit 25ceab6)"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      description: Tablet/phone model, or AVD name (`openclip-emu`, `openclip-tablet`), plus Android API level.
+      placeholder: "openclip-tablet AVD, API 34, x86_64 / Samsung Tab S6, Android 12"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Build type
+      options:
+        - Release (debug-signed) from GitHub Releases
+        - Debug build from source
+        - CI workflow artifact
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact tap/gesture sequence, starting from a known state.
+      placeholder: |
+        1. New document 1920x1200
+        2. Add a layer, paint one stroke
+        3. Apply Edit > Transform > Puppet, drag one handle
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the full error text, `adb logcat` excerpt, or crash stack if available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: document
+    attributes:
+      label: Minimal document / fixture
+      description: How to recreate the document from scratch, or attach an open-format file (ORA/PNG) that reproduces the bug. Do not attach `.clip` or other proprietary files.
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots (attach as files), screen density, locale (EN/FR), performance notes.
+    validations:
+      required: false

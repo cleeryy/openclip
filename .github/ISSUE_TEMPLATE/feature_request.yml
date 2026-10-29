@@ -1,0 +1,83 @@
+name: Feature request
+description: Propose a feature, a parity gap, or a workflow improvement
+title: "[feat] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Calque follows the clean-room rule: we reimplement **behaviour**, never
+        copy code, assets, strings or file formats from a proprietary tool.
+        Requests framed as "make it work like this workflow" are welcome;
+        requests to port a vendor's exact UI or assets are not.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and the ROADMAP/parity docs
+          required: true
+        - label: This is a behaviour request, not a request to copy proprietary code or assets
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Engine (canvas, brushes, layers, filters)
+        - Studio shell / UI
+        - File import/export (ORA, PSD, PNG, SVG, EPUB, PDF…)
+        - Animation
+        - Comics / pages / long export
+        - Text and vector
+        - Color / color management
+        - Sync / storage
+        - Build, CI, docs
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and where does the current app get in the way?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Describe the outcome, the inputs, and what should happen on cancel/undo. A sketch of the interaction is enough.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing workarounds, other open-source tools, or a smaller version of the feature.
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope hints
+      description: Engine or app-side? New format support? Does it need a new JNI symbol (must be documented in ARCHITECTURE.md before code)?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: cost
+    attributes:
+      label: Rough cost estimate
+      options:
+        - "S — one session"
+        - "M — a few sessions"
+        - "L — multi-week or external dependency"
+        - Unknown
+    validations:
+      required: false
