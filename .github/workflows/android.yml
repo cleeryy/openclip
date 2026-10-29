@@ -38,8 +38,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: openclip-apks
+          # ABI splits (issue #2): the debug variant now emits
+          # calque-<version>-{arm64-v8a,x86_64,universal}.apk instead of a
+          # single app-debug.apk. Test APKs are never split.
           path: |
-            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           retention-days: 7
 
@@ -55,12 +58,35 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v6
-      - name: Build release APK (debug-signed, installable)
+      - name: Build release APKs (debug-signed, installable)
         run: ./gradlew :app:assembleRelease
-      - name: Package artifact (versioned name + sha256)
+      - name: Package artifacts (per-ABI + universal, sha256 each)
+        # Gradle emits calque-<version>-<abi>.apk / -universal.apk (issue #2).
+        # Release assets keep the historical openclip-<tag> naming, with the
+        # universal APK on the exact legacy name so old links keep working;
+        # split APKs get an ABI suffix. The openclip-*.apk glob below still
+        # matches every asset.
         run: |
-          cp app/build/outputs/apk/release/app-release.apk "openclip-${GITHUB_REF_NAME}.apk"
-          sha256sum "openclip-${GITHUB_REF_NAME}.apk" > "openclip-${GITHUB_REF_NAME}.apk.sha256"
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          if [ "${#apks[@]}" -ne 3 ]; then
+            echo "expected 3 release APKs (arm64-v8a + x86_64 + universal), got ${#apks[@]}" >&2
+            printf '  %s\n' "${apks[@]}" >&2
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            base="$(basename "$apk" .apk)"
+            case "$base" in
+              *-universal) asset="openclip-${GITHUB_REF_NAME}.apk" ;;
+              *-arm64-v8a) asset="openclip-${GITHUB_REF_NAME}-arm64-v8a.apk" ;;
+              *-x86_64)    asset="openclip-${GITHUB_REF_NAME}-x86_64.apk" ;;
+              *) echo "unexpected release artifact: $apk" >&2; exit 1 ;;
+            esac
+            cp "$apk" "$asset"
+            sha256sum "$asset" > "$asset.sha256"
+          done
+          ls -l openclip-*.apk openclip-*.apk.sha256
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:

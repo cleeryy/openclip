@@ -4,6 +4,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Local single-ABI gate (`-PciAbi=x86_64`, used by scripts/emutest.sh):
+// splits are disabled so the build keeps emitting one plain app-debug.apk.
+// Every other build ships one APK per ABI plus a universal fallback, since
+// libonnxruntime.so alone is ~34 MB (arm64-v8a) / ~40 MB (x86_64).
+val localAbi: String = (project.findProperty("ciAbi") as String?)?.trim().orEmpty()
+
 android {
     namespace = "dev.openclip"
     compileSdk = 34
@@ -16,17 +22,29 @@ android {
         versionName = "0.1.0-alpha.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            // Device builds keep arm64 phones + x86_64 emulators. The local
-            // emulator gate (scripts/emutest.sh) narrows to x86_64 with
-            // -PciAbi=x86_64 to halve the native build time.
-            val ciAbi = (project.findProperty("ciAbi") as String?)?.trim().orEmpty()
-            if (ciAbi.isNotEmpty()) abiFilters += ciAbi
+            // Device builds keep arm64 phones + x86_64 emulators. When ABI
+            // splits are enabled they drive the native ABI set as well; the
+            // filters only matter for the unsplit local single-ABI gate
+            // (scripts/emutest.sh, -PciAbi=x86_64).
+            if (localAbi.isNotEmpty()) abiFilters += localAbi
             else abiFilters += listOf("arm64-v8a", "x86_64")
         }
         externalNativeBuild {
             cmake {
                 arguments += listOf("-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release")
             }
+        }
+    }
+
+    // Issue #2: publish one APK per ABI (~-35 MB each) and keep the
+    // universal APK for anyone who does not care. Disabled for the local
+    // gate so `app-debug.apk` keeps its name and path.
+    splits {
+        abi {
+            isEnable = localAbi.isEmpty()
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = true
         }
     }
 
@@ -74,6 +92,22 @@ android {
     }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+
+    // Brand-aligned, stable artifact names instead of AGP's default
+    // `app-<abi>-release.apk`: calque-<version>-<abi>.apk, plus
+    // calque-<version>-universal.apk for the unsplit fallback. The local
+    // single-ABI gate keeps AGP's default app-debug.apk on purpose:
+    // scripts/emutest.sh installs it by that exact path.
+    if (localAbi.isEmpty()) {
+        applicationVariants.all {
+            val variantVersion = versionName ?: "0"
+            outputs.all {
+                val out = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+                val abi = out.getFilter("ABI") ?: "universal"
+                out.outputFileName = "calque-$variantVersion-$abi.apk"
+            }
+        }
     }
 }
 
