@@ -157,11 +157,17 @@ Release tags publish three APKs — `calque-<tag>-arm64-v8a.apk`
   ([releases](https://github.com/cleeryy/openclip/releases)).
 - **Actions artifacts** carry every `master` build (`calque-apks`,
   7-day retention) for quick testing of unreleased commits.
-- **GitHub Packages** is intentionally unused: the registry supports
-  npm, Maven, NuGet, RubyGems and container images, none of which can
-  distribute an Android APK. Using it would mean publishing an
-  artificial artifact that no tool consumes, so releases remain the
-  single source of truth.
+- **GitHub Packages** mirrors each release as an OCI artifact, because
+  the npm/Maven/NuGet/RubyGems registries cannot host an APK but the
+  container registry stores arbitrary artifacts:
+
+  ```bash
+  oras pull ghcr.io/cleeryy/calque:0.2.0-alpha
+  ```
+
+  The package is public, immutable per tag, and carries the same APKs
+  and `.sha256` files as the release. Publishing runs on every `v*` tag
+  (and can be backfilled with `gh workflow run android -f release_tag=<tag>`).
 
 ## Prerequisites
 
