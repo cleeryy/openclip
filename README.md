@@ -150,6 +150,19 @@ Release tags publish three APKs — `calque-<tag>-arm64-v8a.apk`
 (tablets, ~38 MB), `calque-<tag>-x86_64.apk` (emulators, ~45 MB) and
 `calque-<tag>.apk` (universal) — each with a `.sha256` companion.
 
+### Distribution channels
+
+- **Releases** are the app's distribution channel: per-ABI APKs plus
+  `.sha256` companions, published automatically from `v*` tags
+  ([releases](https://github.com/cleeryy/openclip/releases)).
+- **Actions artifacts** carry every `master` build (`calque-apks`,
+  7-day retention) for quick testing of unreleased commits.
+- **GitHub Packages** is intentionally unused: the registry supports
+  npm, Maven, NuGet, RubyGems and container images, none of which can
+  distribute an Android APK. Using it would mean publishing an
+  artificial artifact that no tool consumes, so releases remain the
+  single source of truth.
+
 ## Prerequisites
 
 - Engine: a C++17 compiler and `make` (Linux host, no Android needed).
