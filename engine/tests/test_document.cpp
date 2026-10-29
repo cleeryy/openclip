@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "openclip/canvas.h"
@@ -66,7 +67,7 @@ bool compositeEquals(const Canvas& a, const Canvas& b) {
 
 TEST(ora_round_trip_nested_groups) {
     Canvas c = pattern(24, 16);
-    const std::string p = "/tmp/oc_ora_nested.ora";
+    const std::string p = testh::tmpPath("oc_ora_nested.ora");
     std::string err;
     CHECK(openclip::saveOra(c, p, err));
     if (!err.empty()) std::printf("    (save err: %s)\n", err.c_str());
@@ -95,11 +96,12 @@ TEST(ora_round_trip_nested_groups) {
         }
     }
     CHECK(rasterSeen && groupSeen);
+    std::remove(p.c_str());
 }
 
 TEST(document_detect_and_ora_save_load) {
     Canvas c = pattern(20, 14);
-    const std::string p = "/tmp/oc_doc.ora";
+    const std::string p = testh::tmpPath("oc_doc.ora");
     std::string err;
     CHECK(openclip::saveDocument(c, p, "ora", err));
     CHECK_EQ(static_cast<int>(openclip::detectFormat(p)),
@@ -107,6 +109,7 @@ TEST(document_detect_and_ora_save_load) {
     Canvas d;
     CHECK(openclip::loadDocument(d, p, err));
     CHECK(compositeEquals(c, d));
+    std::remove(p.c_str());
 }
 
 static void buildPsdFixture(std::vector<std::uint8_t>& b, int w, int h,
@@ -153,7 +156,7 @@ static void buildPsdFixture(std::vector<std::uint8_t>& b, int w, int h,
 TEST(psd_baseline_import) {
     std::vector<std::uint8_t> fx;
     buildPsdFixture(fx, 8, 6, 3, 8, 4);
-    const std::string p = "/tmp/oc_fixture.psd";
+    const std::string p = testh::tmpPath("oc_fixture.psd");
     std::FILE* f = std::fopen(p.c_str(), "wb");
     std::fwrite(fx.data(), 1, fx.size(), f);
     std::fclose(f);
@@ -171,10 +174,11 @@ TEST(psd_baseline_import) {
     CHECK_EQ((int)s.get(0, 4).g, 4);
     CHECK_EQ((int)s.get(3, 3).b, 128);
     CHECK_EQ((int)s.get(2, 2).a, 255);
+    std::remove(p.c_str());
 }
 
 TEST(psd_rejects_garbage_and_unsupported) {
-    const std::string pj = "/tmp/oc_junk.psd";
+    const std::string pj = testh::tmpPath("oc_junk.psd");
     std::FILE* f = std::fopen(pj.c_str(), "wb");
     std::fwrite("garbage!!", 1, 9, f);
     std::fclose(f);
@@ -189,34 +193,38 @@ TEST(psd_rejects_garbage_and_unsupported) {
 
     std::vector<std::uint8_t> fx;
     buildPsdFixture(fx, 4, 4, 0, 8, 1);  // bitmap mode refused
-    const std::string p2 = "/tmp/oc_badmode.psd";
+    const std::string p2 = testh::tmpPath("oc_badmode.psd");
     std::FILE* g = std::fopen(p2.c_str(), "wb");
     std::fwrite(fx.data(), 1, fx.size(), g);
     std::fclose(g);
     CHECK(!openclip::loadDocument(c, p2, err));
+    std::remove(pj.c_str());
+    std::remove(p2.c_str());
 }
 
 TEST(document_unknown_format_and_missing_file) {
     Canvas c(6, 6);
     std::string err;
-    CHECK(!openclip::saveDocument(c, "/tmp/oc_x.fzz", "tiffz", err));
-    CHECK(!openclip::loadDocument(c, "/tmp/oc_missing_file.ora", err));
+    CHECK(!openclip::saveDocument(c, testh::tmpPath("oc_x.fzz"), "tiffz", err));
+    CHECK(!openclip::loadDocument(c, testh::tmpPath("oc_missing_file.ora"), err));
 }
 
 TEST(psd_save_png_save_roundtrip_smoke) {
     Canvas c = pattern(10, 8);
     std::string err;
-    CHECK(openclip::savePsd(c, "/tmp/oc_out.psd", err));
+    CHECK(openclip::savePsd(c, testh::tmpPath("oc_out.psd"), err));
     if (!err.empty()) std::printf("    (psd err: %s)\n", err.c_str());
     Canvas d;
-    CHECK(openclip::loadDocument(d, "/tmp/oc_out.psd", err));
+    CHECK(openclip::loadDocument(d, testh::tmpPath("oc_out.psd"), err));
     CHECK_EQ(d.width(), 10);
     CHECK(compositeEquals(c, d));
-    CHECK(openclip::saveDocument(c, "/tmp/oc_out.png", "png", err));
+    CHECK(openclip::saveDocument(c, testh::tmpPath("oc_out.png"), "png", err));
     Canvas e;
-    CHECK(openclip::loadDocument(e, "/tmp/oc_out.png", err));
+    CHECK(openclip::loadDocument(e, testh::tmpPath("oc_out.png"), err));
     CHECK_EQ(e.width(), 10);
     CHECK(compositeEquals(c, e));
+    std::remove(testh::tmpPath("oc_out.psd").c_str());
+    std::remove(testh::tmpPath("oc_out.png").c_str());
 }
 
 // V+2 layered PSD: two eligible raster layers + one masked layer.
@@ -236,7 +244,7 @@ TEST(psd_layered_roundtrip_names_pixels) {
             c.layer(1).surface.set(x, y, Pixel{200, 100, 50, 255});
     c.addLayer("hidden-detail");
     c.layer(2).addMask(8, 8);  // masked -> merged into the base record
-    const std::string path = "/tmp/oc_layers.psd";
+    const std::string path = testh::tmpPath("oc_layers.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -253,6 +261,245 @@ TEST(psd_layered_roundtrip_names_pixels) {
     std::remove(path.c_str());
 }
 
+// ---- raw layered-PSD walker (regression helper for issue #1) ----
+// Bounded reader for exactly the layout savePsd (src/io/psd.cpp) writes.
+// All integers are big-endian; offsets from byte 0:
+//   26  header: "8BPS", u16 version, 6 reserved, u16 channels, u32 rows,
+//       u32 cols, u16 depth, u16 mode
+//   +4  color mode data length, then that many bytes
+//   +4  image resources length, then that many bytes
+//   +4  layer and mask section length; the section holds:
+//         +4 layer info length; that holds:
+//           i16 layer count, then `count` layer records, then ALL channel
+//           image data (a flat run after the records, not interleaved):
+//           per record, per channel: u16 compression + rows*cols bytes
+//         +4 global layer mask length (0 in our writer)
+// Every read is bounds-checked against the section it belongs to; the
+// declared channel lengths must add up to the bytes actually present.
+namespace {
+
+std::uint16_t psdBe16(const std::vector<std::uint8_t>& d, std::size_t o) {
+    return static_cast<std::uint16_t>((d[o] << 8) | d[o + 1]);
+}
+
+std::uint32_t psdBe32(const std::vector<std::uint8_t>& d, std::size_t o) {
+    return (static_cast<std::uint32_t>(d[o]) << 24) |
+           (static_cast<std::uint32_t>(d[o + 1]) << 16) |
+           (static_cast<std::uint32_t>(d[o + 2]) << 8) |
+           static_cast<std::uint32_t>(d[o + 3]);
+}
+
+struct PsdRawChannel {
+    const std::uint8_t* data;  // raw plane bytes (compression tag skipped)
+    std::size_t size;
+};
+
+struct PsdRawRecord {
+    std::string name;
+    std::vector<PsdRawChannel> channels;  // record order (R,G,B,A here)
+};
+
+bool psdReadLayerChannels(const std::vector<std::uint8_t>& d,
+                          std::vector<PsdRawRecord>& out, std::string& why) {
+    out.clear();
+    const std::size_t n = d.size();
+    auto fits = [&](std::size_t at, std::size_t len, const char* what) {
+        if (len > n || at > n - len) {
+            why = std::string("truncated ") + what;
+            return false;
+        }
+        return true;
+    };
+    if (n < 26 || std::memcmp(d.data(), "8BPS", 4) != 0) {
+        why = "not a PSD header";
+        return false;
+    }
+    std::size_t o = 26;
+    for (const char* what : {"color mode data", "image resources"}) {
+        if (!fits(o, 4, what)) return false;
+        const std::size_t len = psdBe32(d, o);
+        o += 4;
+        if (!fits(o, len, what)) return false;
+        o += len;
+    }
+    if (!fits(o, 4, "layer section length")) return false;
+    const std::size_t lmEnd = o + 4 + psdBe32(d, o);
+    o += 4;
+    if (lmEnd > n) {
+        why = "layer section overruns file";
+        return false;
+    }
+    if (!fits(o, 4, "layer info length")) return false;
+    const std::size_t liEnd = o + 4 + psdBe32(d, o);
+    o += 4;
+    if (liEnd > lmEnd) {
+        why = "layer info overruns layer section";
+        return false;
+    }
+    if (!fits(o, 2, "layer count")) return false;
+    const int count = psdBe16(d, o);
+    o += 2;
+    std::vector<std::vector<std::uint32_t>> chLens;  // per record channels
+    for (int i = 0; i < count; ++i) {
+        if (!fits(o, 16 + 2, "layer record")) return false;
+        o += 16;  // top, left, bottom, right (whole canvas in our writer)
+        const int nch = psdBe16(d, o);
+        o += 2;
+        if (nch < 1 || nch > 8) {
+            why = "bad channel count";
+            return false;
+        }
+        if (!fits(o, static_cast<std::size_t>(nch) * 6, "channel infos"))
+            return false;
+        std::vector<std::uint32_t> lens;
+        lens.reserve(static_cast<std::size_t>(nch));
+        for (int k = 0; k < nch; ++k) {
+            o += 2;  // channel id: 0=R, 1=G, 2=B, -1=A in our writer
+            lens.push_back(psdBe32(d, o));
+            o += 4;
+        }
+        if (!fits(o, 12 + 4, "blend record")) return false;
+        o += 12;  // '8BIM', 4-char key, opacity, clipping, flags, filler
+        const std::size_t extraEnd = o + 4 + psdBe32(d, o);
+        o += 4;
+        if (extraEnd > liEnd) {
+            why = "extra data overruns layer info";
+            return false;
+        }
+        // Extra data: mask data (len + bytes), blend ranges (len + bytes),
+        // Pascal name, then optional tagged blocks (none needed here).
+        if (!fits(o, 4, "mask data length")) return false;
+        const std::size_t maskLen = psdBe32(d, o);
+        o += 4;
+        if (!fits(o, maskLen, "mask data")) return false;
+        o += maskLen;
+        if (!fits(o, 4, "blend ranges length")) return false;
+        const std::size_t rangesLen = psdBe32(d, o);
+        o += 4;
+        if (!fits(o, rangesLen, "blend ranges")) return false;
+        o += rangesLen;
+        if (o > extraEnd) {
+            why = "extra data lengths overrun the extra block";
+            return false;
+        }
+        if (o >= extraEnd) {
+            why = "missing layer name";
+            return false;
+        }
+        const std::size_t nl = d[o++];
+        if (nl > extraEnd - o) {
+            why = "layer name overruns extra data";
+            return false;
+        }
+        PsdRawRecord rec;
+        rec.name.assign(reinterpret_cast<const char*>(d.data() + o), nl);
+        out.push_back(std::move(rec));
+        o = extraEnd;
+        chLens.push_back(std::move(lens));
+    }
+    // Channel image data: one flat run after the last record, inside the
+    // layer info block. The record headers only *declare* the lengths.
+    if (o > liEnd) {
+        why = "layer records overrun layer info";
+        return false;
+    }
+    const std::size_t payload = liEnd - o;
+    std::size_t declared = 0;
+    for (const auto& lens : chLens) {
+        for (std::uint32_t len : lens) {
+            if (len < 2 || len > payload - declared) {
+                why = "channel block of " + std::to_string(len) +
+                      " bytes does not fit the " +
+                      std::to_string(payload - declared) + " of " +
+                      std::to_string(payload) + " bytes left for channel data";
+                return false;
+            }
+            declared += len;
+        }
+    }
+    if (declared != payload) {
+        why = "declared channel data (" + std::to_string(declared) +
+              " bytes) != payload present (" + std::to_string(payload) +
+              " bytes)";
+        return false;
+    }
+    std::size_t p = o;
+    for (std::size_t i = 0; i < chLens.size(); ++i) {
+        for (std::uint32_t len : chLens[i]) {
+            if (psdBe16(d, p) != 0) {  // compression 0 = raw
+                why = "unexpected channel compression";
+                return false;
+            }
+            out[i].channels.push_back({d.data() + p + 2, len - 2});
+            p += len;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+// Regression for issue #1: layer records must carry their own pixels.
+// The pre-fix writer bound Rec::planes[] to Rec's own owned[] vectors and
+// then moved the record into `recs`, so every channel block was emitted
+// EMPTY while its declared length still said "2 + w*h": the layered PSD
+// was structurally inconsistent, yet no test noticed because loadPsd
+// only reads the merged (flattened) view, which stayed correct.
+TEST(psd_layer_channel_payload_has_layer_pixels) {
+    Canvas c(6, 5);
+    c.addLayer("red");
+    c.addLayer("green");
+    const std::uint8_t want[2][4] = {{255, 0, 0, 255},  // opaque red
+                                     {0, 255, 0, 255}};  // opaque green
+    for (std::size_t li = 0; li < 2; ++li)
+        for (int y = 0; y < 5; ++y)
+            for (int x = 0; x < 6; ++x)
+                c.layer(li).surface.set(
+                    x, y,
+                    Pixel{want[li][0], want[li][1], want[li][2], want[li][3]});
+    const std::string path = testh::tmpPath("oc_channel.psd");
+    std::string err;
+    CHECK(openclip::savePsd(c, path, err));
+    std::vector<std::uint8_t> d;
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    CHECK(f != nullptr);
+    if (f) {
+        std::fseek(f, 0, SEEK_END);
+        const long n = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        d.resize(static_cast<std::size_t>(n));
+        CHECK(std::fread(d.data(), 1, d.size(), f) == d.size());
+        std::fclose(f);
+    }
+    std::vector<PsdRawRecord> recs;
+    std::string why;
+    const bool walked = psdReadLayerChannels(d, recs, why);
+    if (!walked) std::printf("    (psd walk: %s)\n", why.c_str());
+    CHECK(walked);
+    CHECK_EQ(recs.size(), 2u);
+    if (walked && recs.size() == 2) {
+        CHECK_EQ(recs[0].name, std::string("red"));
+        CHECK_EQ(recs[1].name, std::string("green"));
+        for (std::size_t i = 0; i < 2; ++i) {
+            CHECK_EQ(recs[i].channels.size(), 4u);
+            for (std::size_t k = 0; k < recs[i].channels.size(); ++k) {
+                const PsdRawChannel& ch = recs[i].channels[k];
+                CHECK_EQ(ch.size, static_cast<std::size_t>(30));
+                bool uniform = ch.size == 30;
+                const std::uint8_t w = want[i][k];
+                for (std::size_t q = 0; uniform && q < ch.size; ++q)
+                    uniform = ch.data[q] == w;
+                if (!uniform)
+                    std::printf("    (%s plane %lu is not its own pixels)\n",
+                                recs[i].name.c_str(),
+                                static_cast<unsigned long>(k));
+                CHECK(uniform);
+            }
+        }
+    }
+    std::remove(path.c_str());
+}
+
 // V+2 PSD: unknown-for-PSD blend (difference) degrades to norm and is
 // counted; all-eligible stacks report 0 approximations.
 TEST(psd_unknown_blend_counts_norm) {
@@ -262,7 +509,7 @@ TEST(psd_unknown_blend_counts_norm) {
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)
             c.layer(0).surface.set(x, y, Pixel{9, 9, 9, 255});
-    const std::string path = "/tmp/oc_diff.psd";
+    const std::string path = testh::tmpPath("oc_diff.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -284,7 +531,7 @@ TEST(psd_group_flattens_with_count) {
     const std::size_t g = c.addGroup("grp");
     (void)g;
     Canvas d;
-    const std::string path = "/tmp/oc_grp.psd";
+    const std::string path = testh::tmpPath("oc_grp.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -310,7 +557,7 @@ TEST(meta_ora_roundtrip_verbatim) {
     c.layer(0).meta["x-openclip-panel"] = "rect:1,2,5,6";
     c.layer(0).meta["x-openclip-panel-order"] = "3";
     c.layer(0).meta["x-openclip-speed"] = "1,2,3,4,5,6";
-    const std::string path = "/tmp/oc_meta.ora";
+    const std::string path = testh::tmpPath("oc_meta.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -342,7 +589,7 @@ TEST(text_runs_round_trip) {
     l.textFontFile = "LibreCaslon.ttf";
     l.textDir = "v";
     l.textHyphen = "1";
-    const std::string path = "/tmp/oc_textruns.ora";
+    const std::string path = testh::tmpPath("oc_textruns.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -365,7 +612,7 @@ TEST(text_runs_malformed_ignored) {
     l.textContent = "Hello world, this is long enough";
     l.textRuns = "[{\"start\":999,\"len\":5},not-json";
     l.textDir = "sideways";  // unknown direction refused
-    const std::string path = "/tmp/oc_textbad.ora";
+    const std::string path = testh::tmpPath("oc_textbad.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -389,7 +636,7 @@ TEST(text_fontfile_missing_fallback) {
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
             l.surface.set(x, y, Pixel{9, 9, 9, 255});
-    const std::string path = "/tmp/oc_textfont.ora";
+    const std::string path = testh::tmpPath("oc_textfont.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;
@@ -425,7 +672,7 @@ TEST(psd_type_tool_present) {
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
             l.surface.set(x, y, Pixel{1, 2, 3, 255});
-    const std::string path = "/tmp/oc_tysh.psd";
+    const std::string path = testh::tmpPath("oc_tysh.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -464,7 +711,7 @@ TEST(psd_runs_flatten_counted) {
     l.textRuns =
         "[{\"start\":0,\"len\":5,\"style\":\"bold\"},{\"start\":6,\"len\":5,"
         "\"style\":\"italic\"}]";
-    const std::string path = "/tmp/oc_tyruns.psd";
+    const std::string path = testh::tmpPath("oc_tyruns.psd");
     std::string err;
     int approx = -1;
     CHECK(openclip::savePsd(c, path, err, &approx));
@@ -524,7 +771,7 @@ TEST(bubble_ora_round_trip) {
     l.bubbleStroke = "#201808";
     l.bubbleStrokeW = 3.0f;
     l.bubbleTextLayer = 2;
-    const std::string path = "/tmp/oc_bubble.ora";
+    const std::string path = testh::tmpPath("oc_bubble.ora");
     std::string err;
     CHECK(openclip::saveOra(c, path, err));
     Canvas d;

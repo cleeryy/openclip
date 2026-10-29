@@ -166,7 +166,7 @@ TEST(tiff_uncompressed_rgb_strips_roundtrip) {
             rgb.push_back((std::uint8_t)(y * 60));
             rgb.push_back(128);
         }
-    const std::string path = "/tmp/openclip_v3_plain.tif";
+    const std::string path = testh::tmpPath("openclip_v3_plain.tif");
     CHECK(writeTiff(path, w, h, rgb, 2, 1, 2));
     Canvas c;
     std::string err;
@@ -194,7 +194,7 @@ TEST(tiff_lzw_strip_decodes) {
             rgb.push_back((std::uint8_t)(30 + y * 8));
             rgb.push_back(77);
         }
-    const std::string path = "/tmp/openclip_v3_lzw.tiff";
+    const std::string path = testh::tmpPath("openclip_v3_lzw.tiff");
     CHECK(writeTiff(path, w, h, rgb, 1, 5, 2));
     Canvas c;
     std::string err;
@@ -213,7 +213,7 @@ TEST(tiff_lzw_strip_decodes) {
 TEST(tiff_cmyk_rejected_session_intact) {
     const int w = 4, h = 4;
     std::vector<std::uint8_t> rgb((std::size_t)w * h * 3, 9);
-    const std::string path = "/tmp/openclip_v3_cmyk.tif";
+    const std::string path = testh::tmpPath("openclip_v3_cmyk.tif");
     CHECK(writeTiff(path, w, h, rgb, 1, 1, 5));  // photometric CMYK
     Canvas c(4, 4);
     c.addLayer("keep");

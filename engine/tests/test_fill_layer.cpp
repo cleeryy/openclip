@@ -192,7 +192,7 @@ TEST(flags_fill_ora_roundtrip) {
     c.layer(li).fillColor = "#112233";
     c.layer(li).fillStops = "#000000:0,#FFFFFF:1";
     c.layer(li).fillParams = "radial|8|8|16|8|0|4|0.5";
-    const std::string path = "/tmp/openclip_test_t5.ora";
+    const std::string path = testh::tmpPath("openclip_test_t5.ora");
     std::string err;
     if (!openclip::saveOra(c, path, err)) {
         std::printf("  save failed: %s\n", err.c_str());
@@ -233,7 +233,7 @@ TEST(flags_psd_approx_count) {
     const std::size_t ref = c.addLayer("ref");
     paintRed(c.layer(ref), 8, 8);
     c.layer(ref).reference = true;
-    const std::string path = "/tmp/openclip_test_t5.psd";
+    const std::string path = testh::tmpPath("openclip_test_t5.psd");
     std::string err;
     int approx = -1;
     if (!openclip::savePsd(c, path, err, &approx)) {

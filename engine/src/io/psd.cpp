@@ -384,8 +384,10 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
         bool visible;
         std::uint8_t opacity;  // 0..255
         const char* key;       // 4-char blend key
-        const std::vector<std::uint8_t>* planes[4];  // R,G,B,A straight
-        std::vector<std::uint8_t> owned[4];  // filled for merged base
+        // R,G,B,A straight planar pixels; always the source of truth.
+        // (No pointer indirection here: Rec is moved into `recs`, so any
+        // pointer to its own members would dangle after the move.)
+        std::vector<std::uint8_t> owned[4];
         std::vector<std::uint8_t> tagged;   // T2: TySh block or empty
     };
     auto blendKey = [](BlendMode m, bool& mapped) -> const char* {
@@ -485,7 +487,6 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
                 r.owned[3][p] = a;
             }
         }
-        for (int k = 0; k < 4; ++k) r.planes[k] = &r.owned[k];
         // T2 TySh subset (ARCHITECTURE.md §T2 §5): one tagged block per
         // eligible text layer — font name, size, color, frame, UTF-16BE
         // string — IN ADDITION to the pixels. runs > 1 flatten onto
@@ -543,7 +544,6 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
                 r.owned[3][p] = a;
             }
         }
-        for (int k = 0; k < 4; ++k) r.planes[k] = &r.owned[k];
         recs.insert(recs.begin(), std::move(r));  // base first (bottom)
     }
 
@@ -605,8 +605,8 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
             std::vector<std::uint8_t> cd;
             cd.reserve(2 + plane);
             wr16(cd, 0);  // compression: raw
-            cd.insert(cd.end(), r.planes[k]->begin(),
-                      r.planes[k]->end());
+            cd.insert(cd.end(), r.owned[k].begin(),
+                      r.owned[k].end());
             channelData.push_back(std::move(cd));
         }
     }

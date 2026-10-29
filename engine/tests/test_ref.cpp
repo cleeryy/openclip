@@ -96,7 +96,7 @@ bool writeCubeGlb(const std::string& path) {
 }  // namespace
 
 TEST(ref_cube_loads_18_edges) {
-    const std::string path = "/tmp/openclip_cube.glb";
+    const std::string path = testh::tmpPath("openclip_cube.glb");
     CHECK(writeCubeGlb(path));
     RefModel m;
     std::string err;
@@ -109,11 +109,11 @@ TEST(ref_cube_loads_18_edges) {
 TEST(ref_bad_path_fails) {
     RefModel m;
     std::string err;
-    CHECK(!loadRefModel("/tmp/openclip_missing_xyz.glb", m, err));
+    CHECK(!loadRefModel(testh::tmpPath("openclip_missing_xyz.glb"), m, err));
 }
 
 TEST(ref_renders_pixels) {
-    const std::string path = "/tmp/openclip_cube.glb";
+    const std::string path = testh::tmpPath("openclip_cube.glb");
     CHECK(writeCubeGlb(path));
     RefModel m;
     std::string err;
@@ -134,7 +134,7 @@ TEST(ref_renders_pixels) {
 }
 
 TEST(ref_fisheye_displaces_pixels) {
-    const std::string path = "/tmp/openclip_cube.glb";
+    const std::string path = testh::tmpPath("openclip_cube.glb");
     CHECK(writeCubeGlb(path));
     RefModel m;
     std::string err;
@@ -225,7 +225,7 @@ bool writeRigGlb(const std::string& path) {
 }
 
 TEST(ref_joints_empty_on_cube) {
-    const std::string path = "/tmp/openclip_cube.glb";
+    const std::string path = testh::tmpPath("openclip_cube.glb");
     CHECK(writeCubeGlb(path));
     RefModel m;
     std::string err;
@@ -235,7 +235,7 @@ TEST(ref_joints_empty_on_cube) {
 }
 
 TEST(ref_pose_unknown_ignored_and_clamped) {
-    const std::string cube = "/tmp/openclip_cube.glb";
+    const std::string cube = testh::tmpPath("openclip_cube.glb");
     CHECK(writeCubeGlb(cube));
     RefModel m;
     std::string err;
@@ -247,7 +247,7 @@ TEST(ref_pose_unknown_ignored_and_clamped) {
     CHECK(m.pose.empty());  // cube has no named bones at all
     std::remove(cube.c_str());
 
-    const std::string rig = "/tmp/openclip_rig.glb";
+    const std::string rig = testh::tmpPath("openclip_rig.glb");
     CHECK(writeRigGlb(rig));
     RefModel r;
     CHECK(loadRefModel(rig, r, err));
@@ -264,7 +264,7 @@ TEST(ref_pose_unknown_ignored_and_clamped) {
 }
 
 TEST(ref_pose_moves_overlay) {
-    const std::string rig = "/tmp/openclip_rig.glb";
+    const std::string rig = testh::tmpPath("openclip_rig.glb");
     CHECK(writeRigGlb(rig));
     RefModel m;
     std::string err;

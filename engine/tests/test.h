@@ -4,7 +4,9 @@
 #define TEST_H
 
 #include <cstdio>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace testh {
@@ -35,6 +37,43 @@ inline void fail(const char* file, int line, const std::string& msg) {
     std::fflush(stdout);
 }
 
+// Portable scratch directory for tests that touch disk. Resolves the OS
+// temp dir (honouring TMPDIR), keeps a dedicated `openclip-tests`
+// sub-directory created on first use. Never throws: on any filesystem
+// error it degrades to the bare temp dir (and to "." as a last resort)
+// so tests report a normal CHECK failure instead of aborting.
+inline std::string& scratchDir() {
+    static std::string dir = [] {
+        std::error_code ec;
+        std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+        if (ec || base.empty()) base = std::filesystem::path("/tmp");
+        const std::filesystem::path p = base / "openclip-tests";
+        std::filesystem::create_directories(p, ec);
+        if (ec) {
+            std::error_code ec2;
+            if (std::filesystem::is_directory(base, ec2)) return base.string();
+            return std::string(".");
+        }
+        return p.string();
+    }();
+    return dir;
+}
+
+// Absolute path of `name` inside the scratch directory. Callers keep
+// per-test unique names so the suite stays deterministic and can run in
+// parallel with other checkouts.
+inline std::string tmpPath(const std::string& name) {
+    return (std::filesystem::path(scratchDir()) / name).string();
+}
+
+// Best-effort cleanup: drop the scratch directory when nothing is left in
+// it. Non-recursive on purpose, so a concurrently running suite in another
+// worktree is never disturbed.
+inline void cleanupScratch() {
+    std::error_code ec;
+    std::filesystem::remove(scratchDir(), ec);
+}
+
 struct Registrar {
     Registrar(const char* name, void (*fn)()) {
         registry().push_back({name, fn});
@@ -58,6 +97,7 @@ inline int runAll() {
     std::printf("\n%d/%lu tests passed, %d checks, %d failures\n",
                 passed, (unsigned long)registry().size(), checks(), failures());
     std::fflush(stdout);
+    cleanupScratch();
     return failures() == 0 ? 0 : 1;
 }
 

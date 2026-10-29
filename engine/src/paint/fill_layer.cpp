@@ -69,7 +69,10 @@ std::string strField(const std::string& span, std::size_t field,
 float latticeHash(int x, int y) {
     // Fixed constants (no seed parameter: the fiche has no seed key —
     // the grain is a fixed texture, documented in ARCHITECTURE.md).
-    unsigned h = static_cast<unsigned>(x * 374761393 + y * 668265263);
+    // Unsigned lattice mixing on purpose: keeping the products in `int`
+    // would be signed overflow (UB) even though GCC wraps in practice.
+    unsigned h = static_cast<unsigned>(x) * 374761393u +
+                 static_cast<unsigned>(y) * 668265263u;
     h = (h ^ (h >> 13)) * 1274126177u;
     h ^= h >> 16;
     return (h & 0xffffffu) / static_cast<float>(0x1000000u);
