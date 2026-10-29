@@ -37,7 +37,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: openclip-apks
+          name: calque-apks
           # ABI splits (issue #2): the debug variant now emits
           # calque-<version>-{arm64-v8a,x86_64,universal}.apk instead of a
           # single app-debug.apk. Test APKs are never split.
@@ -62,10 +62,8 @@ jobs:
         run: ./gradlew :app:assembleRelease
       - name: Package artifacts (per-ABI + universal, sha256 each)
         # Gradle emits calque-<version>-<abi>.apk / -universal.apk (issue #2).
-        # Release assets keep the historical openclip-<tag> naming, with the
-        # universal APK on the exact legacy name so old links keep working;
-        # split APKs get an ABI suffix. The openclip-*.apk glob below still
-        # matches every asset.
+        # Release assets use the Calque brand: calque-<tag>.apk for the
+        # universal build and calque-<tag>-<abi>.apk for the splits.
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -78,21 +76,21 @@ jobs:
           for apk in "${apks[@]}"; do
             base="$(basename "$apk" .apk)"
             case "$base" in
-              *-universal) asset="openclip-${GITHUB_REF_NAME}.apk" ;;
-              *-arm64-v8a) asset="openclip-${GITHUB_REF_NAME}-arm64-v8a.apk" ;;
-              *-x86_64)    asset="openclip-${GITHUB_REF_NAME}-x86_64.apk" ;;
+              *-universal) asset="calque-${GITHUB_REF_NAME}.apk" ;;
+              *-arm64-v8a) asset="calque-${GITHUB_REF_NAME}-arm64-v8a.apk" ;;
+              *-x86_64)    asset="calque-${GITHUB_REF_NAME}-x86_64.apk" ;;
               *) echo "unexpected release artifact: $apk" >&2; exit 1 ;;
             esac
             cp "$apk" "$asset"
             sha256sum "$asset" > "$asset.sha256"
           done
-          ls -l openclip-*.apk openclip-*.apk.sha256
+          ls -l calque-*.apk calque-*.apk.sha256
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            openclip-*.apk
-            openclip-*.apk.sha256
+            calque-*.apk
+            calque-*.apk.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
           # Tags like v0.1.0-alpha / -beta / -rc are marked prerelease.

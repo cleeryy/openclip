@@ -23,7 +23,7 @@ git by project rule (`.gitignore` refuses `*.apk` / `*.xapk`, see
   the local emulator — the studio shell (menu bar, tool rail, collapsible
   dock, color panel, layer panel, timeline) is usable immediately.
 - Every CI run on `master` publishes a buildable debug APK and the
-  instrumented test APK as workflow artifacts (`openclip-apks`, 7-day
+  instrumented test APK as workflow artifacts (`calque-apks`, 7-day
   retention) — the APK itself, not screenshots.
 - Tagged releases (`v*`) publish a debug-signed APK plus its `.sha256`
   on GitHub Releases ([latest](https://github.com/cleeryy/openclip/releases)).
@@ -148,9 +148,7 @@ emulator run after every rule change.
 
 Release tags publish three APKs — `calque-<tag>-arm64-v8a.apk`
 (tablets, ~38 MB), `calque-<tag>-x86_64.apk` (emulators, ~45 MB) and
-`calque-<tag>-universal.apk` — each with a `.sha256` companion. The
-legacy `openclip-<tag>.apk` name is kept as an alias of the universal
-build so older download links keep working.
+`calque-<tag>.apk` (universal) — each with a `.sha256` companion.
 
 ## Prerequisites
 
@@ -184,7 +182,7 @@ bash scripts/check_jni_symbols.sh --source-mode
 
 - **Engine** — `cd engine && make test`. Headerless assert harness in
   `engine/tests/`, one test file per public header; must stay green
-  (currently **237/237 tests, 78 784 checks**).
+  (currently **238/238 tests, 78 809 checks**).
 - **App conformance** — `bash scripts/emutest.sh` on the dev box. It
   boots or reuses the x86_64 AVD (`openclip-emu`), builds the x86_64-only
   APKs, installs them and runs the instrumented suite directly with
