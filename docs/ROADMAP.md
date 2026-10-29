@@ -14,7 +14,7 @@ something usable.
 > lecture (a)+(b) close, écriture (c) écartée · V+1→V+3 closes · tranches
 > parité **T1→T5 closes** · rebrand **Calque** livré · passe visuelle
 > V1→V18 livrée · perf release **P7 (R8 + shrink ressources)** livrée.
-> Gates vérifiés : **moteur 237/237 tests**, **émulateur 248/248** (local
+> Gates vérifiés : **moteur 238/238 tests**, **émulateur 248/248** (local
 > KVM, `scripts/emutest.sh`), JNI gelé conforme.
 > Ce fichier est la feuille de route tenue à jour (historique compact +
 > phases). Le checklist exécutable avec preuves (tests, commits, runs CI)
@@ -152,7 +152,7 @@ seulement si poids ouverts permissifs (même blocage qu'en M8).
 - [x] M1→M10 : CI engine + Android vertes sur master (runs tracés en TASKS.md)
 - [x] STUDIO + `.clip` (a)+(b) : 75/75 émulateur local KVM + moteur 75/75
 - [x] V+1→V+3 livrées : emu 87 → 125, moteur 80 → 103 (V+3 couverte par le gate T1)
-- [x] T1→T5 livrées : moteur 148 → **237/237**, émulateur 181 → **248/248** (phone KVM) ; tablette 247/248 (flake `clipMaskBadges`, vert en isolé)
+- [x] T1→T5 livrées : moteur 148 → **238/238**, émulateur 181 → **248/248** (phone KVM) ; tablette 247/248 (flake `clipMaskBadges`, vert en isolé)
 - [x] Rebrand **Calque** livré (label + icône adaptative + accent cinabre + fonte OFL, package `dev.openclip` gelé)
 - [x] Passe visuelle V1→V18 livrée (dock adaptatif, barres lisibles, footer propre, cibles 48 dp)
 - [x] Perf release P7 : R8 + shrink ressources, règles keep JNI/ONNX, gate symboles mis à jour
