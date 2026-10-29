@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "openclip/canvas.h"
@@ -250,6 +251,245 @@ TEST(psd_layered_roundtrip_names_pixels) {
     Canvas d;
     CHECK(openclip::loadPsd(d, path, err));
     CHECK(compositeEquals(c, d));
+    std::remove(path.c_str());
+}
+
+// ---- raw layered-PSD walker (regression helper for issue #1) ----
+// Bounded reader for exactly the layout savePsd (src/io/psd.cpp) writes.
+// All integers are big-endian; offsets from byte 0:
+//   26  header: "8BPS", u16 version, 6 reserved, u16 channels, u32 rows,
+//       u32 cols, u16 depth, u16 mode
+//   +4  color mode data length, then that many bytes
+//   +4  image resources length, then that many bytes
+//   +4  layer and mask section length; the section holds:
+//         +4 layer info length; that holds:
+//           i16 layer count, then `count` layer records, then ALL channel
+//           image data (a flat run after the records, not interleaved):
+//           per record, per channel: u16 compression + rows*cols bytes
+//         +4 global layer mask length (0 in our writer)
+// Every read is bounds-checked against the section it belongs to; the
+// declared channel lengths must add up to the bytes actually present.
+namespace {
+
+std::uint16_t psdBe16(const std::vector<std::uint8_t>& d, std::size_t o) {
+    return static_cast<std::uint16_t>((d[o] << 8) | d[o + 1]);
+}
+
+std::uint32_t psdBe32(const std::vector<std::uint8_t>& d, std::size_t o) {
+    return (static_cast<std::uint32_t>(d[o]) << 24) |
+           (static_cast<std::uint32_t>(d[o + 1]) << 16) |
+           (static_cast<std::uint32_t>(d[o + 2]) << 8) |
+           static_cast<std::uint32_t>(d[o + 3]);
+}
+
+struct PsdRawChannel {
+    const std::uint8_t* data;  // raw plane bytes (compression tag skipped)
+    std::size_t size;
+};
+
+struct PsdRawRecord {
+    std::string name;
+    std::vector<PsdRawChannel> channels;  // record order (R,G,B,A here)
+};
+
+bool psdReadLayerChannels(const std::vector<std::uint8_t>& d,
+                          std::vector<PsdRawRecord>& out, std::string& why) {
+    out.clear();
+    const std::size_t n = d.size();
+    auto fits = [&](std::size_t at, std::size_t len, const char* what) {
+        if (len > n || at > n - len) {
+            why = std::string("truncated ") + what;
+            return false;
+        }
+        return true;
+    };
+    if (n < 26 || std::memcmp(d.data(), "8BPS", 4) != 0) {
+        why = "not a PSD header";
+        return false;
+    }
+    std::size_t o = 26;
+    for (const char* what : {"color mode data", "image resources"}) {
+        if (!fits(o, 4, what)) return false;
+        const std::size_t len = psdBe32(d, o);
+        o += 4;
+        if (!fits(o, len, what)) return false;
+        o += len;
+    }
+    if (!fits(o, 4, "layer section length")) return false;
+    const std::size_t lmEnd = o + 4 + psdBe32(d, o);
+    o += 4;
+    if (lmEnd > n) {
+        why = "layer section overruns file";
+        return false;
+    }
+    if (!fits(o, 4, "layer info length")) return false;
+    const std::size_t liEnd = o + 4 + psdBe32(d, o);
+    o += 4;
+    if (liEnd > lmEnd) {
+        why = "layer info overruns layer section";
+        return false;
+    }
+    if (!fits(o, 2, "layer count")) return false;
+    const int count = psdBe16(d, o);
+    o += 2;
+    std::vector<std::vector<std::uint32_t>> chLens;  // per record channels
+    for (int i = 0; i < count; ++i) {
+        if (!fits(o, 16 + 2, "layer record")) return false;
+        o += 16;  // top, left, bottom, right (whole canvas in our writer)
+        const int nch = psdBe16(d, o);
+        o += 2;
+        if (nch < 1 || nch > 8) {
+            why = "bad channel count";
+            return false;
+        }
+        if (!fits(o, static_cast<std::size_t>(nch) * 6, "channel infos"))
+            return false;
+        std::vector<std::uint32_t> lens;
+        lens.reserve(static_cast<std::size_t>(nch));
+        for (int k = 0; k < nch; ++k) {
+            o += 2;  // channel id: 0=R, 1=G, 2=B, -1=A in our writer
+            lens.push_back(psdBe32(d, o));
+            o += 4;
+        }
+        if (!fits(o, 12 + 4, "blend record")) return false;
+        o += 12;  // '8BIM', 4-char key, opacity, clipping, flags, filler
+        const std::size_t extraEnd = o + 4 + psdBe32(d, o);
+        o += 4;
+        if (extraEnd > liEnd) {
+            why = "extra data overruns layer info";
+            return false;
+        }
+        // Extra data: mask data (len + bytes), blend ranges (len + bytes),
+        // Pascal name, then optional tagged blocks (none needed here).
+        if (!fits(o, 4, "mask data length")) return false;
+        const std::size_t maskLen = psdBe32(d, o);
+        o += 4;
+        if (!fits(o, maskLen, "mask data")) return false;
+        o += maskLen;
+        if (!fits(o, 4, "blend ranges length")) return false;
+        const std::size_t rangesLen = psdBe32(d, o);
+        o += 4;
+        if (!fits(o, rangesLen, "blend ranges")) return false;
+        o += rangesLen;
+        if (o > extraEnd) {
+            why = "extra data lengths overrun the extra block";
+            return false;
+        }
+        if (o >= extraEnd) {
+            why = "missing layer name";
+            return false;
+        }
+        const std::size_t nl = d[o++];
+        if (nl > extraEnd - o) {
+            why = "layer name overruns extra data";
+            return false;
+        }
+        PsdRawRecord rec;
+        rec.name.assign(reinterpret_cast<const char*>(d.data() + o), nl);
+        out.push_back(std::move(rec));
+        o = extraEnd;
+        chLens.push_back(std::move(lens));
+    }
+    // Channel image data: one flat run after the last record, inside the
+    // layer info block. The record headers only *declare* the lengths.
+    if (o > liEnd) {
+        why = "layer records overrun layer info";
+        return false;
+    }
+    const std::size_t payload = liEnd - o;
+    std::size_t declared = 0;
+    for (const auto& lens : chLens) {
+        for (std::uint32_t len : lens) {
+            if (len < 2 || len > payload - declared) {
+                why = "channel block of " + std::to_string(len) +
+                      " bytes does not fit the " +
+                      std::to_string(payload - declared) + " of " +
+                      std::to_string(payload) + " bytes left for channel data";
+                return false;
+            }
+            declared += len;
+        }
+    }
+    if (declared != payload) {
+        why = "declared channel data (" + std::to_string(declared) +
+              " bytes) != payload present (" + std::to_string(payload) +
+              " bytes)";
+        return false;
+    }
+    std::size_t p = o;
+    for (std::size_t i = 0; i < chLens.size(); ++i) {
+        for (std::uint32_t len : chLens[i]) {
+            if (psdBe16(d, p) != 0) {  // compression 0 = raw
+                why = "unexpected channel compression";
+                return false;
+            }
+            out[i].channels.push_back({d.data() + p + 2, len - 2});
+            p += len;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+// Regression for issue #1: layer records must carry their own pixels.
+// The pre-fix writer bound Rec::planes[] to Rec's own owned[] vectors and
+// then moved the record into `recs`, so every channel block was emitted
+// EMPTY while its declared length still said "2 + w*h": the layered PSD
+// was structurally inconsistent, yet no test noticed because loadPsd
+// only reads the merged (flattened) view, which stayed correct.
+TEST(psd_layer_channel_payload_has_layer_pixels) {
+    Canvas c(6, 5);
+    c.addLayer("red");
+    c.addLayer("green");
+    const std::uint8_t want[2][4] = {{255, 0, 0, 255},  // opaque red
+                                     {0, 255, 0, 255}};  // opaque green
+    for (std::size_t li = 0; li < 2; ++li)
+        for (int y = 0; y < 5; ++y)
+            for (int x = 0; x < 6; ++x)
+                c.layer(li).surface.set(
+                    x, y,
+                    Pixel{want[li][0], want[li][1], want[li][2], want[li][3]});
+    const std::string path = "/tmp/oc_channel.psd";
+    std::string err;
+    CHECK(openclip::savePsd(c, path, err));
+    std::vector<std::uint8_t> d;
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    CHECK(f != nullptr);
+    if (f) {
+        std::fseek(f, 0, SEEK_END);
+        const long n = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        d.resize(static_cast<std::size_t>(n));
+        CHECK(std::fread(d.data(), 1, d.size(), f) == d.size());
+        std::fclose(f);
+    }
+    std::vector<PsdRawRecord> recs;
+    std::string why;
+    const bool walked = psdReadLayerChannels(d, recs, why);
+    if (!walked) std::printf("    (psd walk: %s)\n", why.c_str());
+    CHECK(walked);
+    CHECK_EQ(recs.size(), 2u);
+    if (walked && recs.size() == 2) {
+        CHECK_EQ(recs[0].name, std::string("red"));
+        CHECK_EQ(recs[1].name, std::string("green"));
+        for (std::size_t i = 0; i < 2; ++i) {
+            CHECK_EQ(recs[i].channels.size(), 4u);
+            for (std::size_t k = 0; k < recs[i].channels.size(); ++k) {
+                const PsdRawChannel& ch = recs[i].channels[k];
+                CHECK_EQ(ch.size, static_cast<std::size_t>(30));
+                bool uniform = ch.size == 30;
+                const std::uint8_t w = want[i][k];
+                for (std::size_t q = 0; uniform && q < ch.size; ++q)
+                    uniform = ch.data[q] == w;
+                if (!uniform)
+                    std::printf("    (%s plane %lu is not its own pixels)\n",
+                                recs[i].name.c_str(),
+                                static_cast<unsigned long>(k));
+                CHECK(uniform);
+            }
+        }
+    }
     std::remove(path.c_str());
 }
 
