@@ -9,15 +9,20 @@ Goal: widest possible feature parity with a professional painting app
 see csp-analysis.md) via clean-room reimplementation. Each milestone ships
 something usable.
 
-> **Status 2026-10-20 : M1→M10 clos et livrés, phase STUDIO (slices 0→7)
-> close, compat `.clip` lecture (a)+(b) close, écriture (c) écartée.**
+> **Status 2026-10-29 (alpha `0.2.0-alpha`) : jalon produit COMPLET.**
+> M1→M10 clos et livrés · phase STUDIO (slices 0→7) close · compat `.clip`
+> lecture (a)+(b) close, écriture (c) écartée · V+1→V+3 closes · tranches
+> parité **T1→T5 closes** · rebrand **Calque** livré · passe visuelle
+> V1→V18 livrée · perf release **P7 (R8 + shrink ressources)** livrée.
+> Gates vérifiés : **moteur 237/237 tests**, **émulateur 248/248** (local
+> KVM, `scripts/emutest.sh`), JNI gelé conforme.
 > Ce fichier est la feuille de route tenue à jour (historique compact +
-> phases suivantes). Le checklist exécutable avec preuves (tests, commits,
-> runs CI) est `docs/TASKS.md` — voir son journal. Le tri fin parité est
-> `docs/post-v1-backlog.md` (FAIT / FUTUR / EXCLU). Recherche format :
-> `docs/clip-format-research.md`. Recherche UX : `docs/csp-ux-research.md`.
-> Règle clean-room partout : vocabulaire maison, jamais de strings, assets,
-> captures ni binaires tiers.
+> phases). Le checklist exécutable avec preuves (tests, commits, runs CI)
+> est `docs/TASKS.md` — voir son journal. L'inventaire parité source vs
+> code est `docs/parity-gap.md` (instantané v0 ; écarts restants suivis
+> dans l'issue GitHub #4). Recherche format : `docs/clip-format-research.md`.
+> Recherche UX : `docs/csp-ux-research.md`. Règle clean-room partout :
+> vocabulaire maison, jamais de strings, assets, captures ni binaires tiers.
 
 ## 1. Historique M1→M10 (clos, résumé — détail dans TASKS.md)
 
@@ -81,53 +86,56 @@ in-code.
   Écritures interop = ORA natif + PSD + PNG/JPEG/WebM. Compat mono-doc
   tiers = lecture seule.
 
-## 4. Feuille de route post-v1 (reprise du backlog)
+## 4. Tranches post-v1 livrées (V+1→V+3, T1→T5)
 
-Chaque FUTUR = 1 spec slice dédiée + JNI documenté dans `ARCHITECTURE.md`
-**avant** tout code moteur ; gate local `emutest.sh` inchangé.
-Coûts : **S** ≤ 1 session, **M** 2–4 sessions, **L** > 4 sessions ou
-dépendance externe. Détail item par item : `docs/post-v1-backlog.md`.
+Chaque tranche a sa spec dédiée (`docs/vN-*.md`, `docs/tN-*.md`) et, pour
+tout symbole moteur neuf, une extension JNI documentée dans
+`ARCHITECTURE.md` **avant** le code. Gate local `emutest.sh` inchangé.
+Coûts d'origine : **S** ≤ 1 session, **M** 2–4 sessions, **L** > 4 sessions
+ou dépendance externe. Détail item par item (état d'origine) :
+`docs/post-v1-backlog.md`.
 
-### V+1 — Fondations manquantes (7 items)
-| Item | Coût | Dépendance |
+| Tranche | Contenu livré | Preuves |
 |---|---|---|
-| Sélection (rectangle/ellipse/lasso/baguette, fourmis overlay-only) | L | moteur + JNI-documenté-d'abord |
-| Calque texte (mise en page app-side, raster éditable, méta `x-openclip-text` ; pas de moteur fonte natif) | M | moteur + app + JNI-documenté-d'abord |
-| Vraie gomme alpha (`alpha-erase` dest-out ; auj. peinture claire documentée) | M | moteur + JNI-documenté-d'abord |
-| Verrou alpha / verrou pixels (flag par calque) | S | moteur + JNI-documenté-d'abord |
-| Formes géométriques (rectangle/ellipse/polygone, stamps undoables) | M | moteur + app |
-| Inclinaison stylet (tilt → forme/angle) | M | moteur + app |
-| Densité estampilles + interpolation inter-moves (reste M2) | S | moteur |
+| V+1 — Fondations | sélection rect/ellipse/lasso + fourmis + transfo, calque texte éditable, gomme `alpha-erase` dest-out | engine 80/80, emu 87/87 |
+| V+2 — BD / exports longs | cases/bulles/vitesse, ordre de lecture, webtoon, multipage `.ocpages/`, SVG, Bézier, copier/coller, navigateur, autosave, courbes, raccourcis, GIF, PSD multicouche | engine 103/103, emu 125/125 |
+| V+3 — Confort pro | mélangeur, canaux nommés, accrochage/simplification, texte sur tracé, mannequin posable, TIFF, PDF 1ʳᵉ page, SVG `<path>`, débruitage local classique | gate absorbé par le run T1 (engine 148/148, emu 181) |
+| T1 — Fondations dessin | seau scanline (tolérance + AA sous masque), baguette, dégradé, figures, feather/masque rapide, unsharp/balance/seuillage (4 symboles JNI) | engine 148/148, emu 181 (run détaché ; gate 183 couvert par T2 202/202) |
+| T2 — Texte + vectoriel avancé | runs multi-polices + import fontes, inline ancré, vertical + césure, contour, retrace/connexion/largeur, trajectoires, PSD `TySh`, bulle dédiée (4 symboles JNI) | engine 170/170, emu 202/202 |
+| T3 — Animation productive | keyframes calque + caméra, 4 pistes, feuille d'exposition, APNG, séquence PNG, stickers, audio seul (15 symboles JNI) | engine 193/193, emu 218/218 |
+| T4 — Transfos + filtres créatifs | warp sélection, marionnette MLS, forme intelligente, +10 filtres, décor 3D peint (3 symboles JNI) | engine 217/217, emu 226 phone / 227 tablette |
+| T5 — Échanges + pages + productivité | +10 blends (20 au total), verrous/flags, fills composite-time, edge/aquarelle, `.grd`/`.abr`, macros, aligner, historique/info, `project.json` v2, folio, vue double, repères mm, fanzine, EPUB, PDF, séquences (2 symboles JNI) | engine 237/237, emu 248/248 |
 
-### V+2 — Cases / exports longs (12 items)
-| Item | Coût | Dépendance |
-|---|---|---|
-| Déplacer / échelle / rotation / libre + maillage | M | moteur + JNI-documenté-d'abord |
-| Copier / coller / couper inter-calques et inter-docs | S | app |
-| Édition points / poignées Bézier | M | moteur + JNI-documenté-d'abord |
-| Export SVG des calques vectoriels | S | app |
-| Guides persistants + splines concentriques | M | moteur + app |
-| Cases / bulles / traits de vitesse (sur vecteur M6 + tons M10) | M | moteur + app |
-| Sens de lecture + ordre des cases (métadonnées maison) | S | app |
-| Export bande verticale (concat PNG haute) | S | app |
-| Multipage maison (dossier ORA multiples + sommaire JSON) | M | app |
-| Export GIF / APNG (formats ouverts) | M | moteur + app |
-| Rythme par cel + reorder cels + compte onion moteur | M | moteur + JNI-documenté-d'abord |
-| Export PSD plein (couches/blends/masques, au-delà de l'aplati) | M | moteur |
+Écarts assumés et documentés (pas des régressions) : sélection app-side
+(session-only), texte rasterisé au commit (fiche `x-openclip-*` en ORA),
+lecture multipage en JSON app-side, aperçu mesh = cadre, dégradé `.clip`
+compté par calque, débruitage/colorisation IA conditionnels à des poids
+permissifs.
 
-### V+3 — Confort pro (7 items + 2 conditionnels)
-| Item | Coût | Dépendance |
-|---|---|---|
-| Mélangeur couleurs sur canvas | L | moteur |
-| Épreuvage / profils couleur (pipeline sortie seul, blobs sous licence loggée) | M | moteur + app |
-| Roue harmonies (calcul pur) | S | app |
-| Mémorisation sélections (canaux nommés, ORA étendu maison) | S | moteur + app |
-| Accrochage / simplification tracés | M | moteur |
-| Texte sur tracé / déformation texte (après texte + maillage) | M | moteur + app |
-| Mannequin articulé posable (format ouvert, modèles libres licenciés) | L | moteur + app |
-| Courbes de tons éditables par points (V+2, M, LUT identifiée) | M | moteur + JNI-documenté-d'abord |
-| Navigateur miniature / autosave opt-in / raccourcis clavier (V+2–V+3, S chacun) | S | app |
-| Débruitage local + colorisation auto locale — **conditionnels** : seulement si poids ouverts permissifs (même blocage qu'en M8) | M / L | externe |
+### V+1 — Fondations (7 items, livrée)
+Sélection rect/ellipse/lasso + baguette (masque app-side, fourmis,
+Tout/Inverser/+1 px/Désélectionner, mix sous masque) · calque texte
+éditable (layout app-side, pixels commités, fiche `x-openclip-text`) ·
+vraie gomme alpha `alpha-erase` dest-out (legacy `eraser` conservé) ·
+verrou alpha / verrou pixels par calque · figures géométriques ·
+inclinaison stylet · densité d'estampilles + interpolation inter-moves.
+
+### V+2 — Cases / exports longs (12 items, livrée)
+Déplacer / échelle / rotation / libre + maillage · copier/coller/couper
+inter-calques et inter-docs · édition points/poignées Bézier · export SVG
+des calques vectoriels · guides persistants · cases/bulles/traits de
+vitesse · sens de lecture + ordre des cases · export bande verticale ·
+multipage maison `.ocpages/` · export GIF (+APNG en T3) · rythme par cel +
+reorder + onion moteur · export PSD multicouche.
+
+### V+3 — Confort pro (7 items + 2 conditionnels, livrée)
+Mélangeur couleurs sur canvas · épreuvage/profils (pipeline sortie seul,
+aucun blob ICC tiers) · roue harmonies · canaux de sélection nommés ·
+accrochage/simplification des tracés · texte sur tracé · mannequin
+articulé posable · courbes de tons éditables · navigateur/autosave/
+raccourcis clavier · débruitage local classique (médiane/bilatéral).
+**Conditionnels non livrés** : débruitage IA + colorisation auto locale —
+seulement si poids ouverts permissifs (même blocage qu'en M8).
 
 ## 5. EXCLU assumé (avec alternatives libres)
 
@@ -143,10 +151,37 @@ dépendance externe. Détail item par item : `docs/post-v1-backlog.md`.
 
 - [x] M1→M10 : CI engine + Android vertes sur master (runs tracés en TASKS.md)
 - [x] STUDIO + `.clip` (a)+(b) : 75/75 émulateur local KVM + moteur 75/75
+- [x] V+1→V+3 livrées : emu 87 → 125, moteur 80 → 103 (V+3 couverte par le gate T1)
+- [x] T1→T5 livrées : moteur 148 → **237/237**, émulateur 181 → **248/248** (phone KVM) ; tablette 247/248 (flake `clipMaskBadges`, vert en isolé)
+- [x] Rebrand **Calque** livré (label + icône adaptative + accent cinabre + fonte OFL, package `dev.openclip` gelé)
+- [x] Passe visuelle V1→V18 livrée (dock adaptatif, barres lisibles, footer propre, cibles 48 dp)
+- [x] Perf release P7 : R8 + shrink ressources, règles keep JNI/ONNX, gate symboles mis à jour
 - [x] Release `v0.1.0-alpha` publiée (prerelease, APK + sha256, téléchargement anonyme vérifié)
 - [x] Tags `v0.1.0-alpha.2` / `v0.1.0-alpha.3` posés
+- [ ] Tag `v0.2.0-alpha` (notes de release = `CHANGELOG.md`, taille APK et démarrage à mesurer)
 - [ ] Validation manuelle tablette par le demandeur (cible 1920×1200@240)
-- [ ] Prochain tag alpha après retour tablette
+- [ ] Écarts de parité restants : suivis dans l'issue **#4** (inventaire de départ : `docs/parity-gap.md`)
 
 Not planned (rappel) : ads/telemetry, Play Billing, fingerprinting SDKs,
 DRM de boutique fermée — GPL-3.0-or-later.
+
+## 7. Alpha `0.2.0-alpha` — contenu et suivi
+
+La release `0.2.0-alpha` (2026-10-29) est la première alpha consolidée de
+la marque **Calque** : moteur M1→M10, shell STUDIO slices 0→7, lecture
+`.clip` (a)+(b), tranches V+1→V+3, tranches T1→T5, rebrand, passe visuelle
+V1→V18 et perf release P7. Le détail daté (commits, runs, preuves) est dans
+`docs/TASKS.md` ; le journal utilisateur est `CHANGELOG.md`.
+
+Suivi des travaux restants (issues GitHub, source de vérité) :
+
+| Issue | Sujet | État |
+|---|---|---|
+| [#1](https://github.com/cleeryy/openclip/issues/1) | CI moteur rouge : `stack-use-after-scope` dans `savePsd` | ouvert |
+| [#2](https://github.com/cleeryy/openclip/issues/2) | Split des APK release par ABI (taille de téléchargement) | ouvert |
+| [#4](https://github.com/cleeryy/openclip/issues/4) | Écarts de parité différés (suite de `parity-gap.md`) | ouvert |
+| [#5](https://github.com/cleeryy/openclip/issues/5) | Nom d'APK épinglé de l'UI émulateur après le rebrand | ouvert |
+
+Hors issues : validation manuelle tablette par le demandeur, mesure
+taille/démarrage de l'APK R8, et poids permissifs pour débruitage /
+colorisation IA.

@@ -1,17 +1,32 @@
 # Écart de parité — inventaire source vs code réel (DOC UNIQUEMENT)
 
-> **Statut : document de cadrage, aucune modification de code.**
+> **Statut au 2026-10-29 (alpha `0.2.0-alpha`) : instantané v0, conservé
+> comme point de départ.**
+> Cet inventaire a été établi le 2026-10-21, **avant** les tranches de
+> parité T1→T5. Depuis, **T1→T5 sont closes** (preuves, commits et runs
+> dans `docs/TASKS.md`) : remplissage/dégradé/baguette/figures (T1),
+> texte + vectoriel avancé (T2), keyframes/caméra/pistes/APNG (T3), warp/
+> marionnette/filtres créatifs/décor 3D (T4), verrous/fills/`.grd`/`.abr`/
+> macros/pages/EPUB/PDF (T5). Les tableaux §1→§14 ci-dessous décrivent donc
+> l'état **avant** ces tranches ; le §« Ordre d'implémentation proposé » est
+> **historique** (les 5 tranches y sont livrées, pas à reprendre).
+> Base réelle au 2026-10-29 : **engine 237/237 tests**, **emu 248/248**
+> (`@Test`, gate local KVM), JNI gelé documenté en `ARCHITECTURE.md`
+> (M1→M10 + V+1→V+3 + T1→T5).
+> **Écarts encore différés : suivis dans l'issue GitHub #4** — ne pas se
+> fier aux compteurs de synthèse ci-dessous (23 % FAIT) pour l'état actuel.
 > Méthode : chaque entrée de `docs/csp-functional-list.md` vérifiée contre le
 > code (pas les docs marketing) : `engine/include/openclip/*.h` + shim
 > `app/src/main/cpp/ExternalC.cpp` + `engine/tests/test_*.cpp` +
 > `app/src/androidTest/.../EngineConformanceTest.kt` + `app/src/main`
-> (Compose) + `ARCHITECTURE.md` (JNI) + specs `docs/v1/v2/v3-*.md`.
+> (Compose) + `ARCHITECTURE.md` (JNI) + specs `docs/v1/v2/v3-*.md` et
+> `docs/t1..t5-*.md`.
 > Vocabulaire maison, aucune string Celsys.
 > Règle de sévérité : **FAIT = testé** (engine `make test` ou emu
 > instrumenté nommé). Sinon PARTIEL ou ABSENT, même si le code semble proche.
-> Base réelle vérifiée : engine ~116 tests (`grep TEST(` ≈ 111 + main),
-> emu **150 `@Test`** (`grep -c "@Test"`), JNI gelé documenté en
-> `ARCHITECTURE.md` (M1→M10 + V+1 + V+2 + V+3).
+> Base réelle **à la date de l'inventaire** : engine ~116 tests,
+> emu **150 `@Test`** ; au 2026-10-29 : engine **237/237**, emu **248/248**
+> (les deux chiffres sont rappelés ci-dessus).
 > Comptage ci-dessous sur **260 sous-entrées détaillées** (la source en
 > regroupe ~200 après fusion des variantes sur une ligne).
 
@@ -373,7 +388,14 @@ et dégradés-outils (zéro), brosse double/jitter/`.abr`, verrous calque,
 filtres créatifs (9.8/9.9/9.12–9.16), keyframes/caméra, puppet warp,
 perspective/skew, texte avancé, 3D productive (peinture/primitives).
 
-## Ordre d'implémentation proposé (tranches, pas de code)
+> **Note 2026-10-29 :** ces compteurs datent d'avant T1→T5. Plusieurs
+> ABSENT/PARTIEL listés ci-dessus sont **depuis livrés et testés**
+> (remplissage/dégradé/baguette T1, texte runs + vectoriel avancé T2,
+> keyframes/caméra/pistes T3, warp/puppet/filtres créatifs/décor 3D T4,
+> verrous/blends/fills/`.grd`/`.abr`/macros/EPUB/PDF T5). Le suivi des
+> écarts **restants** est l'issue GitHub #4.
+
+## Ordre d'implémentation proposé — historique (T1→T5 livrées, pas de code)
 
 Coûts : **S** ≤ 1 session · **M** 2–4 · **L** > 4 ou dépendance externe.
 Dépendances : moteur / app / JNI-documenté-d'abord (règle projet : tout

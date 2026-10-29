@@ -1,0 +1,14 @@
+# Repository ownership. The maintainer is the required reviewer for every
+# path; GitHub falls back to the write-enabled team when unreachable.
+*       @cleeryy
+
+# Engine public API and the frozen JNI boundary: never merge without a
+# contract update in ARCHITECTURE.md.
+/engine/                    @cleeryy
+/app/src/main/cpp/          @cleeryy
+/ARCHITECTURE.md            @cleeryy
+
+# Release, CI and repository surface.
+/.github/                   @cleeryy
+/app/build.gradle.kts       @cleeryy
+/scripts/                   @cleeryy

@@ -1,0 +1,59 @@
+# Dependabot — automated dependency updates.
+# Grouped weekly so the local emulator gate (which is not on CI) is run
+# once per batch and not per PR.
+version: 2
+updates:
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Paris"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "gradle"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      android-gradle-plugin:
+        patterns:
+          - "com.android.tools.build*"
+          - "com.android.application*"
+      kotlin-and-compose:
+        patterns:
+          - "org.jetbrains.kotlin*"
+          - "androidx.compose*"
+      androidx:
+        patterns:
+          - "androidx.*"
+      onnx-runtime:
+        patterns:
+          - "com.microsoft.onnxruntime*"
+    ignore:
+      # The JNI surface and ONNX AAR are pinned to versions validated on
+      # device; bump manually with a full emulator run.
+      - dependency-name: "com.microsoft.onnxruntime:onnxruntime-android"
+        update-types: ["version-update:semver-major"]
+      # NDK/AGP majors change the native build contract; handle by hand.
+      - dependency-name: "com.android.tools.build:gradle"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Paris"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
