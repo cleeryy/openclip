@@ -37,7 +37,19 @@ updates:
       - dependency-name: "com.microsoft.onnxruntime:onnxruntime-android"
         update-types: ["version-update:semver-major"]
       # NDK/AGP majors change the native build contract; handle by hand.
+      # Dependabot reports the plugin id in this project's plugins block,
+      # so both spellings must be ignored.
       - dependency-name: "com.android.tools.build:gradle"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "com.android.application"
+        update-types: ["version-update:semver-major"]
+      # Gradle wrapper majors break build-script compatibility.
+      - dependency-name: "gradle"
+        update-types: ["version-update:semver-major"]
+      # Kotlin/Compose majors must move together and are gated on device.
+      - dependency-name: "org.jetbrains.kotlin*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "androidx.compose*"
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
