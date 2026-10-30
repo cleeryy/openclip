@@ -529,7 +529,8 @@ fun ToolPalette(
                 listOf(
                     SelectionTool.RECT to R.string.selection_rect,
                     SelectionTool.ELLIPSE to R.string.selection_ellipse,
-                    SelectionTool.LASSO to R.string.selection_lasso
+                    SelectionTool.LASSO to R.string.selection_lasso,
+                    SelectionTool.POLYLINE to R.string.selection_polyline
                 ).forEach { (mode, label) ->
                     FilterChip(
                         selected = surface.selectionTool == mode,

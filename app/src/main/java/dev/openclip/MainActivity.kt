@@ -130,6 +130,11 @@ import dev.openclip.ui.PagesPanel
 import dev.openclip.ui.SvgPanel
 import dev.openclip.ui.TransformPanel
 import dev.openclip.ui.WarpPanel
+import dev.openclip.ui.CanvasSizeDialog
+import dev.openclip.ui.RefPhoto
+import dev.openclip.ui.RefPhotoPanel
+import dev.openclip.ui.SelectionRadiusDialog
+import dev.openclip.ui.SelectionTool
 import dev.openclip.ui.SmartShapePanel
 import dev.openclip.ui.WebtoonPanel
 import dev.openclip.ui.MaterialsRow
@@ -379,6 +384,11 @@ class MainActivity : ComponentActivity() {
         val showShortcuts = remember { mutableStateOf(false) }
         // T1 §5 : dialogue contour progressif (remplace le +1px fixe).
         val showFeather = remember { mutableStateOf(false) }
+        // W1 (issue #28 slice A): canvas size, selection radius op,
+        // reference photo panel.
+        val showW1Canvas = remember { mutableStateOf(false) }
+        val w1SelOp = remember { mutableStateOf("") }
+        val showW1Ref = remember { mutableStateOf(false) }
         val playTickExt = remember { mutableStateOf(0) }
         val toolState = remember { ShortcutToolState() }
         // Slice 7: command bar folds to a pastille (phone default
@@ -656,6 +666,21 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // W1: reference photo import (session-only, never layer pixels).
+        val openRefPhoto = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                try {
+                    val bmp = ctx.contentResolver.openInputStream(uri)?.use {
+                        android.graphics.BitmapFactory.decodeStream(it)
+                    }
+                    if (bmp != null) RefPhoto.setPhoto(bmp)
+                } catch (_: Exception) {
+                }
+                showW1Ref.value = true
+            }
+        }
         val createDoc = rememberLauncherForActivityResult(
             ActivityResultContracts.CreateDocument("application/octet-stream")
         ) { uri: Uri? ->
@@ -1985,6 +2010,47 @@ class MainActivity : ComponentActivity() {
                                         if (aid != null) docRegistry.markDirty(aid, true)
                                         refreshKey.value++
                                     }
+                                ),
+                                // W1 (issue #28): merge / flatten / rasterize
+                                // + canvas size (1 engine undo step each).
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_merge_down),
+                                    enabled = surface.layerCount() > 1,
+                                    onClick = {
+                                        if (surface.mergeLayers(
+                                                "down", surface.activeLayerIndex()
+                                            )
+                                        ) {
+                                            refreshKey.value++
+                                        }
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_merge_visible),
+                                    onClick = {
+                                        if (surface.mergeLayers("visible")) refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_flatten),
+                                    onClick = {
+                                        if (surface.mergeLayers("flatten")) refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_rasterize),
+                                    onClick = {
+                                        if (surface.mergeLayers(
+                                                "rasterize", surface.activeLayerIndex()
+                                            )
+                                        ) {
+                                            refreshKey.value++
+                                        }
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_canvas_size),
+                                    onClick = { showW1Canvas.value = true }
                                 )
                             )
                         ),
@@ -2026,6 +2092,41 @@ class MainActivity : ComponentActivity() {
                                     label = stringResource(R.string.select_feather_radius),
                                     enabled = surface.hasSelection(),
                                     onClick = { showFeather.value = true }
+                                ),
+                                // W1 (issue #28): grow / shrink / feather N px,
+                                // select from layer alpha, polyline tool.
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_sel_grow),
+                                    enabled = surface.hasSelection(),
+                                    onClick = { w1SelOp.value = "grow" }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_sel_shrink),
+                                    enabled = surface.hasSelection(),
+                                    onClick = { w1SelOp.value = "shrink" }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_sel_featherpx),
+                                    enabled = surface.hasSelection(),
+                                    onClick = { w1SelOp.value = "feather" }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_sel_from_layer),
+                                    onClick = {
+                                        if (surface.selectFromLayerAlpha(
+                                                surface.activeLayerIndex(), 1, ctx.cacheDir
+                                            )
+                                        ) {
+                                            refreshKey.value++
+                                        }
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.selection_polyline),
+                                    onClick = {
+                                        surface.selectionTool = SelectionTool.POLYLINE
+                                        refreshKey.value++
+                                    }
                                 )
                             )
                         ),
@@ -2039,6 +2140,32 @@ class MainActivity : ComponentActivity() {
                                 StudioMenuItem(
                                     label = stringResource(R.string.view_reset),
                                     onClick = { surface.resetView() }
+                                ),
+                                // W1 §3: view-only mirror (never pixels,
+                                // never coordinates, never an export).
+                                StudioMenuItem(
+                                    label = stringResource(
+                                        if (surface.viewFlipHorizontal()) R.string.w1_flip_h_on
+                                        else R.string.w1_flip_h
+                                    ),
+                                    onClick = {
+                                        surface.toggleViewFlipH()
+                                        refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(
+                                        if (surface.viewFlipVertical()) R.string.w1_flip_v_on
+                                        else R.string.w1_flip_v
+                                    ),
+                                    onClick = {
+                                        surface.toggleViewFlipV()
+                                        refreshKey.value++
+                                    }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.w1_ref_title),
+                                    onClick = { showW1Ref.value = true }
                                 ),
                                 StudioMenuItem(
                                     label = stringResource(
@@ -3319,6 +3446,36 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // ---- W1 (issue #28) dialogs ----
+            if (showW1Canvas.value) {
+                activeSurface()?.let { s ->
+                    CanvasSizeDialog(
+                        surface = s,
+                        onClose = { showW1Canvas.value = false },
+                        onApplied = { refreshKey.value++ }
+                    )
+                } ?: run { showW1Canvas.value = false }
+            }
+            if (w1SelOp.value.isNotEmpty()) {
+                val op = w1SelOp.value
+                SelectionRadiusDialog(
+                    op = op,
+                    onClose = { w1SelOp.value = "" },
+                    onApply = { radius ->
+                        activeSurface()?.let { s ->
+                            if (s.refineSelection(op, radius, ctx.cacheDir)) {
+                                refreshKey.value++
+                            }
+                        }
+                    }
+                )
+            }
+            if (showW1Ref.value) {
+                RefPhotoPanel(
+                    onClose = { showW1Ref.value = false },
+                    onImport = { openRefPhoto.launch(arrayOf("image/*")) }
+                )
+            }
             // ---- Slice 6 dialogs (outside the surface lets so the "+"
             // and the empty-canvas CTA work with 0 docs) ----
             if (showNewCanvas.value) {

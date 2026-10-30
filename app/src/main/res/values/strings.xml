@@ -690,4 +690,35 @@
     <string name="info_zoom">Zoom</string>
     <string name="info_memory">Memory</string>
     <string name="menu_t5">Exchange</string>
+
+    <!-- W1 (issue #28 slice A): merge / canvas / flip / selection / reference -->
+    <string name="w1_merge_down">Merge down</string>
+    <string name="w1_merge_visible">Merge visible</string>
+    <string name="w1_flatten">Flatten image</string>
+    <string name="w1_rasterize">Rasterize layer</string>
+    <string name="w1_canvas_size">Canvas size…</string>
+    <string name="w1_width">Width</string>
+    <string name="w1_height">Height</string>
+    <string name="w1_anchor">Anchor</string>
+    <string name="w1_resample">Resample (stretch to fit)</string>
+    <string name="w1_print_size">Print size: %1$s mm at %2$d dpi</string>
+    <string name="w1_crop_selection">Crop to selection</string>
+    <string name="w1_apply">Apply</string>
+    <string name="w1_sel_grow">Grow selection…</string>
+    <string name="w1_sel_shrink">Shrink selection…</string>
+    <string name="w1_sel_featherpx">Feather selection… px</string>
+    <string name="w1_sel_radius">%1$d px</string>
+    <string name="w1_sel_from_layer">Select from layer alpha</string>
+    <string name="selection_polyline">Polyline</string>
+    <string name="w1_flip_h">Mirror view horizontally</string>
+    <string name="w1_flip_h_on">Mirror view horizontally (on)</string>
+    <string name="w1_flip_v">Mirror view vertically</string>
+    <string name="w1_flip_v_on">Mirror view vertically (on)</string>
+    <string name="w1_ref_title">Reference photo</string>
+    <string name="w1_ref_import">Import</string>
+    <string name="w1_ref_fit">Fit</string>
+    <string name="w1_ref_100">100%%</string>
+    <string name="w1_ref_close">Close</string>
+    <string name="w1_ref_empty">Import a photo to trace beside the canvas (never exported).</string>
+    <string name="w1_ref_hint">Drag to pan, pinch to zoom. Session-only, independent of the document.</string>
 </resources>

@@ -1217,3 +1217,96 @@ both BEFORE code per the frozen-JNI rule):
   BEFORE code): nSetLayerFlags, nSetLayerFill. Everything else is
   registry/JSON/app-side. A generic `nT5Op(handle, json)` was
   considered and REFUSED (same clause as T1 §8 / T2 / T3 / T4).
+
+W1 additions (decided 2026-10-30, issue #28 slice A "workflow
+completeness" — merge/resize/flip/selection/reference). Documented
+BEFORE code per the frozen-JNI rule. EXACTLY 3 new symbols.
+
+- Conventions: engine writes stay full-layer tile snapshots; the
+  structural ops below (merge/flatten/rasterize/canvas resize/crop)
+  change layer COUNT or canvas SIZE, which tile snapshots cannot
+  express — they use the new whole-document snapshot command
+  (`History::beginSnapshot/endSnapshot`, one undo step per action,
+  documented cost: two full Canvas copies per structural op, bounded
+  by the same 64-command cap). Mixing stroke tiles and document
+  snapshots is LIFO-safe (one command vector, each entry is either).
+  A snapshot undo restores the whole Canvas, so shim-side vector
+  path stacks for that frame are dropped (announced, not silent) and
+  the app refreshes its layer panel from `nLayerState`.
+- `openclip/docops.h` (new header, pure Canvas logic, no JNI types):
+  `mergeDown(Canvas&, index, err)`, `mergeVisible(Canvas&, err)`,
+  `flattenDocument(Canvas&, err)`,
+  `rasterizeLayer(Canvas&, index, err)`. EVERY op is
+  RENDER-PRESERVING by construction and by verification: the editor
+  composite before and after is compared byte-for-byte; a difference
+  reverts the mutation and returns false with a human-readable
+  reason (never a silent pixel change — the clip/mask/translucent
+  cases that cannot be baked honestly are refused). Semantics:
+  merge down of a group flattens the group first, then merges the
+  resulting raster into the layer below; merging a raster ONTO a
+  group is refused (`err`); a clipped layer merges into its base
+  with the clip resolved against the running target (exact when the
+  base is opaque, refused otherwise, never a visible change);
+  merge visible collapses every visible top-level layer into one
+  raster at the topmost visible slot (hidden layers preserved);
+  flatten uses the EXPORT composite (reference/draft layers are
+  editor-only aids and are dropped, like every export);
+  rasterize bakes vector paths, fill/text/bubble fiches, opacity
+  and mask into pixels (clip flag survives) and turns a group into
+  one raster in place; rasterizing an ADJUSTMENT layer consumes
+  every layer below it (the adjustment transforms their composite
+  by definition) and replaces them with the adjusted raster.
+- `openclip/canvas_ops.h` (new header): `resizeCanvas(Canvas&, w, h,
+  CanvasAnchor, resample, err)`, `cropCanvas(Canvas&, x, y, w, h,
+  err)`, `printSizeMm(pxW, pxH, dpi)`. Anchored resize without
+  resample = crop/pad around one of the nine anchors (masks pad
+  opaque, layers pad transparent); `resample=true` stretches the
+  full canvas content to the new size with bilinear filtering on
+  premultiplied RGBA (alpha-safe, documented as a stretch — the
+  anchor only positions non-resampled content). Crop = anchored
+  resize with the crop origin, refused outside the canvas.
+  `printSizeMm` = px / dpi * 25.4 (dpi <= 0 → 0, never NaN).
+- `openclip/selection.h` (new header): `AlphaPlane` (w, h, 0..255
+  alpha, no Canvas dependency) + `growPlane(plane, radius)` (max
+  filter, soft alpha preserved), `shrinkPlane(plane, radius)` (min
+  filter = contract), `featherPlane(plane, radius)` (separable box
+  blur, 2 passes), `fillPolygonPlane(plane, points)` (even-odd
+  scanline, polyline selection), `alphaPlaneFromSurface(surface,
+  threshold, plane)` ("select from layer alpha"), `planeCoverage`.
+  All deterministic, radius clamped 0..256, empty plane = no-op.
+- JNI additions (all three documented here BEFORE code):
+  - `nMergeLayers(handle, json): Boolean` — `{"op":"down"|"visible"
+    |"flatten"|"rasterize","index":N}`; one document-snapshot undo
+    step on success; false + document byte-identical on refusal.
+  - `nCanvasOp(handle, json): Boolean` — `{"op":"resize","w","h",
+    "anchor":"center","resample":true}` or `{"op":"crop","x","y",
+    "w","h"}` (applies to the current frame's canvas; one snapshot
+    undo step; clears the frame's vector path stacks, announced).
+  - `nLayerState` gains `"width"`/`"height"` (additive introspection,
+    NOT a new symbol): a structural undo can restore a different canvas
+    size and the app must follow it (the render loop reallocates its
+    frame buffers, the pixel-bound selection mirror is dropped).
+  - `nSelectionOp(handle, json, outPath): Boolean` — refines the
+    LIVE engine selection mask (an upload must have happened):
+    `{"op":"grow"|"shrink"|"feather","radius":N}` or
+    `{"op":"fromAlpha","index":N,"threshold":0..255}` (builds the
+    mask from a layer's alpha). Writes the resulting mask as a
+    white-on-black PNG to `outPath` (the app reloads it into its
+    Kotlin mirror — the mask stays the engine authority for engine
+    ops, V+2 contract). False + previous mask kept on bad
+    op/radius/index/path.
+- View flip (issue #28 §3, 0 new symbol, app-side 100%): the view
+  matrix gains `flipH`/`flipV`. The paper bitmap, guides, selection
+  ants and overlays are drawn through the same mirrored transform;
+  `screenToEngine` applies the inverse mirror, so stroke, selection
+  and ruler coordinates are never altered. No engine state is
+  touched — export bytes are identical by construction (locked by
+  an emulator test that exports PNG before and after a flip).
+- Reference photo panel (issue #28 §5, 0 new symbol, app-side
+  100%): `RefPhoto` (ui) owns a session-only bitmap + pan/zoom/fit
+  transform, independent from the document and from the M9 glTF
+  overlay (separate state, separate panel). Never touches layer
+  pixels, never exported.
+- Polyline selection (issue #28 §4) rides the existing app-side
+  `SelectionMask.setPolygon` (already used by the lasso): the tool
+  collects tap points, double-tap closes the loop; 0 engine.

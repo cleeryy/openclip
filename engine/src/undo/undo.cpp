@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "openclip/undo.h"
 
-#include "openclip/canvas.h"
+#include <utility>
 
 namespace openclip {
 
@@ -41,9 +41,10 @@ void History::endStroke(Canvas& c) {
         else
             c.layer(t.layer).surface.tileCopy(t.tx, t.ty, t.after);
     }
-    done_.push_back(std::move(cur_));
+    HistoryCommand cmd;
+    cmd.tiles = std::move(cur_.tiles);
     cur_.tiles.clear();
-    while (done_.size() > max_) done_.erase(done_.begin());
+    push(std::move(cmd));
 }
 
 void History::cancelStroke(Canvas& c) {
@@ -58,17 +59,51 @@ void History::cancelStroke(Canvas& c) {
     cur_.tiles.clear();
 }
 
+void History::beginSnapshot(const Canvas& c) {
+    // A structural op never rides an open stroke: drop the accumulator
+    // (the caller has already committed or cancelled its stroke).
+    open_ = false;
+    cur_.tiles.clear();
+    pendBefore_ = std::make_unique<Canvas>(c);
+}
+
+void History::cancelSnapshot() { pendBefore_.reset(); }
+
+void History::endSnapshot(const Canvas& c) {
+    if (!pendBefore_) return;
+    HistoryCommand cmd;
+    cmd.docBefore = std::move(pendBefore_);
+    cmd.docAfter = std::make_unique<Canvas>(c);
+    Surface before, after;
+    cmd.docBefore->composite(before);
+    cmd.docAfter->composite(after);
+    const bool changed = before.bytes() != after.bytes() ||
+                         cmd.docBefore->layerCount() != cmd.docAfter->layerCount();
+    if (!changed) return;  // refused/no-op op records nothing
+    push(std::move(cmd));
+}
+
+void History::push(HistoryCommand cmd) {
+    undone_.clear();
+    done_.push_back(std::move(cmd));
+    while (done_.size() > max_) done_.erase(done_.begin());
+}
+
 bool History::undo(Canvas& c) {
     if (done_.empty()) return false;
-    StrokeCommand s = std::move(done_.back());
+    HistoryCommand s = std::move(done_.back());
     done_.pop_back();
-    for (auto& t : s.tiles) {
-        if (t.layer >= c.layerCount()) continue;
-        if (t.mask) {
-            if (c.layer(t.layer).hasMask)
-                c.layer(t.layer).mask.tileRestore(t.tx, t.ty, t.before);
-        } else {
-            c.layer(t.layer).surface.tileRestore(t.tx, t.ty, t.before);
+    if (s.isDocument()) {
+        if (s.docBefore) c = *s.docBefore;
+    } else {
+        for (auto& t : s.tiles) {
+            if (t.layer >= c.layerCount()) continue;
+            if (t.mask) {
+                if (c.layer(t.layer).hasMask)
+                    c.layer(t.layer).mask.tileRestore(t.tx, t.ty, t.before);
+            } else {
+                c.layer(t.layer).surface.tileRestore(t.tx, t.ty, t.before);
+            }
         }
     }
     undone_.push_back(std::move(s));
@@ -77,15 +112,19 @@ bool History::undo(Canvas& c) {
 
 bool History::redo(Canvas& c) {
     if (undone_.empty()) return false;
-    StrokeCommand s = std::move(undone_.back());
+    HistoryCommand s = std::move(undone_.back());
     undone_.pop_back();
-    for (auto& t : s.tiles) {
-        if (t.layer >= c.layerCount()) continue;
-        if (t.mask) {
-            if (c.layer(t.layer).hasMask)
-                c.layer(t.layer).mask.tileRestore(t.tx, t.ty, t.after);
-        } else {
-            c.layer(t.layer).surface.tileRestore(t.tx, t.ty, t.after);
+    if (s.isDocument()) {
+        if (s.docAfter) c = *s.docAfter;
+    } else {
+        for (auto& t : s.tiles) {
+            if (t.layer >= c.layerCount()) continue;
+            if (t.mask) {
+                if (c.layer(t.layer).hasMask)
+                    c.layer(t.layer).mask.tileRestore(t.tx, t.ty, t.after);
+            } else {
+                c.layer(t.layer).surface.tileRestore(t.tx, t.ty, t.after);
+            }
         }
     }
     done_.push_back(std::move(s));
@@ -94,6 +133,7 @@ bool History::redo(Canvas& c) {
 
 void History::clear() {
     cur_.tiles.clear();
+    pendBefore_.reset();
     done_.clear();
     undone_.clear();
     open_ = false;
