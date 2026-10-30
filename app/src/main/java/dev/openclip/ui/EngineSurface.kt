@@ -11,6 +11,8 @@ import android.graphics.Bitmap
 import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
@@ -1957,8 +1959,11 @@ class EngineSurface @JvmOverloads constructor(
                     strokePointerId = sid
                     strokeOpenUi = true
                     enqueueMove(event, stylusIdx, p, MotionEvent.ACTION_DOWN)
+                    // B1: clone source is picked by a long press.
+                    armClonePress(event.getX(stylusIdx), event.getY(stylusIdx))
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    clonePressMoved(event.getX(stylusIdx), event.getY(stylusIdx))
                     // Slice 2 pipette loupe: drag streams live samples; a
                     // tap-armed pipette swallows moves (no stroke starts).
                     if (pipetteArmed) {
@@ -1986,6 +1991,16 @@ class EngineSurface @JvmOverloads constructor(
                 MotionEvent.ACTION_CANCEL -> {
                     if (pipetteArmed) {
                         onPipetteUp?.invoke()
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
+                    // B1: a fired clone long press swallows the lift (the
+                    // in-flight dab was rolled back; no ink on pick).
+                    cancelClonePress()
+                    if (consumeClonePick()) {
+                        stylusId = -1
+                        strokePointerId = -1
+                        strokeOpenUi = false
                         requestParentDisallowInterceptTouchEvent()
                         return true
                     }
@@ -2182,6 +2197,8 @@ class EngineSurface @JvmOverloads constructor(
                     strokePointerId = event.getPointerId(0)
                     strokeOpenUi = true
                     enqueueMove(event, 0, pressureOf(event.getPressure(0)), MotionEvent.ACTION_DOWN)
+                    // B1: clone source is picked by a long press.
+                    armClonePress(x, y)
                 }
             }
             MotionEvent.ACTION_MOVE -> {
@@ -2288,8 +2305,18 @@ class EngineSurface @JvmOverloads constructor(
                     if (action != MotionEvent.ACTION_POINTER_UP) edgeFired = false
                 } else if ((navigateMode && !isMouse) || mousePan) {
                     // Pan ends: nothing to enqueue.
+                    cancelClonePress()
                     strokePointerId = -1
                 } else {
+                    cancelClonePress()
+                    if (consumeClonePick()) {
+                        strokePointerId = -1
+                        edgeArmed = -1
+                        pendingStroke = false
+                        edgeFired = false
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     if (event.getPointerId(0) == strokePointerId) {
                         enqueueMove(event, 0, pressureOf(event.getPressure(0)), MotionEvent.ACTION_UP)
                     }
@@ -2309,6 +2336,7 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     private fun handleSingleMove(event: MotionEvent, x: Float, y: Float, mousePan: Boolean) {
+        clonePressMoved(x, y)
         val isMouse = event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE
         if ((navigateMode && !isMouse) || mousePan) {
             panBy(x - lastPanX, y - lastPanY)
@@ -2372,6 +2400,10 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     private fun enqueueMove(event: MotionEvent, idx: Int, pressure: Float, action: Int) {
+        // B1: after a fired clone long press the rest of the gesture never
+        // inks (the pick rolled the open stroke back; moves are swallowed
+        // until the lift).
+        if (clonePicked) return
         // Slice 5: every drawing point also feeds the cursor ring (finger
         // or stylus tip position + live pressure).
         if (!navigating && !pipetteArmed) {
@@ -3596,6 +3628,66 @@ class EngineSurface @JvmOverloads constructor(
     var onPaintMove: ((PaintTool, Float, Float) -> Unit)? = null
     var onPaintUp: ((PaintTool, Float, Float) -> Unit)? = null
 
+    // ---- B1 tampon de duplication (ARCHITECTURE.md "B1 additions" §3).
+    // Clone armed: a long press (550 ms without moving) picks the SOURCE
+    // point (engine coords) and rolls the in-flight dab back; a normal
+    // press still paints (the engine owns aligned/non-aligned offsets).
+    @Volatile var cloneArmed: Boolean = false
+    var onCloneSource: ((Float, Float) -> Unit)? = null
+    @Volatile var cloneSourceX: Float = -1f
+        private set
+    @Volatile var cloneSourceY: Float = -1f
+        private set
+    @Volatile private var clonePicked = false
+    private var clonePressRun: Runnable? = null
+    private var cloneDownX = 0f
+    private var cloneDownY = 0f
+    private val cloneHandler = Handler(Looper.getMainLooper())
+
+    private fun armClonePress(vx: Float, vy: Float) {
+        if (!cloneArmed || onCloneSource == null) return
+        cancelClonePress()
+        clonePicked = false
+        cloneDownX = vx
+        cloneDownY = vy
+        val run = Runnable {
+            clonePressRun = null
+            clonePicked = true
+            // Drop the queued dab and roll back the in-flight stroke so
+            // the long press leaves no ink (the navigation pattern).
+            synchronized(queue) { queue.clear() }
+            rollbackOpen = true
+            val (ex, ey) = screenToEngine(vx, vy)
+            cloneSourceX = ex
+            cloneSourceY = ey
+            onCloneSource?.invoke(ex, ey)
+            needsComposite = true
+        }
+        clonePressRun = run
+        cloneHandler.postDelayed(run, 550L)
+    }
+
+    private fun cancelClonePress() {
+        clonePressRun?.let { cloneHandler.removeCallbacks(it) }
+        clonePressRun = null
+    }
+
+    private fun clonePressMoved(vx: Float, vy: Float) {
+        if (clonePressRun == null) return
+        val slop = 12f * resources.displayMetrics.density
+        val dx = vx - cloneDownX
+        val dy = vy - cloneDownY
+        if (dx * dx + dy * dy > slop * slop) cancelClonePress()
+    }
+
+    private fun consumeClonePick(): Boolean {
+        if (!clonePicked) return false
+        clonePicked = false
+        synchronized(queue) { queue.clear() }
+        strokeOpenUi = false
+        return true
+    }
+
     private fun routePaintDown(vx: Float, vy: Float) {
         val tool = paintTool ?: return
         val (ex, ey) = screenToEngine(vx, vy)
@@ -3781,6 +3873,32 @@ class EngineSurface @JvmOverloads constructor(
     /** T5 §2: pixelize the live fill fiche (1 undo step, engine-side). */
     fun rasterizeFill(index: Int): Boolean =
         setLayerFill(index, "{\"bake\":true}")
+
+    // B1 (ARCHITECTURE.md "B1 additions" §3–§5): clone anchor, pattern
+    // brush spec and layer texture fiche. Meta ops refresh the composite
+    // and the history/journal like the T5 fiches.
+    fun setCloneSource(json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetCloneSource(handle, json) else false
+    }
+
+    fun setPatternBrush(json: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetPatternBrush(handle, json) else false
+    }
+
+    fun setLayerTexture(index: Int, json: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetLayerTexture(handle, index, json)
+            .also {
+                if (it) {
+                    needsComposite = true
+                    if (json != null) MacroJournal.record(
+                        "setLayerTexture",
+                        org.json.JSONObject().put("index", index)
+                            .put("json", json).toString()
+                    )
+                    notifyStrokeChanged("texture")
+                }
+            } else false
+    }
 
     // T5 §7: synchronous filter for macro replay (the queued
     // applyFilter is UI-async; replay needs ordered results).

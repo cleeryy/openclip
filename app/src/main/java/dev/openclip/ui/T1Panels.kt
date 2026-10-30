@@ -64,6 +64,9 @@ fun T1PanelHost(
     var bucketAa by remember(tool) { mutableStateOf(true) }
     var bucketExpand by remember(tool) { mutableIntStateOf(0) }
     var bucketMerged by remember(tool) { mutableStateOf(false) }
+    // B1 §1: fermeture de gaps + mode « entourer et remplir ».
+    var bucketGap by remember(tool) { mutableIntStateOf(0) }
+    var bucketSurround by remember(tool) { mutableStateOf(false) }
     var gradKind by remember(tool) { mutableStateOf("linear") }
     var gradDither by remember(tool) { mutableStateOf(true) }
     val gradStops = remember(tool) {
@@ -99,6 +102,7 @@ fun T1PanelHost(
     // changement (re-enregistrement leger, jamais de valeur stale).
     DisposableEffect(
         tool, bucketTol, bucketAa, bucketExpand, bucketMerged,
+        bucketGap, bucketSurround,
         gradKind, gradStops.toList(), gradAnchors.toList(), gradDither,
         shapeKind, shapeSides, shapeRot, shapeCorner,
         shapeFillOn, shapeFill, shapeStrokeOn, shapeStroke, shapeStrokeW,
@@ -110,7 +114,10 @@ fun T1PanelHost(
                     Thread {
                         val ok = surface.floodFillAt(
                             ex.toInt(), ey.toInt(), inkColor,
-                            bucketJson(bucketTol, bucketAa, bucketExpand, bucketMerged)
+                            bucketJson(
+                                bucketTol, bucketAa, bucketExpand,
+                                bucketMerged, bucketGap, bucketSurround
+                            )
                         )
                         if (!ok) err(R.string.t1_failed)
                     }.start()
@@ -241,7 +248,11 @@ fun T1PanelHost(
                 expand = bucketExpand,
                 onExpand = { bucketExpand = it },
                 merged = bucketMerged,
-                onMerged = { bucketMerged = it }
+                onMerged = { bucketMerged = it },
+                gap = bucketGap,
+                onGap = { bucketGap = it },
+                surround = bucketSurround,
+                onSurround = { bucketSurround = it }
             )
             PaintTool.GRADIENT -> GradientPanel(
                 kind = gradKind,
@@ -302,7 +313,11 @@ private fun BucketPanel(
     expand: Int,
     onExpand: (Int) -> Unit,
     merged: Boolean,
-    onMerged: (Boolean) -> Unit
+    onMerged: (Boolean) -> Unit,
+    gap: Int,
+    onGap: (Int) -> Unit,
+    surround: Boolean,
+    onSurround: (Boolean) -> Unit
 ) {
     val scroll = rememberScrollState()
     Row(
@@ -360,6 +375,32 @@ private fun BucketPanel(
             modifier = Modifier
                 .height(48.dp)
                 .testTag("t1-source-merged")
+        )
+        // B1 §1: gap closing (0/1/2/4 px) — the kernel closes gaps up to
+        // 2*gap px wide before flooding.
+        Text(
+            stringResource(R.string.b1_gap_label),
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.testTag("b1-gap-label")
+        )
+        listOf(0, 1, 2, 4).forEach { px ->
+            FilterChip(
+                selected = gap == px,
+                onClick = { onGap(px) },
+                label = { Text(if (px == 0) "0" else "≤${2 * px}px") },
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("b1-gap-$px")
+            )
+        }
+        // B1 §1: surround mode ("draw the enclosure, fill it").
+        FilterChip(
+            selected = surround,
+            onClick = { onSurround(!surround) },
+            label = { Text(stringResource(R.string.b1_surround)) },
+            modifier = Modifier
+                .height(48.dp)
+                .testTag("b1-surround")
         )
     }
 }

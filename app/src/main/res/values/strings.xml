@@ -741,4 +741,36 @@
     <string name="w1_ref_close">Close</string>
     <string name="w1_ref_empty">Import a photo to trace beside the canvas (never exported).</string>
     <string name="w1_ref_hint">Drag to pan, pinch to zoom. Session-only, independent of the document.</string>
+    <!-- B1 retouche et encrage (issue #30 tranche B) -->
+    <string name="b1_retouch">Retouch</string>
+    <string name="b1_smudge">Smudge</string>
+    <string name="b1_dodge">Dodge</string>
+    <string name="b1_burn">Burn</string>
+    <string name="b1_clone">Clone</string>
+    <string name="b1_pattern">Pattern</string>
+    <string name="b1_smudge_strength">Smudge %1$d%%</string>
+    <string name="b1_clone_aligned">Aligned</string>
+    <string name="b1_clone_sample_merged">Composite</string>
+    <string name="b1_clone_long_press">Long-press the canvas to set the source</string>
+    <string name="b1_clone_source_at">Source: %1$d, %2$d</string>
+    <string name="b1_clone_source_set">Clone source set (%1$d, %2$d)</string>
+    <string name="b1_motif_dots">Dots</string>
+    <string name="b1_motif_ring">Ring</string>
+    <string name="b1_motif_star">Star</string>
+    <string name="b1_motif_cross">Cross</string>
+    <string name="b1_motif_size">Size %1$d</string>
+    <string name="b1_spacing">Gap %1$d</string>
+    <string name="b1_rotation">%1$d°</string>
+    <string name="b1_jitter">Jit %1$d</string>
+    <string name="b1_jitter_rot">JitR %1$d°</string>
+    <string name="b1_seed">Seed %1$d</string>
+    <string name="b1_gap_label">Gap close</string>
+    <string name="b1_surround">Surround</string>
+    <string name="b1_texture_title">Layer texture</string>
+    <string name="b1_texture_non_destructive">Non-destructive — composite applies it, bake pixelizes once.</string>
+    <string name="b1_texture_paper">Paper</string>
+    <string name="b1_texture_canvas">Canvas</string>
+    <string name="b1_texture_grain">Grain</string>
+    <string name="b1_texture_scale">Scale %1$.2f</string>
+    <string name="b1_texture_strength">Strength %1$d%%</string>
 </resources>

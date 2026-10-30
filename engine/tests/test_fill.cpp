@@ -253,3 +253,149 @@ TEST(wand_mask_full_res) {
     }
     CHECK_EQ(selected, (16L * 16L));  // exactly the right half
 }
+
+// B1 (ARCHITECTURE.md "B1 additions" §1): gap closing. A broken line
+// with a 4 px hole leaks under the T1 kernel; dilating the barrier by
+// 2 px (gapPx = 2) bridges gaps up to 4 px, so the fill stays above.
+TEST(fill_gap_closing_bridges_small_gaps) {
+    auto brokenLine = [] {
+        Surface s(64, 64);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x) {
+                const bool line = y == 32 && (x < 30 || x >= 34);
+                s.set(x, y, line ? Pixel{0, 0, 0, 255}
+                                 : Pixel{255, 255, 255, 255});
+            }
+        return s;
+    };
+    FillParams p;
+    p.tolerance = 0.0f;
+    p.antialias = false;
+    std::string err;
+    Surface leak = brokenLine();
+    CHECK(openclip::floodFill(leak, 32, 10, 255, 0, 0, p, nullptr, 0, err));
+    // gapPx 0: the 4 px hole lets the fill reach the lower half
+    // (red = painted: g drops to 0).
+    CHECK_EQ(leak.get(32, 50).g, 0);
+    // gapPx 1 only closes 2 px: still leaks.
+    Surface half = brokenLine();
+    p.gapPx = 1;
+    CHECK(openclip::floodFill(half, 32, 10, 255, 0, 0, p, nullptr, 0, err));
+    CHECK_EQ(half.get(32, 50).g, 0);
+    // gapPx 2 closes the 4 px hole: the lower half stays byte-identical.
+    Surface closed = brokenLine();
+    p.gapPx = 2;
+    CHECK(openclip::floodFill(closed, 32, 10, 255, 0, 0, p, nullptr, 0, err));
+    CHECK_EQ(closed.get(32, 50).r, 255);
+    CHECK_EQ(closed.get(32, 50).g, 255);
+    CHECK_EQ(closed.get(10, 10).r, 255);
+    CHECK_EQ(closed.get(10, 10).g, 0);
+    // The grow-back restores the rim eaten by the closing: 1 px above
+    // the line is painted again, the line itself never is.
+    CHECK_EQ(closed.get(10, 31).g, 0);
+    CHECK_EQ(closed.get(10, 32).r, 0);
+    // Out-of-range gapPx = false + surface byte-identical.
+    Surface guard = brokenLine();
+    const Surface before = guard;
+    p.gapPx = 17;
+    CHECK(openclip::floodFill(guard, 32, 10, 255, 0, 0, p, nullptr, 0, err) ==
+          false);
+    bool same = true;
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x) {
+            const Pixel a = before.get(x, y);
+            const Pixel b = guard.get(x, y);
+            if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a)
+                same = false;
+        }
+    CHECK(same);
+}
+
+// B1 §1 surround: "draw the enclosure, fill it". Normal mode fills the
+// seed's cavity only; surround fills EVERY enclosed cavity in one
+// gesture, never the barrier itself.
+TEST(fill_surround_fills_enclosed_cavities) {
+    auto twoBoxes = [] {
+        Surface s(96, 64);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 96; ++x) s.set(x, y, Pixel{255, 255, 255, 255});
+        auto border = [&](int x0, int y0, int x1, int y1) {
+            for (int x = x0; x <= x1; ++x) {
+                s.set(x, y0, Pixel{0, 0, 0, 255});
+                s.set(x, y1, Pixel{0, 0, 0, 255});
+            }
+            for (int y = y0; y <= y1; ++y) {
+                s.set(x0, y, Pixel{0, 0, 0, 255});
+                s.set(x1, y, Pixel{0, 0, 0, 255});
+            }
+        };
+        border(8, 8, 24, 24);
+        border(56, 8, 72, 24);
+        return s;
+    };
+    FillParams p;
+    p.tolerance = 0.0f;
+    p.antialias = false;
+    std::string err;
+    Surface normal = twoBoxes();
+    CHECK(openclip::floodFill(normal, 16, 16, 255, 0, 0, p, nullptr, 0, err));
+    CHECK_EQ(normal.get(16, 16).g, 0);    // seed cavity painted
+    CHECK_EQ(normal.get(64, 16).g, 255);  // other cavity untouched
+    Surface surround = twoBoxes();
+    p.surround = true;
+    CHECK(openclip::floodFill(surround, 16, 16, 0, 0, 255, p, nullptr, 0,
+                              err));
+    CHECK_EQ(surround.get(16, 16).r, 0);  // blue there
+    CHECK_EQ(surround.get(16, 16).b, 255);
+    CHECK_EQ(surround.get(64, 16).b, 255);  // both cavities, one gesture
+    CHECK_EQ(surround.get(8, 16).b, 0);     // barrier never painted
+    CHECK_EQ(surround.get(8, 16).a, 255);
+    // Seed outside every cavity = refused + surface byte-identical.
+    Surface outside = twoBoxes();
+    const Surface before = outside;
+    CHECK(openclip::floodFill(outside, 2, 2, 255, 0, 0, p, nullptr, 0, err) ==
+          false);
+    bool same = true;
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 96; ++x) {
+            const Pixel a = before.get(x, y);
+            const Pixel b = outside.get(x, y);
+            if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a)
+                same = false;
+        }
+    CHECK(same);
+}
+
+// B1 §1: surround + gap closing together (the actual "broken enclosure"
+// gesture: a 2 px hole in the loop still fills the inside only).
+TEST(fill_surround_closes_broken_enclosure) {
+    Surface s(64, 64);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x) s.set(x, y, Pixel{255, 255, 255, 255});
+    for (int x = 16; x <= 48; ++x) {
+        if (x >= 30 && x <= 31) continue;  // 2 px hole in the top edge
+        s.set(x, 16, Pixel{0, 0, 0, 255});
+        s.set(x, 48, Pixel{0, 0, 0, 255});
+    }
+    for (int y = 16; y <= 48; ++y) {
+        s.set(16, y, Pixel{0, 0, 0, 255});
+        s.set(48, y, Pixel{0, 0, 0, 255});
+    }
+    FillParams p;
+    p.tolerance = 0.0f;
+    p.antialias = false;
+    p.gapPx = 1;
+    p.surround = true;
+    std::string err;
+    // gapPx 1 closes the 2 px hole; without it the border flood escapes
+    // through the hole and nothing is enclosed.
+    Surface closed = s;
+    CHECK(openclip::floodFill(closed, 32, 32, 0, 255, 0, p, nullptr, 0, err));
+    CHECK_EQ(closed.get(32, 32).g, 255);
+    CHECK_EQ(closed.get(20, 20).r, 0);
+    CHECK_EQ(closed.get(2, 2).g, 255);  // outside untouched
+    Surface open = s;
+    p.gapPx = 0;
+    CHECK(openclip::floodFill(open, 32, 32, 0, 255, 0, p, nullptr, 0, err) ==
+          false);
+}

@@ -55,6 +55,15 @@ struct Layer {
     std::string fillParams;  // raw span "mode|x0|y0|x1|y1|hue|scale|shine"
     bool hasFill() const { return !fillKind.empty(); }
 
+    // B1: non-destructive layer texture (ARCHITECTURE.md "B1
+    // additions" §5). Empty kind = no texture. The fiche paints no
+    // pixels: compositeInto modulates each pixel's straight colour
+    // through a deterministic height field (alpha untouched). Plain
+    // data: survives resize/copy/ORA like the M8/T5 fiches.
+    std::string textureKind;    // "" | "paper" | "canvas" | "grain"
+    std::string textureParams;  // "scale|strength|seed"
+    bool hasTexture() const { return !textureKind.empty(); }
+
     // M5: per-layer alpha mask (straight alpha in mask.a; rgb ignored).
     // Composite multiplies layer alpha by mask.a/255 per pixel when set.
     Surface mask;

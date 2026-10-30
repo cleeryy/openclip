@@ -11,6 +11,7 @@
 
 #include "openclip/anim.h"
 #include "openclip/fill_layer.h"
+#include "openclip/texture.h"
 
 namespace openclip {
 
@@ -106,6 +107,50 @@ inline std::vector<const Surface*> renderAllFills(
         ptrs[i] = &scratch[i];
     }
     return ptrs;
+}
+
+// B1: pre-render the texture height field of every textured layer of a
+// flat list (empty vector = no texture, strength 0 = identity).
+// Composite-time only: the fiche never commits pixels (ARCHITECTURE.md
+// "B1 additions" §5).
+struct TextureCache {
+    std::vector<std::vector<std::uint8_t>> heights;
+    std::vector<float> strength;
+    int w = 0;
+};
+
+inline TextureCache renderAllTextures(const std::vector<Layer>& layers, int w,
+                                      int h) {
+    TextureCache c;
+    c.w = w;
+    c.heights.resize(layers.size());
+    c.strength.assign(layers.size(), 0.0f);
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        const Layer& l = layers[i];
+        if (l.isGroup || !l.hasTexture()) continue;
+        TextureSpec spec;
+        std::string err;
+        if (!parseTextureFiche(l, spec, err)) continue;
+        if (spec.strength <= 0.0f) continue;
+        if (!renderTextureHeight(spec, w, h, c.heights[i], err)) continue;
+        c.strength[i] = spec.strength;
+    }
+    return c;
+}
+
+// Modulate one premultiplied pixel through the cached height field
+// (alpha untouched, rgb <= alpha preserved).
+inline void shadeTexture(Pixel& s, const TextureCache& c, std::size_t li,
+                         int x, int y) {
+    const float st = c.strength[li];
+    if (st <= 0.0f || s.a == 0) return;
+    const std::vector<std::uint8_t>& hgt = c.heights[li];
+    const std::size_t at = static_cast<std::size_t>(y) * c.w + x;
+    if (at >= hgt.size()) return;
+    const std::uint8_t hv = hgt[at];
+    s.r = textureShade(s.r, s.a, hv, st);
+    s.g = textureShade(s.g, s.a, hv, st);
+    s.b = textureShade(s.b, s.a, hv, st);
 }
 
 // Scale a premultiplied pixel by a 0..1 factor (rounded).
@@ -276,6 +321,7 @@ void compositePassThroughGroup(const Layer& g, Surface& out, int w, int h,
     std::vector<Surface> fillScratch;
     const std::vector<const Surface*> fillCache =
         renderAllFills(g.children, fillScratch, w, h);
+    const TextureCache texCache = renderAllTextures(g.children, w, h);
     // Effective mask = ancestor mask x group mask (alpha-only product).
     Surface combined;
     const Surface* effMask = mask;
@@ -361,6 +407,7 @@ void compositePassThroughGroup(const Layer& g, Surface& out, int w, int h,
                 Pixel s = childFill ? childFill->get(x, y)
                                     : layerPixel(child, childVec, x, y);
                 if (s.a == 0) continue;
+                shadeTexture(s, texCache, ci, x, y);
                 if (effMask) {
                     const std::uint8_t ma = effMask->get(x, y).a;
                     if (ma == 0) continue;
@@ -417,6 +464,7 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
     std::vector<Surface> fillScratch;
     const std::vector<const Surface*> fillCache =
         renderAllFills(layers, fillScratch, w, h);
+    const TextureCache texCache = renderAllTextures(layers, w, h);
     for (std::size_t li = 0; li < layers.size(); ++li) {
         const auto& l = layers[li];
         if (!l.visible || l.opacity <= 0.0f) continue;
@@ -513,6 +561,9 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                     }
                 }
                 if (s.a == 0) continue;
+                // B1: non-destructive texture modulation (before the
+                // mask/opacity/blend path, alpha untouched).
+                shadeTexture(s, texCache, li, x, y);
                 if (l.hasMask) {
                     const std::uint8_t ma = l.mask.get(x, y).a;
                     if (ma == 0) continue;

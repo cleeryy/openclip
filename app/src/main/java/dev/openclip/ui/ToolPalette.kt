@@ -86,6 +86,9 @@ fun ToolPalette(
     val avail = undoAvail ?: remember { UndoAvailability() }
     var showFilters by remember { mutableStateOf(false) }
     var showT1 by remember { mutableStateOf(false) }
+    // B1: retouch row (real brush modes, clone source, pattern motif).
+    var showRetouch by remember { mutableStateOf(false) }
+    val retouchUi = remember { RetouchUiState() }
     var showAdvanced by remember { mutableStateOf(false) }
     var symX by remember { mutableStateOf(false) }
     var symY by remember { mutableStateOf(false) }
@@ -301,6 +304,31 @@ fun ToolPalette(
                     .height(48.dp)
                     .testTag("tool-t1-toggle")
             )
+            // B1 (ARCHITECTURE.md "B1 additions" §2): retouch modes live
+            // in their own collapsible row, closed by default (chrome
+            // budget preserved).
+            FilterChip(
+                selected = showRetouch || prefs.retouchMode != "brush",
+                onClick = {
+                    showRetouch = !showRetouch
+                    if (!showRetouch && prefs.retouchMode != "brush") {
+                        prefs.chooseRetouchMode("brush")
+                        pushBrush()
+                    }
+                    toolTick++
+                },
+                label = {
+                    Text(
+                        stringResource(R.string.b1_retouch),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                },
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("tool-b1-toggle")
+            )
 
             // Compact inline size slider (active tool memory).
             Row(
@@ -507,6 +535,18 @@ fun ToolPalette(
                     )
                 }
             }
+        }
+
+        // B1: rangée de retouche (modes réels + motif + tampon).
+        if (showRetouch || prefs.retouchMode != "brush") {
+            RetouchBar(
+                surface = surface,
+                prefs = prefs,
+                ui = retouchUi,
+                onModeChanged = { pushBrush() },
+                onStatus = onStatus,
+                modifier = Modifier.padding(top = 2.dp)
+            )
         }
 
         // V+1: selection mode selector (shown while armed) + the

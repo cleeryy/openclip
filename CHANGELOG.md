@@ -28,6 +28,18 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
   long-press menu entry) and FR/EN labels for all 28 blend modes in
   the searchable picker (search matches name and label). 0 new JNI
   symbol.
+- Retouch and ink (issue #30 B1): bucket gap closing (0..16 px) and
+  the "surround and fill" mode (fills every enclosed cavity in one
+  gesture, seed must sit inside one); a real clone stamp (aligned /
+  non-aligned, source set by long press, per-layer or one-shot merged
+  sampling); smudge, dodge and burn as engine brush modes (pressure
+  sensitive, alpha-preserving); a pattern brush that stamps a
+  procedural motif along the stroke with spacing/scale/rotation and
+  seeded position/rotation jitter; and a non-destructive per-layer
+  paper/canvas/grain texture fiche (composite-time, bake optional).
+  ORA persists the texture fiche. 3 new JNI symbols
+  (`nSetCloneSource`, `nSetPatternBrush`, `nSetLayerTexture`); the
+  bucket and brush entry points grow JSON keys only. FR/EN strings.
 
 ## [0.2.0-alpha] — 2026-10-29
 

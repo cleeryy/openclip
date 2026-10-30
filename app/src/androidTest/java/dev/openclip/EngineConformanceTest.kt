@@ -12258,7 +12258,428 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         }
     }
 
+    // ================= B1 retouche et encrage (issue #30) =================
+    //
+    // Direct-JNI conformance: every tool produces ink (or a composite
+    // change) and undoes in ONE nUndo step. Engine unit tests lock the
+    // kernels; these lock the shim wiring (undo, guards, JSON keys).
+
+    private fun b1Composite(handle: Long, cw: Int = 128, ch: Int = 128): IntArray {
+        val px = IntArray(cw * ch)
+        assertEquals(cw * ch, EngineHost.nCompositeInto(handle, px, cw, ch))
+        return px
+    }
+
+    private fun b1SetBrush(handle: Long, mode: String, radius: Float = 6f) {
+        EngineHost.nSetBrush(
+            handle,
+            """{"radius":$radius,"hardness":1.0,"opaque":1.0,"spacing":0.2,"color":"#141414","mode":"$mode"}"""
+        )
+    }
+
+    private fun b1Line(
+        handle: Long,
+        x0: Float, y0: Float, x1: Float, y1: Float,
+        mode: String = "brush",
+        radius: Float = 2f
+    ) {
+        b1SetBrush(handle, mode, radius)
+        val id = EngineHost.nStrokeBegin(handle, x0, y0, 1f)
+        val steps = maxOf(1, (kotlin.math.abs(x1 - x0) + kotlin.math.abs(y1 - y0)).toInt() / 2)
+        for (i in 1..steps) {
+            val t = i.toFloat() / steps
+            EngineHost.nStrokeMove(handle, id, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 1f)
+        }
+        EngineHost.nStrokeEnd(handle, id)
+    }
+
+    /**
+     * B1 §3 UI plumbing: the Retouch row arms clone mode, a long press on
+     * the live surface picks the source (engine coords) and leaves no ink
+     * (the in-flight dab is rolled back).
+     */
+    @Test
+    fun b1CloneLongPressPicksSourceWithoutInk() {
+        val id = openFreshDoc("b1-clone-ui")
+        val es = freshSurface(id)
+        try {
+            composeRule.onNodeWithTag("tool-b1-toggle")
+                .performScrollTo()
+                .performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("b1-mode-clone")
+                .performScrollTo()
+                .performClick()
+            composeRule.waitForIdle()
+            assertTrue("clone mode must arm the long press", es.cloneArmed)
+            val (vx, vy) = es.engineToScreen(128f, 128f)
+            val t0 = SystemClock.uptimeMillis()
+            dispatchAll(es, simpleDown(t0, vx, vy))
+            Thread.sleep(900)
+            dispatchAll(
+                es,
+                MotionEvent.obtain(
+                    t0, t0 + 950, MotionEvent.ACTION_UP,
+                    vx, vy, 1f, 1f, 0, 1f, 1f, 0, 0
+                )
+            )
+            Thread.sleep(700)
+            assertTrue(
+                "long press must pick the clone source (got ${es.cloneSourceX})",
+                es.cloneSourceX >= 0f
+            )
+            val bmp = pullFull(es)
+            try {
+                assertEquals(
+                    "long press must not leave ink",
+                    -1, bmp.getPixel(128, 128)
+                )
+            } finally {
+                bmp.recycle()
+            }
+            // Leaving the row disarms the long press (no stray picking).
+            composeRule.onNodeWithTag("tool-b1-toggle")
+                .performScrollTo()
+                .performClick()
+            composeRule.waitForIdle()
+            assertFalse("closing the row disarms clone", es.cloneArmed)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    /** B1 §1: gap closing before the flood + one-step undo. */
+    @Test
+    fun b1BucketGapClosesBrokenLineAndUndoes() {
+        val handle = EngineHost.nInit(128, 128, 160f)
+        try {
+            // Black line at y=64 with a 6 px hole (x 60..65).
+            b1Line(handle, 0f, 64f, 59f, 64f)
+            b1Line(handle, 66f, 64f, 127f, 64f)
+            val before = b1Composite(handle)
+            // gap 0: the hole leaks (top fill reaches the lower half).
+            assertTrue(
+                "plain flood must leak through the broken line",
+                EngineHost.nFloodFill(
+                    handle, 64, 20, "#FF0000",
+                    """{"tolerance":0,"antialias":false,"gap":0}"""
+                )
+            )
+            val leaked = b1Composite(handle)
+            assertNotEquals(
+                "lower half must have been filled without gap closing",
+                -1, leaked[100 * 128 + 64]
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "one undo restores the pre-fill composite",
+                b1Composite(handle).contentEquals(before)
+            )
+            // gap 4: closes the 6 px hole (8 px reach) — the lower half
+            // stays white, the upper half is green.
+            assertTrue(
+                EngineHost.nFloodFill(
+                    handle, 64, 20, "#00FF00",
+                    """{"tolerance":0,"antialias":false,"gap":4}"""
+                )
+            )
+            val closed = b1Composite(handle)
+            assertEquals("gap closed: below untouched", -1, closed[100 * 128 + 64])
+            assertEquals(
+                "above painted green", 0xFF00FF00.toInt(), closed[20 * 128 + 64]
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "gap-closed fill is ONE undo step",
+                b1Composite(handle).contentEquals(before)
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    /** B1 §1: surround fills every enclosed cavity in one gesture. */
+    @Test
+    fun b1SurroundFillsEnclosedCavitiesAndUndoes() {
+        val handle = EngineHost.nInit(128, 128, 160f)
+        try {
+            // Two closed boxes drawn with strokes.
+            b1Line(handle, 20f, 20f, 50f, 20f)
+            b1Line(handle, 50f, 20f, 50f, 50f)
+            b1Line(handle, 50f, 50f, 20f, 50f)
+            b1Line(handle, 20f, 50f, 20f, 20f)
+            b1Line(handle, 78f, 20f, 108f, 20f)
+            b1Line(handle, 108f, 20f, 108f, 50f)
+            b1Line(handle, 108f, 50f, 78f, 50f)
+            b1Line(handle, 78f, 50f, 78f, 20f)
+            val before = b1Composite(handle)
+            // Normal flood: seed cavity only.
+            assertTrue(
+                EngineHost.nFloodFill(
+                    handle, 35, 35, "#FF0000",
+                    """{"tolerance":0,"antialias":false}"""
+                )
+            )
+            val normal = b1Composite(handle)
+            assertEquals("normal fill paints the seed cavity", 0xFFFF0000.toInt(), normal[35 * 128 + 35])
+            assertEquals("other cavity untouched", -1, normal[35 * 128 + 93])
+            assertTrue(EngineHost.nUndo(handle))
+            // Surround: both cavities, barrier untouched, one undo.
+            assertTrue(
+                EngineHost.nFloodFill(
+                    handle, 35, 35, "#0000FF",
+                    """{"tolerance":0,"antialias":false,"surround":true}"""
+                )
+            )
+            val surround = b1Composite(handle)
+            assertEquals("seed cavity filled", 0xFF0000FF.toInt(), surround[35 * 128 + 35])
+            assertEquals("other cavity filled too", 0xFF0000FF.toInt(), surround[35 * 128 + 93])
+            // The barrier keeps its own ink (#141414 stroke), never blue.
+            assertEquals(
+                "barrier not painted",
+                0xFF141414.toInt(), surround[20 * 128 + 35]
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "surround is ONE undo step",
+                b1Composite(handle).contentEquals(before)
+            )
+            // Surround refuses a seed outside every cavity (no undo entry:
+            // the previous composite survives and the stack depth is the
+            // same — a second undo goes back to the strokes before).
+            assertFalse(
+                EngineHost.nFloodFill(
+                    handle, 4, 4, "#0000FF",
+                    """{"tolerance":0,"antialias":false,"surround":true}"""
+                )
+            )
+            assertTrue(b1Composite(handle).contentEquals(before))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    /** B1 §3: clone stamp aligned vs non-aligned + one-step undo. */
+    @Test
+    fun b1CloneStampAlignmentSamplesAndUndoes() {
+        val handle = EngineHost.nInit(128, 128, 160f)
+        try {
+            // Red patch on the base layer (T1 figure, fill only).
+            assertTrue(
+                EngineHost.nStampShape(
+                    handle,
+                    """{"kind":"rect","x0":8,"y0":8,"x1":24,"y1":24,"fillOn":true,"fill":"#FF0000","strokeOn":false}"""
+                )
+            )
+            val withPatch = b1Composite(handle)
+            // Non-aligned: every stroke re-anchors at (16,16).
+            assertTrue(
+                EngineHost.nSetCloneSource(
+                    handle,
+                    """{"x":16,"y":16,"aligned":false,"sample":"layer"}"""
+                )
+            )
+            b1SetBrush(handle, "clone", 6f)
+            b1Line(handle, 70f, 70f, 90f, 70f, "clone", 6f)
+            val first = b1Composite(handle)
+            val redAt70 = first[70 * 128 + 70]
+            assertTrue(
+                "clone must copy the red patch (got ${Integer.toHexString(redAt70)})",
+                ((redAt70 shr 16) and 0xFF) > 180 && ((redAt70 shr 8) and 0xFF) < 90
+            )
+            b1Line(handle, 110f, 110f, 118f, 110f, "clone", 6f)
+            val second = b1Composite(handle)
+            assertTrue(
+                "non-aligned clone re-anchors on every stroke",
+                ((second[110 * 128 + 110] shr 16) and 0xFF) > 180
+            )
+            // Undo both clone strokes: back to the patch composite.
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "two clone strokes = two undo steps",
+                b1Composite(handle).contentEquals(withPatch)
+            )
+            // Aligned: the offset survives the second stroke, so sampling
+            // at (110,110) reads (56,56) — outside the patch (white).
+            assertTrue(
+                EngineHost.nSetCloneSource(
+                    handle,
+                    """{"x":16,"y":16,"aligned":true,"sample":"layer"}"""
+                )
+            )
+            b1Line(handle, 70f, 70f, 90f, 70f, "clone", 6f)
+            b1Line(handle, 110f, 110f, 118f, 110f, "clone", 6f)
+            val aligned = b1Composite(handle)
+            assertEquals(
+                "aligned clone keeps sampling the same offset (white here)",
+                -1, aligned[110 * 128 + 110]
+            )
+            // A long-press re-anchor resets even in aligned mode.
+            assertTrue(
+                EngineHost.nSetCloneSource(
+                    handle,
+                    """{"x":16,"y":16,"aligned":true,"sample":"layer"}"""
+                )
+            )
+            b1Line(handle, 110f, 110f, 118f, 110f, "clone", 6f)
+            val reanchored = b1Composite(handle)
+            assertTrue(
+                "fresh anchor samples the patch again",
+                ((reanchored[110 * 128 + 110] shr 16) and 0xFF) > 180
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    /** B1 §2: smudge, dodge and burn produce ink and undo in one step. */
+    @Test
+    fun b1SmudgeDodgeBurnProduceInkAndUndo() {
+        val handle = EngineHost.nInit(128, 128, 160f)
+        try {
+            // Flat mid-gray base.
+            assertTrue(
+                EngineHost.nFloodFill(
+                    handle, 4, 4, "#808080", """{"tolerance":0.1}"""
+                )
+            )
+            val gray = b1Composite(handle)
+            assertEquals(0xFF808080.toInt(), gray[40 * 128 + 40])
+            // Dodge brightens existing pixels.
+            b1Line(handle, 20f, 20f, 60f, 20f, "dodge", 12f)
+            val dodged = b1Composite(handle)
+            assertTrue(
+                "dodge must brighten",
+                ((dodged[20 * 128 + 40] shr 16) and 0xFF) > 0x80
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue("dodge is ONE undo step", b1Composite(handle).contentEquals(gray))
+            // Burn darkens.
+            b1Line(handle, 20f, 20f, 60f, 20f, "burn", 12f)
+            val burned = b1Composite(handle)
+            assertTrue(
+                "burn must darken",
+                ((burned[20 * 128 + 40] shr 16) and 0xFF) < 0x80
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue("burn is ONE undo step", b1Composite(handle).contentEquals(gray))
+            // Smudge: black band then a horizontal smudge across it moves
+            // paint to the right.
+            b1Line(handle, 50f, 10f, 50f, 60f, "brush", 5f)
+            val band = b1Composite(handle)
+            b1Line(handle, 40f, 35f, 70f, 35f, "smudge", 10f)
+            val smudged = b1Composite(handle)
+            val rightOfBand = smudged[35 * 128 + 58]
+            assertTrue(
+                "smudge must carry paint right of the band (got ${Integer.toHexString(rightOfBand)})",
+                rightOfBand != -1 && rightOfBand != band[35 * 128 + 58]
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue("smudge is ONE undo step", b1Composite(handle).contentEquals(band))
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    /** B1 §4: pattern brush stamps along the stroke + one-step undo. */
+    @Test
+    fun b1PatternBrushStampsAlongStrokeAndUndoes() {
+        val handle = EngineHost.nInit(128, 128, 160f)
+        try {
+            val before = b1Composite(handle)
+            assertTrue(
+                EngineHost.nSetPatternBrush(
+                    handle,
+                    """{"motif":"dots","size":16,"spacing":24,"scale":1,"rotation":0,"jitterPos":0,"jitterRot":0,"seed":3,"alongPath":true,"color":"#202020"}"""
+                )
+            )
+            b1Line(handle, 20f, 64f, 108f, 64f, "pattern", 10f)
+            val stamped = b1Composite(handle)
+            val ink = stamped.indices.count { stamped[it] != -1 }
+            assertTrue("pattern stroke must stamp ink, got $ink", ink > 100)
+            // Spacing 24 > motif 16 leaves blank pixels between stamps.
+            var gaps = 0
+            for (x in 26..104) if (stamped[64 * 128 + x] == -1) gaps++
+            assertTrue("spacing must leave gaps between motifs, got $gaps", gaps > 10)
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "pattern stroke is ONE undo step",
+                b1Composite(handle).contentEquals(before)
+            )
+            // Unknown motif refused (previous tile kept, no crash).
+            assertFalse(
+                EngineHost.nSetPatternBrush(handle, """{"motif":"marble"}""")
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
+    /** B1 §5: layer texture is non-destructive, bake is one undo step. */
+    @Test
+    fun b1LayerTextureNonDestructiveAndBake() {
+        val handle = EngineHost.nInit(128, 128, 160f)
+        try {
+            assertTrue(
+                EngineHost.nFloodFill(
+                    handle, 4, 4, "#B4783C", """{"tolerance":0.1}"""
+                )
+            )
+            val before = b1Composite(handle)
+            assertTrue(
+                EngineHost.nSetLayerTexture(
+                    handle, 0,
+                    """{"kind":"canvas","scale":1.5,"strength":0.6,"seed":3}"""
+                )
+            )
+            assertTrue(
+                "layer state must expose the texture fiche",
+                EngineHost.nLayerState(handle).contains("\"texture\"")
+            )
+            val textured = b1Composite(handle)
+            assertFalse(
+                "texture must modulate the composite",
+                textured.contentEquals(before)
+            )
+            // Clear = exact previous composite (non-destructive).
+            assertTrue(EngineHost.nSetLayerTexture(handle, 0, null))
+            assertTrue(
+                "clearing the fiche restores the exact composite",
+                b1Composite(handle).contentEquals(before)
+            )
+            // Re-apply then bake: one undo step back to the untextured pixels.
+            assertTrue(
+                EngineHost.nSetLayerTexture(
+                    handle, 0,
+                    """{"kind":"paper","scale":2,"strength":0.5,"seed":9}"""
+                )
+            )
+            assertTrue(EngineHost.nSetLayerTexture(handle, 0, """{"bake":true}"""))
+            assertFalse(
+                "bake clears the fiche",
+                EngineHost.nLayerState(handle).contains("\"texture\"")
+            )
+            assertFalse(
+                "baked pixels stay textured",
+                b1Composite(handle).contentEquals(before)
+            )
+            assertTrue(EngineHost.nUndo(handle))
+            assertTrue(
+                "bake is ONE undo step",
+                b1Composite(handle).contentEquals(before)
+            )
+            // Refused kinds: unknown texture kind leaves the layer intact.
+            assertFalse(
+                EngineHost.nSetLayerTexture(handle, 0, """{"kind":"marble"}""")
+            )
+        } finally {
+            EngineHost.nDispose(handle)
+        }
+    }
+
     /** A2: best-effort UI screenshot into the app cache (proof shots). */
+
     private fun shot(name: String) {
         try {
             if (android.os.Build.VERSION.SDK_INT >= 29) {

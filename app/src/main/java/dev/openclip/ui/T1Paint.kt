@@ -134,15 +134,29 @@ fun combineMaskKotlin(dst: ByteArray, src: BooleanArray, mode: Int) {
     }
 }
 
-/** Construit le JSON nFloodFill (clés M3 : inconnues ignorées moteur). */
-fun bucketJson(tolerance: Float, antialias: Boolean, expandPx: Int, sampleMerged: Boolean): String =
+/**
+ * Construit le JSON nFloodFill (clés M3 : inconnues ignorées moteur).
+ * B1 §1 : `gap` (0..16 px, fermeture de gaps avant flood) et
+ * `surround` (« entourer et remplir ») — défauts 0/false = noyau T1
+ * byte-identique.
+ */
+fun bucketJson(
+    tolerance: Float,
+    antialias: Boolean,
+    expandPx: Int,
+    sampleMerged: Boolean,
+    gap: Int = 0,
+    surround: Boolean = false
+): String =
     String.format(
         Locale.US,
-        """{"tolerance":%.3f,"antialias":%s,"expandPx":%d,"sampleMerged":%s}""",
+        """{"tolerance":%.3f,"antialias":%s,"expandPx":%d,"sampleMerged":%s,"gap":%d,"surround":%s}""",
         tolerance.coerceIn(0f, 1f),
         if (antialias) "true" else "false",
         expandPx.coerceIn(0, 2),
-        if (sampleMerged) "true" else "false"
+        if (sampleMerged) "true" else "false",
+        gap.coerceIn(0, 16),
+        if (surround) "true" else "false"
     )
 
 /** Construit le JSON nMagicWand. */

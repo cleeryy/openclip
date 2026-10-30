@@ -155,4 +155,11 @@ object EngineHost {
     external fun nMergeLayers(handle: Long, json: String): Boolean
     external fun nCanvasOp(handle: Long, json: String): Boolean
     external fun nSelectionOp(handle: Long, json: String, outPath: String): Boolean
+
+    // B1 additions (ARCHITECTURE.md "B1 additions", issue #30 slice B):
+    // clone source anchor (long press), pattern brush tile/spec and the
+    // non-destructive layer texture fiche ({"bake":true} pixelizes).
+    external fun nSetCloneSource(handle: Long, json: String): Boolean
+    external fun nSetPatternBrush(handle: Long, json: String): Boolean
+    external fun nSetLayerTexture(handle: Long, index: Int, json: String?): Boolean
 }

@@ -34,7 +34,9 @@
 #include <cstdlib>
 #include <map>
 #include <new>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "openclip/anim.h"
@@ -48,6 +50,8 @@
 #include "openclip/cels.h"
 #include "openclip/filters.h"
 #include "openclip/fill.h"
+#include "openclip/retouch.h"
+#include "openclip/texture.h"
 #include "openclip/fill_layer.h"
 #include "openclip/gif.h"
 #include "openclip/gradient.h"
@@ -182,6 +186,20 @@ struct Session {
     bool eraser = false;
     bool alphaEraser = false;
     bool strokeOpen = false;
+    // B1 retouch brushes (ARCHITECTURE.md "B1 additions" §2–§4): real
+    // dab modes routed in paintStamp. "brush"/"alpha-erase"/"eraser"
+    // keep the legacy flags above; these four are new tool modes.
+    enum class ToolMode { Paint, Smudge, Dodge, Burn, Clone, Pattern };
+    ToolMode toolMode = ToolMode::Paint;
+    float smudgeStrength = 0.5f;
+    openclip::SmudgeState smudge;      // carried paint (per stroke)
+    openclip::CloneAnchor clone;       // long-press anchor + offset
+    bool cloneSampleMerged = false;    // "merged" vs "layer" sampling
+    openclip::Surface cloneSnapshot;   // one composite pull per stroke
+    openclip::PatternSpec pattern;     // walker spec (nSetPatternBrush)
+    openclip::Surface patternTile;     // procedural motif
+    bool patternReady = false;
+    std::optional<openclip::PatternWalker> patternWalker;
     float lastX = 0.0f, lastY = 0.0f, lastP = 1.0f;
     // M5: per-session mask-edit target (index + on/off). When on and the
     // active layer owns a mask, paintStamp resolves dabs to mask alpha:
@@ -305,7 +323,8 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
     if (layer >= static_cast<std::size_t>(cur(s).layerCount())) return false;
     if (cur(s).layer(layer).locked) return false;  // T5 §1: refused
     if (s->maskTargetOn && static_cast<int>(layer) == s->maskTarget &&
-        cur(s).layer(layer).hasMask) {
+        cur(s).layer(layer).hasMask &&
+        s->toolMode == Session::ToolMode::Paint) {
         // Ink luminance drives mask alpha (white keeps, black hides);
         // alpha-erase and eraser flags do not apply to masks: the V+1
         // rule stamps BLACK (hide) for alpha-erase, session ink for
@@ -325,21 +344,63 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
         openclip::paintMaskDab(cur(s).layer(layer).mask, stamped, s->brush);
         return true;
     }
+    // B1 §2–§3: retouch modes have their own guards. A clone without a
+    // source anchor and a pattern without a tile paint nothing (refused
+    // BEFORE any tile snapshot: zero touched tiles = no undo entry).
+    if (s->toolMode == Session::ToolMode::Clone &&
+        !openclip::cloneReady(s->clone))
+        return false;
+    if (s->toolMode == Session::ToolMode::Pattern &&
+        (!s->patternReady || s->patternTile.empty()))
+        return false;
+    // B1: the four retouch modes are pixel tools — an armed mask target
+    // keeps the M5 brush/eraser behaviour only (refused, no tile).
+    if (s->maskTargetOn && static_cast<int>(layer) == s->maskTarget &&
+        cur(s).layer(layer).hasMask &&
+        s->toolMode != Session::ToolMode::Paint)
+        return false;
     for (int ty = ty0; ty <= ty1; ++ty)
         for (int tx = tx0; tx <= tx1; ++tx)
             hist(s).touchTile(cur(s), layer, tx, ty);
     // T5 §1 verrou alpha: the dab only lands on covered pixels
     // (dst.a > 0) — ink is kept where the layer is transparent.
     const bool aLock = cur(s).layer(layer).alphaLock;
-    if (s->alphaEraser) {
-        openclip::eraseDab(cur(s).layer(layer).surface,
-                           openclip::dabFromPressure(s->brush, dab.x, dab.y,
-                                                    dab.pressure, dab.r,
-                                                    dab.g, dab.b),
-                           s->brush);
-    } else {
-        openclip::paintDab(cur(s).layer(layer).surface, dab, s->brush,
-                           aLock);
+    openclip::Surface& surf = cur(s).layer(layer).surface;
+    switch (s->toolMode) {
+        case Session::ToolMode::Clone: {
+            // §3: the source is the one snapshot taken at stroke begin
+            // (active layer, or the merged composite) — the live surface
+            // only when a snapshot could not be taken.
+            const openclip::Surface& src =
+                s->cloneSnapshot.empty() ? cur(s).layer(layer).surface
+                                         : s->cloneSnapshot;
+            openclip::cloneDab(surf, src, dab, s->brush, s->clone.offX,
+                               s->clone.offY);
+            break;
+        }
+        case Session::ToolMode::Smudge:
+            // §2: real smudge with the carried paint state.
+            openclip::smudgeDab(surf, dab, s->brush, s->smudge,
+                                s->smudgeStrength);
+            break;
+        case Session::ToolMode::Dodge:
+            openclip::dodgeBurnDab(surf, dab, s->brush, false);
+            break;
+        case Session::ToolMode::Burn:
+            openclip::dodgeBurnDab(surf, dab, s->brush, true);
+            break;
+        default:
+            if (s->alphaEraser) {
+                openclip::eraseDab(
+                    surf,
+                    openclip::dabFromPressure(s->brush, dab.x, dab.y,
+                                              dab.pressure, dab.r, dab.g,
+                                              dab.b),
+                    s->brush);
+            } else {
+                openclip::paintDab(surf, dab, s->brush, aLock);
+            }
+            break;
     }
     return true;
 }
@@ -355,6 +416,37 @@ bool stampResolved(Session* s, const openclip::Dab& d) {
                   : openclip::dabFromPressure(s->brush, d.x, d.y, d.pressure,
                                               s->r, s->g, s->b);
     return paintStamp(s, stamped);
+}
+
+// B1 §4: stamp one pattern motif with the shared tile-snapshot undo and
+// the same layer guards as a brush dab (locked / mask target / alpha
+// lock). Refused before any tile snapshot = no undo entry.
+bool stampPatternResolved(Session* s, const openclip::PatternStamp& ps,
+                          float opacity) {
+    if (!s->patternReady || s->patternTile.empty()) return false;
+    const std::size_t layer = static_cast<std::size_t>(
+        cur(s).activeLayer() < 0 ? 0 : cur(s).activeLayer());
+    if (layer >= static_cast<std::size_t>(cur(s).layerCount())) return false;
+    const openclip::Layer& ly = cur(s).layer(layer);
+    if (ly.locked) return false;
+    if (s->maskTargetOn && static_cast<int>(layer) == s->maskTarget &&
+        ly.hasMask)
+        return false;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    openclip::patternStampBounds(ps, s->patternTile.width(),
+                                 s->patternTile.height(), x0, y0, x1, y1);
+    x0 = std::max(0, x0);
+    y0 = std::max(0, y0);
+    x1 = std::min(cur(s).width() - 1, x1);
+    y1 = std::min(cur(s).height() - 1, y1);
+    if (x1 < x0 || y1 < y0) return false;  // off-canvas stamp
+    const int t = openclip::kTileSize;
+    for (int ty = y0 / t; ty <= y1 / t; ++ty)
+        for (int tx = x0 / t; tx <= x1 / t; ++tx)
+            hist(s).touchTile(cur(s), layer, tx, ty);
+    openclip::stampPattern(cur(s).layer(layer).surface, s->patternTile, ps,
+                           opacity, ly.alphaLock);
+    return true;
 }
 
 // M6 rulers: project one input point to the active ruler (ellipse
@@ -433,6 +525,25 @@ void rulerStamp(Session* s, float x, float y, float pressure) {
                 collectSnapPoints(cur(s).layer(li), pts);
             openclip::snapPathPoints(pts, px, py, s->snapTol);
         }
+    }
+    // B1 §4: pattern strokes own their spacing/rotation walk (no round
+    // dabs); symmetry mirrors are not applied to pattern stamps
+    // (documented limitation), rulers still transform the input points.
+    if (s->toolMode == Session::ToolMode::Pattern) {
+        if (!s->patternReady || s->patternTile.empty()) return;
+        if (!s->patternWalker) s->patternWalker.emplace(s->pattern);
+        if (!s->strokeOpen)
+            s->patternWalker->begin(px, py, mappedP);
+        else
+            s->patternWalker->to(px, py, mappedP);
+        const float opacity = s->brush.opaque * mappedP;
+        for (const auto& ps : s->patternWalker->take())
+            stampPatternResolved(s, ps, opacity);
+        s->lastX = px;
+        s->lastY = py;
+        s->lastP = mappedP;
+        s->strokeOpen = true;
+        return;
     }
     const float x0 = s->strokeOpen ? s->lastX : px;
     const float y0 = s->strokeOpen ? s->lastY : py;
@@ -541,6 +652,18 @@ Java_dev_openclip_engine_EngineHost_nSetBrush(JNIEnv* env, jclass,
         s->eraser = false;
         s->alphaEraser = false;
     }
+    // B1 §2–§4 retouch modes (ARCHITECTURE.md "B1 additions"): real dab
+    // modes routed in paintStamp; erase aliases above keep their legacy
+    // flag path. Unknown/missing mode = plain brush (M3 rule).
+    s->toolMode = Session::ToolMode::Paint;
+    if (mode == "smudge") s->toolMode = Session::ToolMode::Smudge;
+    else if (mode == "dodge") s->toolMode = Session::ToolMode::Dodge;
+    else if (mode == "burn") s->toolMode = Session::ToolMode::Burn;
+    else if (mode == "clone") s->toolMode = Session::ToolMode::Clone;
+    else if (mode == "pattern") s->toolMode = Session::ToolMode::Pattern;
+    const float smudge =
+        static_cast<float>(jsonNum(j, "smudgeStrength", s->smudgeStrength));
+    s->smudgeStrength = smudge < 0.0f ? 0.0f : (smudge > 1.0f ? 1.0f : smudge);
     const std::string color = jsonStr(j, "color");
     if (!color.empty()) parseColor(color, s->r, s->g, s->b);
 }
@@ -924,6 +1047,15 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
         appendJsonStr(out, l.fillStops);
         out += ",\"params\":";
         appendJsonStr(out, l.fillParams);
+        out += "}";
+    }
+    // B1 §5: texture fiche (absent = no texture; the app shows the T
+    // badge + re-edit).
+    if (l.hasTexture()) {
+        out += ",\"texture\":{\"kind\":";
+        appendJsonStr(out, l.textureKind);
+        out += ",\"params\":";
+        appendJsonStr(out, l.textureParams);
         out += "}";
     }
     // T3: key count badge (top-level only, -1 = child entry).
@@ -1496,6 +1628,26 @@ Java_dev_openclip_engine_EngineHost_nStrokeBegin(JNIEnv*, jclass, jlong handle,
     if (!s) return 0;
     s->strokeOpen = false;
     hist(s).beginStroke();
+    // B1: per-stroke retouch state (clone offset/one composite pull,
+    // fresh smudge carry, fresh pattern walk).
+    if (s->toolMode == Session::ToolMode::Clone) {
+        openclip::cloneStrokeBegin(s->clone, x, y);
+        // One source snapshot per stroke (both sampling modes): a clone
+        // stroke never feeds back into its own output.
+        if (s->cloneSampleMerged) {
+            cur(s).composite(s->cloneSnapshot);
+        } else {
+            const std::size_t li = static_cast<std::size_t>(
+                cur(s).activeLayer() < 0 ? 0 : cur(s).activeLayer());
+            if (li < static_cast<std::size_t>(cur(s).layerCount()))
+                s->cloneSnapshot = cur(s).layer(li).surface;
+        }
+    } else if (s->toolMode == Session::ToolMode::Smudge) {
+        s->smudge = openclip::SmudgeState{};
+    } else if (s->toolMode == Session::ToolMode::Pattern) {
+        s->patternWalker.reset();
+        if (s->patternReady) s->patternWalker.emplace(s->pattern);
+    }
     rulerStamp(s, x, y, pressure);
     // M6: rulers transform input here. Stroke ids are cosmetic (single
     // render thread).
@@ -1995,6 +2147,9 @@ Java_dev_openclip_engine_EngineHost_nFloodFill(JNIEnv* env, jclass,
         static_cast<float>(jsonNum(j, "tolerance", p.tolerance));
     p.antialias = jsonBool(j, "antialias", p.antialias);
     p.expandPx = static_cast<int>(jsonNum(j, "expandPx", p.expandPx));
+    // B1 §1: gap closing (0..16 px, kernel-validated) + surround mode.
+    p.gapPx = static_cast<int>(jsonNum(j, "gap", p.gapPx));
+    p.surround = jsonBool(j, "surround", p.surround);
     const bool merged = jsonBool(j, "sampleMerged", false);
     int stride = 0;
     const std::uint8_t* mask = paintMask(s, stride);
@@ -3805,6 +3960,143 @@ Java_dev_openclip_engine_EngineHost_nSetLayerFill(JNIEnv* env, jclass,
     l.fillColor = color;
     l.fillStops = stops;
     l.fillParams = params;
+    return JNI_TRUE;
+}
+
+// B1 §3: clone source anchor (long press). {x,y,aligned,sample} or
+// {clear:true}. False + previous source kept on bad point/JSON.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetCloneSource(JNIEnv* env, jclass,
+                                                    jlong handle,
+                                                    jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !json) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    if (jsonBool(j, "clear", false)) {
+        s->clone = openclip::CloneAnchor{};
+        s->cloneSnapshot = openclip::Surface();
+        return JNI_TRUE;
+    }
+    const double x = jsonNum(j, "x", -1e9);
+    const double y = jsonNum(j, "y", -1e9);
+    if (x < 0 || y < 0 || x > cur(s).width() || y > cur(s).height())
+        return JNI_FALSE;
+    const std::string sample = jsonStr(j, "sample");
+    s->cloneSampleMerged = (sample == "merged");
+    openclip::cloneSetSource(s->clone, static_cast<float>(x),
+                             static_cast<float>(y),
+                             jsonBool(j, "aligned", false));
+    return JNI_TRUE;
+}
+
+// B1 §4: pattern brush setup. Builds the procedural motif tile once;
+// {clear:true} disarms. Unknown keys ignored, missing = defaults (M3
+// rule), out-of-range values clamped.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetPatternBrush(JNIEnv* env, jclass,
+                                                     jlong handle,
+                                                     jstring json) {
+    Session* s = asSession(handle);
+    if (!s || !json) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    if (jsonBool(j, "clear", false)) {
+        s->patternReady = false;
+        s->patternTile = openclip::Surface();
+        s->patternWalker.reset();
+        return JNI_TRUE;
+    }
+    std::string motif = jsonStr(j, "motif");
+    if (motif.empty()) motif = "dots";
+    std::string color = jsonStr(j, "color");
+    std::uint8_t cr = s->r, cg = s->g, cb = s->b;
+    if (!color.empty() && !parseColor(color, cr, cg, cb)) return JNI_FALSE;
+    int size = static_cast<int>(jsonNum(j, "size", 32));
+    size = std::max(8, std::min(128, size));
+    openclip::Surface tile;
+    std::string err;
+    if (!openclip::proceduralMotif(motif, size, cr, cg, cb, tile, err))
+        return JNI_FALSE;
+    openclip::PatternSpec spec;
+    spec.spacing =
+        std::max(1.0f, std::min(200.0f,
+                                static_cast<float>(jsonNum(j, "spacing", 24))));
+    spec.scale = std::max(0.25f, std::min(4.0f,
+                               static_cast<float>(jsonNum(j, "scale", 1))));
+    spec.rotationDeg = std::max(
+        -180.0f, std::min(180.0f,
+                          static_cast<float>(jsonNum(j, "rotation", 0))));
+    spec.jitterPos = std::max(
+        0.0f, std::min(64.0f, static_cast<float>(jsonNum(j, "jitterPos", 0))));
+    spec.jitterScale = std::max(
+        0.0f,
+        std::min(1.0f, static_cast<float>(jsonNum(j, "jitterScale", 0))));
+    spec.jitterRot = std::max(
+        0.0f,
+        std::min(180.0f, static_cast<float>(jsonNum(j, "jitterRot", 0))));
+    const double seed = jsonNum(j, "seed", 1);
+    spec.seed = static_cast<std::uint32_t>(
+        std::max(0.0, std::min(4294967295.0, seed)));
+    spec.alongPath = jsonBool(j, "alongPath", true);
+    s->pattern = spec;
+    s->patternTile = std::move(tile);
+    s->patternReady = true;
+    s->patternWalker.reset();
+    return JNI_TRUE;
+}
+
+// B1 §5: bake the live texture fiche into the layer surface (full-layer
+// tile snapshots, 1 undo step), then clear the fiche.
+static bool bakeTextureInto(Session* s, std::size_t idx) {
+    openclip::Layer& l = cur(s).layer(idx);
+    if (l.locked) return false;  // T5 §1: pixel write refused
+    openclip::TextureSpec spec;
+    std::string err;
+    if (!openclip::parseTextureFiche(l, spec, err)) return false;
+    openclip::History& h = hist(s);
+    h.beginStroke();
+    for (int ty = 0; ty < l.surface.tilesY(); ++ty)
+        for (int tx = 0; tx < l.surface.tilesX(); ++tx)
+            h.touchTile(cur(s), idx, tx, ty);
+    openclip::applyTexture(l.surface, spec);
+    h.endStroke(cur(s));
+    l.textureKind.clear();
+    l.textureParams.clear();
+    return true;
+}
+
+// B1 §5: layer texture fiche. null/empty clears; {"bake":true} pixelizes
+// (1 undo step). Refused on groups/vector/adjustment/fill/bubble layers
+// (their pixels are composite-time already) — false + layer intact.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetLayerTexture(JNIEnv* env, jclass,
+                                                     jlong handle, jint index,
+                                                     jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    if (index < 0 || index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
+    const std::string j = json ? toStd(env, json) : std::string();
+    if (j.empty()) {
+        l.textureKind.clear();
+        l.textureParams.clear();
+        return JNI_TRUE;
+    }
+    if (jsonBool(j, "bake", false))
+        return bakeTextureInto(s, static_cast<std::size_t>(index))
+                   ? JNI_TRUE
+                   : JNI_FALSE;
+    if (l.isGroup || l.isVector || l.hasFill() || l.hasBubble() ||
+        !l.adjustType.empty())
+        return JNI_FALSE;
+    openclip::TextureSpec spec;
+    std::string err;
+    if (!openclip::parseTextureSpec(j, spec, err)) return JNI_FALSE;
+    char params[96];
+    std::snprintf(params, sizeof params, "%g|%g|%u", spec.scale,
+                  spec.strength, static_cast<unsigned>(spec.seed));
+    l.textureKind = spec.kind;
+    l.textureParams = params;
     return JNI_TRUE;
 }
 
