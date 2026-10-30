@@ -790,3 +790,125 @@ TEST(bubble_ora_round_trip) {
     d.composite(b);
     CHECK(a.bytes() == b.bytes());  // balloon re-renders identically
 }
+
+// ---- A2: PSD mapping of the new blend modes + pass-through ---------
+
+namespace {
+
+std::vector<std::uint8_t> readAllBytes(const std::string& path) {
+    std::vector<std::uint8_t> out;
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return out;
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n > 0) {
+        out.resize(static_cast<std::size_t>(n));
+        const std::size_t got = std::fread(out.data(), 1, out.size(), f);
+        if (got != out.size()) out.clear();
+    }
+    std::fclose(f);
+    return out;
+}
+
+bool containsBytes(const std::vector<std::uint8_t>& d, const char* key) {
+    const std::size_t n = std::strlen(key);
+    if (n == 0 || d.size() < n) return false;
+    for (std::size_t i = 0; i + n <= d.size(); ++i)
+        if (std::memcmp(d.data() + i, key, n) == 0) return true;
+    return false;
+}
+
+}  // namespace
+
+// A2: color burn/dodge, max, darker/lighter color, hue and saturation
+// map to real Photoshop keys and stay pixel-faithful (approx 0).
+TEST(psd_a2_blend_keys) {
+    Canvas c(8, 8);
+    c.addLayer("base");
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            c.layer(0).surface.set(x, y, Pixel{10, 20, 30, 255});
+    struct Case {
+        openclip::BlendMode m;
+        const char* key;
+    };
+    const Case cases[] = {
+        {openclip::BlendMode::ColorBurn, "idiv"},
+        {openclip::BlendMode::ColorDodge, "div "},
+        {openclip::BlendMode::Max, "lite"},
+        {openclip::BlendMode::DarkerColor, "dkCl"},
+        {openclip::BlendMode::LighterColor, "lCCl"},
+        {openclip::BlendMode::Hue, "hue "},
+        {openclip::BlendMode::Saturation, "sat "},
+    };
+    for (const auto& k : cases) {
+        const std::size_t li = c.addLayer(k.key);
+        c.layer(li).blend = k.m;
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x)
+                c.layer(li).surface.set(x, y, Pixel{200, 100, 50, 255});
+    }
+    const std::string path = testh::tmpPath("oc_a2_keys.psd");
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 0);
+    const std::vector<std::uint8_t> bytes = readAllBytes(path);
+    CHECK(!bytes.empty());
+    for (const auto& k : cases)
+        CHECK(containsBytes(bytes, k.key));
+    std::remove(path.c_str());
+}
+
+// A2: add-glow has no PSD key -> normal + counted (documented
+// approximation, honest degrade).
+TEST(psd_a2_add_glow_unmapped) {
+    Canvas c(8, 8);
+    const std::size_t li = c.addLayer("glow");
+    c.layer(li).blend = openclip::BlendMode::AddGlow;
+    c.layer(li).surface.set(0, 0, Pixel{255, 255, 255, 255});
+    const std::string path = testh::tmpPath("oc_a2_glow.psd");
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 1);
+    const std::vector<std::uint8_t> bytes = readAllBytes(path);
+    CHECK(containsBytes(bytes, "norm"));
+    CHECK(!containsBytes(bytes, "add-"));
+    std::remove(path.c_str());
+}
+
+// A2: groups (pass-through included) flatten into the base record and
+// are counted; the group name never leaks as a fake layer.
+TEST(psd_a2_passthrough_group_flattened) {
+    Canvas c(8, 8);
+    c.addLayer("ok");
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            c.layer(0).surface.set(x, y, Pixel{42, 42, 42, 255});
+    const std::size_t gi = c.addGroup("passgroup");
+    CHECK(c.layer(gi).passThrough);
+    c.layer(gi).children.push_back(Layer());
+    c.layer(gi).children.back().surface.resize(8, 8);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            c.layer(gi).children.back().surface.set(x, y,
+                                                    Pixel{200, 10, 10, 255});
+    const std::string path = testh::tmpPath("oc_a2_pass.psd");
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK(approx >= 1);
+    std::vector<std::string> names;
+    CHECK(openclip::psdLayerNames(path, names, err));
+    CHECK_EQ(names[0], std::string("Merged approximations"));
+    for (const auto& n : names) CHECK(n != std::string("passgroup"));
+    // The merged record keeps the group's pixels (red kid visible).
+    Canvas d;
+    CHECK(openclip::loadPsd(d, path, err));
+    Surface out;
+    d.composite(out);
+    CHECK_EQ(out.get(4, 4).r, 200);
+    std::remove(path.c_str());
+}

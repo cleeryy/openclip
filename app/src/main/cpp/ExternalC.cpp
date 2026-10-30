@@ -730,31 +730,12 @@ Java_dev_openclip_engine_EngineHost_nSetLayerOpacity(JNIEnv*, jclass,
 }
 
 bool knownBlendName(const std::string& n) {
-    return n == "normal" || n == "multiply" || n == "screen" ||
-           n == "overlay" || n == "plus" || n == "add" ||
-           n == "soft-light" || n == "soft_light" || n == "softlight" ||
-           n == "svg:normal" || n == "svg:multiply" || n == "svg:screen" ||
-           n == "svg:overlay" || n == "svg:plus" || n == "svg:soft-light" ||
-           // V+2 additions (blend.h, ARCHITECTURE.md "V+2 additions").
-           n == "hard-light" || n == "hard_light" || n == "hardlight" ||
-           n == "difference" || n == "color" || n == "luminosity" ||
-           n == "svg:hard-light" || n == "svg:difference" ||
-           n == "svg:color" || n == "svg:luminosity" ||
-           // T5 additions (blend.h, ARCHITECTURE.md "T5 additions" §3).
-           n == "darken" || n == "lighten" || n == "linear-burn" ||
-           n == "linear_burn" || n == "linearburn" ||
-           n == "linear-dodge" || n == "linear_dodge" ||
-           n == "lineardodge" || n == "vivid-light" ||
-           n == "vivid_light" || n == "vividlight" ||
-           n == "linear-light" || n == "linear_light" ||
-           n == "linearlight" || n == "pin-light" || n == "pin_light" ||
-           n == "pinlight" || n == "subtract" || n == "divide" ||
-           n == "exclusion" || n == "svg:darken" ||
-           n == "svg:lighten" || n == "svg:linear-burn" ||
-           n == "svg:linear-dodge" || n == "svg:vivid-light" ||
-           n == "svg:linear-light" || n == "svg:pin-light" ||
-           n == "svg:subtract" || n == "svg:divide" ||
-           n == "svg:exclusion";
+    // A2: table-driven instead of a hand-kept whitelist — any name
+    // blendFromName maps to a non-Normal mode is known (all bare /
+    // svg: / snake aliases included). blendFromName degrades unknown
+    // names to Normal, so the Normal spellings stay explicit.
+    if (n == "normal" || n == "svg:normal") return true;
+    return openclip::blendFromName(n.c_str()) != openclip::BlendMode::Normal;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -767,8 +748,11 @@ Java_dev_openclip_engine_EngineHost_nSetLayerBlend(JNIEnv* env, jclass,
         return JNI_FALSE;
     const std::string name = toStd(env, jname);
     if (name.empty() || !knownBlendName(name)) return JNI_FALSE;
-    cur(s).layer(static_cast<std::size_t>(index)).blend =
-        openclip::blendFromName(name.c_str());
+    openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
+    l.blend = openclip::blendFromName(name.c_str());
+    // A2: an explicit pick wins over a preserved unknown composite-op
+    // (the ORA loader keeps it in the meta fiche, see ora.cpp).
+    l.meta.erase("x-openclip-blend");
     return JNI_TRUE;
 }
 
@@ -908,6 +892,13 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
     appendJsonStr(out, openclip::blendToName(l.blend));
     out += ",\"group\":";
     out += isGroup ? "true" : "false";
+    // A2: group isolation (groups only; absent elsewhere). pass=true
+    // means pass-through (children composite on the parent
+    // accumulator), pass=false means the isolated buffer path.
+    if (isGroup) {
+        out += ",\"pass\":";
+        out += l.passThrough ? "true" : "false";
+    }
     out += ",\"mask\":";
     out += l.hasMask ? "true" : "false";
     out += ",\"clipped\":";
@@ -3717,6 +3708,10 @@ Java_dev_openclip_engine_EngineHost_nSetLayerFlags(JNIEnv* env, jclass,
     if (present("reference"))
         l.reference = jsonBool(j, "reference", l.reference);
     if (present("draft")) l.draft = jsonBool(j, "draft", l.draft);
+    // A2: group isolation toggle (same setter, 0 new symbol). Ignored on
+    // raster layers (the flag only exists for groups).
+    if (l.isGroup && present("passThrough"))
+        l.passThrough = jsonBool(j, "passThrough", l.passThrough);
     return JNI_TRUE;
 }
 

@@ -422,6 +422,59 @@ FOUR symbols, §5 is 0-JNI app-side nominal):
   names (the spec's review alternative is declined — explicit
   names keep `check_jni_symbols.sh` and per-op tests readable).
 
+- A2 additions (issue #29, blends + pass-through; **0 new JNI
+  symbol**):
+  - `blend.h` grows eight clean-room modes, math documented in
+    `blend.cpp` (straight channels, premultiplied over-compositing
+    unchanged):
+    `ColorBurn` = `1 - min(1, (1-d)/s)` (white dst stays white,
+    black src burns to black), `ColorDodge` = `min(1, d/(1-s))` (black
+    dst stays black, white src neutral), `AddGlow` = `d + 2s - s*d`
+    clamped (screen plus one more source contribution; brighter than
+    Add), `Max` = per-channel `max(s,d)` — the documented twin of
+    `Lighten` (own name, like linear-dodge/Add), `DarkerColor` /
+    `LighterColor` = whole-color pick by HSL lightness (ties keep the
+    destination), `Hue` = source hue over dst saturation+lightness,
+    `Saturation` = source saturation over dst hue+lightness.
+    Canonical ORA names: `svg:color-burn`, `svg:color-dodge`,
+    `svg:add-glow`, `svg:max`, `svg:darker-color`, `svg:lighter-color`,
+    `svg:hue`, `svg:saturation`; input aliases accept snake_case and
+    `lighten-2`/`maximum` for `Max` (`blendFromName`).
+  - Pass-through groups (`Layer::passThrough`, already round-tripped as
+    `isolation="auto"` vs `"isolated"`) now really compose on the
+    parent accumulator: children blend straight onto it in document
+    order with their own modes (no isolated buffer), nested groups
+    recurse (a nested pass-through group used to be invisible), an
+    isolated child inside a pass-through group still buffers then
+    blends, the group's own mask multiplies every child (effective
+    alpha = product of ancestor masks, same truncating multiply) and
+    its `clipped` flag gates the whole group through the M5 stencil.
+    Documented approximations: the pass-through group's opacity
+    multiplies each child, and its blend mode is inactive while
+    pass-through (switch to isolated to apply the buffer blend). The
+    isolated path is byte-identical to before (two-stage buffer math
+    locked by `group_isolated_matches_two_stage_math`), so isolated
+    groups keep ignoring group masks/clips (legacy behaviour).
+  - ORA: new modes serialise as `composite-op="svg:<name>"`; an
+    UNKNOWN composite-op degrades to Normal for compositing but its
+    exact spelling is kept as `x-openclip-blend` and written back on
+    save (lossless round trip, no corruption for third-party readers).
+    `nSetLayerBlend` erases that fiche on an explicit pick.
+  - PSD: real keys are written where Photoshop has one —
+    color burn `idiv`, color dodge `div `, max `lite` (lighten twin),
+    darker color `dkCl`, lighter color `lCCl`, hue `hue `,
+    saturation `sat `; also corrected color `colr`, luminosity `lum `
+    and exclusion `smud`. `add-glow` has no key: `norm` + counted.
+    Groups (pass-through included) merge into the "Merged
+    approximations" base record and are counted in `approx`; `loadPsd`
+    reads the merged view, so no flag is needed.
+  - UI: `nLayerState` gains `"pass":true|false` on group entries
+    (additive introspection, NOT a new symbol) and
+    `nSetLayerFlags` accepts `{"passThrough":bool}` on groups. The
+    panel shows a pass-through/isolated badge (tap toggles) and the
+    blend picker lists the 8 new modes with FR/EN labels (search
+    matches both the canonical name and the localized label).
+
 ## Threading
 
 App: input on UI thread → collection into a lock-free stroke queue →

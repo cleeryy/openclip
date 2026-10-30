@@ -425,8 +425,36 @@ bool savePsd(const Canvas& c, const std::string& path, std::string& error,
                 return "fsub";
             case BlendMode::Divide:
                 return "fdiv";
+            // A2 additions (ARCHITECTURE.md "A2 additions"): real
+            // Photoshop keys where they exist. Max shares the lighten
+            // key (documented twin); add-glow has no PSD key -> norm
+            // + counted (honest approximation). Exclusion and the
+            // V+2 color/luminosity family use their real keys too.
+            case BlendMode::ColorBurn:
+                return "idiv";
+            case BlendMode::ColorDodge:
+                return "div ";
+            case BlendMode::Max:
+                return "lite";
+            case BlendMode::DarkerColor:
+                return "dkCl";
+            case BlendMode::LighterColor:
+                return "lCCl";
+            case BlendMode::Hue:
+                return "hue ";
+            case BlendMode::Saturation:
+                return "sat ";
+            case BlendMode::Color:
+                return "colr";
+            case BlendMode::Luminosity:
+                return "lum ";
+            case BlendMode::Exclusion:
+                return "smud";
+            case BlendMode::AddGlow:
+                mapped = false;  // no PSD key: norm + counted
+                return "norm";
             default:
-                mapped = false;  // exclusion -> norm + counted
+                mapped = false;  // future modes -> norm + counted
                 return "norm";
         }
     };

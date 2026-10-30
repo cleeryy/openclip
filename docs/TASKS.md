@@ -181,3 +181,6 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 
 ## Journal — 2026-10-29
 - Alpha `0.2.0-alpha` : documentation consolidée (README produit, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, templates GitHub, ROADMAP/TASKS/parity-gap à jour) — refs issue #3. Gates rappelés : engine 237/237, emu 248/248 local.
+
+## Journal — 2026-10-30
+- Issue #29 tranche A2 (blends + traversant) : 8 modes moteur (color burn `1-min(1,(1-d)/s)`, color dodge `min(1,d/(1-s))`, add glow `d+2s-sd`, max jumeau documenté de lighten avec alias `lighten-2`, darker/lighter color par lightness HSL, hue/sat sur la base HSL existante), traversant réel (composition directe sur l'accumulateur parent, groupes imbriqués, masque/clip du groupe, enfants isolés bufferisés), ORA `isolation` + préservation exacte d'un composite-op inconnu (`x-openclip-blend`), PSD `idiv`/`div `/`lite`/`dkCl`/`lCCl`/`hue `/`sat `/`colr`/`lum `/`smud` + add-glow→norm compté, UI pastille traversant/isolé + picker localisé FR/EN ; **0 nouveau symbole JNI** (`nLayerState` gagne `"pass"`, `nSetLayerFlags` accepte `passThrough`) ; engine 291/291, prepush vert.

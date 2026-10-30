@@ -9,7 +9,25 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Blend coverage (issue #29 A2): 8 new engine modes — color burn,
+  color dodge, add glow, max (documented twin of lighten, `lighten-2`
+  alias), darker color, lighter color, hue and saturation — with
+  hand-computed reference tests, canonical `svg:` names and PSD keys
+  (`idiv`, `div `, `lite`, `dkCl`, `lCCl`, `hue `, `sat `). Add glow
+  and unknown future modes degrade to normal in PSD and are counted.
+- Pass-through groups really compose on the parent accumulator:
+  nested groups recurse, isolated children still buffer, the group
+  mask/clip apply, group opacity multiplies each child (documented
+  approximation). Isolated groups are byte-identical to before.
+- ORA round trip keeps unknown `composite-op` names in
+  `x-openclip-blend` (lossless, never corrupts a third-party file);
+  isolation is written as `isolation="auto"`/`"isolated"`.
+- Layer panel: pass-through/isolated badge on groups (tap toggles,
+  long-press menu entry) and FR/EN labels for all 28 blend modes in
+  the searchable picker (search matches name and label). 0 new JNI
+  symbol.
 
 ## [0.2.0-alpha] — 2026-10-29
 

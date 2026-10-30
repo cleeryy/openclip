@@ -106,3 +106,78 @@ TEST(ora_save_unwritable_path_fails_cleanly) {
     // Suite is still alive after the failure path.
     CHECK_EQ(c.layerCount(), (std::size_t)1);
 }
+
+// A2: the eight new blend modes survive an ORA round trip through
+// composite-op (canonical svg: kebab-case names).
+TEST(ora_a2_blend_modes_roundtrip) {
+    Canvas c(16, 16);
+    const BlendMode modes[] = {
+        BlendMode::ColorBurn,  BlendMode::ColorDodge, BlendMode::AddGlow,
+        BlendMode::Max,        BlendMode::DarkerColor, BlendMode::LighterColor,
+        BlendMode::Hue,        BlendMode::Saturation};
+    for (auto m : modes) {
+        const std::size_t li = c.addLayer(blendToName(m));
+        c.layer(li).blend = m;
+    }
+    const std::string path = testh::tmpPath("openclip_a2_blends.ora");
+    std::string err;
+    CHECK(saveOra(c, path, err));
+    Canvas d;
+    CHECK(loadOra(d, path, err));
+    CHECK_EQ(d.layerCount(), (std::size_t)8);
+    for (std::size_t i = 0; i < d.layerCount(); ++i) {
+        CHECK_EQ(d.layer(i).blend, modes[i]);
+        CHECK_EQ(d.layer(i).name, std::string(blendToName(modes[i])));
+    }
+    std::remove(path.c_str());
+}
+
+// A2: isolation survives the round trip (auto = pass-through, isolated
+// = buffered group).
+TEST(ora_a2_isolation_roundtrip) {
+    Canvas c(16, 16);
+    const std::size_t pass = c.addGroup("pass");
+    CHECK(c.layer(pass).passThrough);
+    const std::size_t iso = c.addGroup("iso");
+    c.layer(iso).passThrough = false;
+    c.layer(iso).children.push_back(openclip::Layer());
+    c.layer(iso).children.back().name = "kid";
+    c.layer(iso).children.back().surface.resize(16, 16);
+    const std::string path = testh::tmpPath("openclip_a2_isolation.ora");
+    std::string err;
+    CHECK(saveOra(c, path, err));
+    Canvas d;
+    CHECK(loadOra(d, path, err));
+    CHECK_EQ(d.layerCount(), (std::size_t)2);
+    CHECK(d.layer(0).passThrough);
+    CHECK(!d.layer(1).passThrough);
+    CHECK_EQ(d.layer(1).children.size(), (std::size_t)1);
+    std::remove(path.c_str());
+}
+
+// A2: an unknown composite-op is degraded to Normal for compositing
+// but preserved verbatim in the meta fiche, so a re-save never loses
+// it (no corruption for readers that do not know the mode).
+TEST(ora_a2_unknown_blend_preserved) {
+    Canvas c(16, 16);
+    const std::size_t li = c.addLayer("odd");
+    c.layer(li).meta["x-openclip-blend"] = "svg:third-party-mode";
+    const std::string path = testh::tmpPath("openclip_a2_unknown.ora");
+    std::string err;
+    CHECK(saveOra(c, path, err));
+    Canvas d;
+    CHECK(loadOra(d, path, err));
+    CHECK_EQ(d.layer(0).blend, BlendMode::Normal);
+    CHECK_EQ(d.layer(0).meta.count("x-openclip-blend"), (std::size_t)1);
+    CHECK_EQ(d.layer(0).meta["x-openclip-blend"],
+             std::string("svg:third-party-mode"));
+    // Second generation: still written back (lossless round trip).
+    const std::string path2 = testh::tmpPath("openclip_a2_unknown2.ora");
+    CHECK(saveOra(d, path2, err));
+    Canvas e;
+    CHECK(loadOra(e, path2, err));
+    CHECK_EQ(e.layer(0).meta["x-openclip-blend"],
+             std::string("svg:third-party-mode"));
+    std::remove(path.c_str());
+    std::remove(path2.c_str());
+}
