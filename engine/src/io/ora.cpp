@@ -263,6 +263,16 @@ void writeFillAttrs(const Layer& l, std::ostringstream& xml) {
             << xmlEscape(l.fillParams) << "\"";
 }
 
+// B1 layer texture fiche (ARCHITECTURE.md "B1 additions" §5): kind +
+// params span; absent = no texture (clean degrade like M8/T5).
+void writeTextureAttrs(const Layer& l, std::ostringstream& xml) {
+    if (!l.hasTexture()) return;
+    xml << " x-openclip-texture=\"" << xmlEscape(l.textureKind) << "\"";
+    if (!l.textureParams.empty())
+        xml << " x-openclip-texture-params=\""
+            << xmlEscape(l.textureParams) << "\"";
+}
+
 // V+2: generic opaque fiche map (nSetLayerMeta). Written verbatim,
 // reloaded by applyMetaAttrs below (unknown x-openclip-* attrs on
 // load are kept too, so third-party round trips preserve fiches).
@@ -302,6 +312,7 @@ void writeLayerOne(Layer& l, std::ostringstream& xml,
         writeBubbleAttrs(l, xml);
         writeFlagsAttrs(l, xml);
         writeFillAttrs(l, xml);
+        writeTextureAttrs(l, xml);
         writeMetaAttrs(l, xml);
         xml << ">\n";
         writeLayerList(l.children, xml, entries, idx, indent + 1,
@@ -328,6 +339,7 @@ void writeLayerOne(Layer& l, std::ostringstream& xml,
     writeBubbleAttrs(l, xml);
     writeFlagsAttrs(l, xml);
     writeFillAttrs(l, xml);
+    writeTextureAttrs(l, xml);
     writeMetaAttrs(l, xml);
     writeVectorSibling(l, xml, entries, idx);
     xml << "/>\n";
@@ -413,6 +425,15 @@ void applyFlagsFillAttrs(const std::string& xml, std::size_t tagStart,
         if (tagAttr(xml, tagStart, "x-openclip-fill-params", v))
             l.fillParams = v.substr(0, 1024);
     }
+    // B1: texture fiche (unknown kind = no texture, pixels intact).
+    l.textureKind.clear();
+    l.textureParams.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-texture", v) && !v.empty() &&
+        (v == "paper" || v == "canvas" || v == "grain")) {
+        l.textureKind = v;
+        if (tagAttr(xml, tagStart, "x-openclip-texture-params", v))
+            l.textureParams = v.substr(0, 128);
+    }
 }
 
 // V+2: reload the generic fiche map. Every x-openclip-* attr on the
@@ -466,7 +487,9 @@ void applyMetaAttrs(const std::string& xml, std::size_t tagStart,
             name == "x-openclip-draft" || name == "x-openclip-fill" ||
             name == "x-openclip-fill-color" ||
             name == "x-openclip-fill-stops" ||
-            name == "x-openclip-fill-params") {
+            name == "x-openclip-fill-params" ||
+            name == "x-openclip-texture" ||
+            name == "x-openclip-texture-params") {
             p = e;
             continue;  // text/bubble/vector/flags/fill fiches have
                        // their own attrs (above)

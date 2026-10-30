@@ -22,6 +22,16 @@ struct FillParams {
     float tolerance = 0.12f;
     bool antialias = true;
     int expandPx = 0;
+    // B1 (ARCHITECTURE.md "B1 additions" §1): gap closing + surround.
+    // gapPx 0..16 dilates the barrier by N px (bridges gaps up to
+    // 2*N px wide) then grows the region back by N px limited to
+    // original member pixels. Default 0 = byte-identical T1 kernel.
+    int gapPx = 0;
+    // surround: "draw the enclosure, fill it". The outside is the free
+    // space reachable from the canvas border; the fill mask is every
+    // enclosed cavity (all of them, seed must be inside one). Default
+    // false = normal seed-connected region.
+    bool surround = false;
 };
 
 // Fill the 4-connected region containing (x,y) on s with ink (straight

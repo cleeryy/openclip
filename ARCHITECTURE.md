@@ -1363,3 +1363,134 @@ BEFORE code per the frozen-JNI rule. EXACTLY 3 new symbols.
 - Polyline selection (issue #28 §4) rides the existing app-side
   `SelectionMask.setPolygon` (already used by the lasso): the tool
   collects tap points, double-tap closes the loop; 0 engine.
+
+B1 additions (decided 2026-10-30, issue #30 slice B "retouch and
+ink" — gaps, clone stamp, smudge/dodge/burn, pattern brush, layer
+texture). Documented BEFORE code per the frozen-JNI rule.
+EXACTLY 3 new symbols (`nSetCloneSource`, `nSetPatternBrush`,
+`nSetLayerTexture`); the bucket and brush entry points grow JSON keys
+(0 new symbol, M2/M3 pattern).
+
+- Conventions: the M3 alpha contract holds (rgb <= alpha). No tool
+  here breaks it: the smudge carries and deposits premultiplied paint
+  (alpha may GROW on empty pixels — a paint commit, not a filter), the
+  clone stamp copies the source's own premultiplied alpha, the layer
+  texture is an alpha-preserving colour modulation. Pixel writes stay
+  full-layer tile snapshots (1 undo step per stroke or op); fiches
+  (texture) are meta hors undo, like fills and adjustments. Engine
+  coords everywhere; targets >= 48 dp; nothing removed — the existing
+  brush/eraser/fill paths stay byte-identical at their defaults.
+- §1 bucket gaps + surround (0 new symbol). `nFloodFill` JSON grows
+  `"gap"` (0..16, default 0) and `"surround"` (bool, default false).
+  `FillParams` grows the same two fields (`gapPx`, `surround`);
+  `gapPx == 0 && !surround` is byte-identical to the T1 kernel (the
+  existing tests lock it). Semantics: barrier = every pixel whose
+  luma is outside `tolerance` of the seed luma (computed globally,
+  not just along the seed component). Gap closing = square dilation
+  of the barrier by `gapPx`, so gaps up to 2*gapPx px wide are
+  bridged. Normal mode: flood the 4-connected free space (complement
+  of the dilated barrier) containing the seed, then grow that region
+  back by `gapPx` limited to original member pixels (the closing eats
+  a rim, the grow restores it). `surround` mode ("draw the enclosure,
+  fill it"): the outside is the free space reachable from the canvas
+  border; the fill mask is every enclosed cavity (free and not
+  outside) and the call is refused when the seed is not inside one of
+  them. Consequence (documented): surround fills ALL enclosed
+  cavities in one gesture, not only the seed's — that is the point of
+  the mode. The barrier itself is never painted. `mask`/`alphaLock`
+  apply unchanged; validation grew `gapPx` outside [0,16] => false +
+  surface byte-identical.
+- §2 real retouch brush modes (0 new symbol). `nSetBrush` JSON
+  `"mode"` grows `"smudge"|"dodge"|"burn"` (pressure-sensitive real
+  dabs, not colour tricks) and the key `"smudgeStrength"` (0..1,
+  default 0.5, clamped shim-side like mix/curve). Engine kernels live
+  in the new pure header `openclip/retouch.h`:
+  - `smudgeDab(Surface&, Dab, BrushParams, SmudgeState&, strength)`:
+    pickup = falloff-weighted average of the local premultiplied
+    colour over the dab disc, blended into a carried state
+    (straight colour + alpha, k = 0.6 - 0.3*strength, so a strong smudge
+    keeps most of its carried paint); deposit =
+    the carried colour source-over with mask = falloff*opacity*
+    strength. Paint therefore moves ALONG the stroke (the carried
+    colour is deposited at the next dab) — the direction is locked by
+    test.
+  - `dodgeBurnDab(Surface&, Dab, BrushParams, burn)`: existing pixels
+    only (dst.a == 0 skipped), unpremultiply -> dodge
+    c += (255-c)*m / burn c -= c*m (m = falloff*opacity) ->
+    repremultiply clamped to alpha. Alpha untouched. Pressure rides
+    the existing dab opacity.
+  - Dispatch: the shim routes these modes inside `paintStamp`, so the
+    undo, selection mask, alpha lock, stabilization, rulers and
+    symmetry paths all stay the shared ones. On an armed mask target
+    the four retouch modes (smudge/dodge/burn/clone) are REFUSED
+    (false, no tile touched, no undo entry); mask editing keeps the
+    M5 brush/eraser behaviour.
+- §3 clone stamp (ONE new symbol). `nSetCloneSource(handle, json)`:
+  `{"x":px,"y":px,"aligned":bool,"sample":"layer"|"merged"}` sets the
+  source anchor (the app fires it on a long press), `{"clear":true}`
+  drops it; false + previous source kept on unparsable JSON or a point
+  outside the canvas. `"mode":"clone"` on `nSetBrush` activates the
+  clone dab (`cloneDab` in retouch.h): sample the source surface at
+  (dab + offset), stamp it with the dab falloff — source-over with the
+  sampled image's own alpha, so the clone reproduces translucency.
+  Offset = anchor - first-stroke-point; `aligned=false` re-anchors on
+  EVERY stroke begin, `aligned=true` keeps the offset across strokes
+  (sampling continues where the last stroke left off). Sampling is
+  per-layer by default (`"layer"` = the ACTIVE layer surface, so a
+  clone never picks up other layers); `"merged"` takes ONE composite
+  snapshot at stroke begin (documented single pull, never per dab).
+  Without a source anchor the clone stroke paints nothing (refused).
+- §4 pattern brush along the stroke (ONE new symbol).
+  `nSetPatternBrush(handle, json)`: `{"motif":"dots"|"ring"|"star"|
+  "cross","size":8..128 (tile px, default 32),"color":"#RRGGBB",
+  "spacing":1..200 px (default 24),"scale":0.25..4 (default 1),
+  "rotation":-180..180 deg (default 0),"jitterPos":0..64 px,
+  "jitterScale":0..1,"jitterRot":0..180 deg,"seed":int,
+  "alongPath":bool (default true)}` (M3 rule: unknown keys ignored,
+  missing = defaults). `"mode":"pattern"` on `nSetBrush` activates it.
+  The tile is a clean-room procedural motif rendered once per
+  `nSetPatternBrush` call (`proceduralMotif`); no external image is
+  read. `PatternWalker` (retouch.h) walks the stroke polyline with
+  `spacing` px between stamps, rotates each stamp by the local path
+  tangent (plus rotation and seeded rotation jitter) when
+  `alongPath`, and applies seeded position/scale jitter; it is pure
+  and emits `PatternStamp{x,y,angle,scale}`. The shim snapshots the
+  covering tiles per stamp (1 undo step per stroke). Size follows the
+  dab radius and pressure (0.5..1x). Symmetry mirrors and rulers are
+  NOT applied to pattern stamps (documented limitation: the pattern
+  walker owns its own spacing; rulers still transform the input
+  points).
+- §5 layer texture effect (ONE new symbol). `nSetLayerTexture(handle,
+  index, json|null)` sets/clears a NON-DESTRUCTIVE texture fiche on a
+  top-level layer: `{"kind":"paper"|"canvas"|"grain","scale":0.25..8
+  (default 1),"strength":0..1 (default 0.35),"seed":int (default 7)}`;
+  `{"bake":true}` pixelizes it into the layer surface (full-layer
+  tile snapshots, 1 undo step) and clears the fiche. Semantics: the
+  fiche paints no pixels; at composite time a deterministic height
+  field (clean-room value noise; `paper` = fibre noise + streaks,
+  `canvas` = woven sinus grid with warp, `grain` = high-frequency
+  noise; fixed seed = stable output) modulates each pixel's STRAIGHT
+  colour by `1 + strength*(0.5 - h)*2` (h in 0..1) and repremultiplies
+  clamped to alpha — alpha, masks, clip, opacity, blend and animation
+  samples all apply unchanged on top. `hasTexture()` lives on `Layer`
+  like the M8/T5 fiches; `nLayerState` gains `"texture":{"kind":...,
+  "params":"scale|strength|seed"}|null` (T5 fill-params encoding, badge
+  `T`); ORA
+  persists `x-openclip-texture` + `x-openclip-texture-params`
+  (third-party readers ignore them, pixels only — same clean degrade
+  as M8). Meta hors undo. Texture is refused on adjustment/fill/
+  bubble/group layers (`false` + intact) since their pixels are
+  produced at composite time already; vector layers are refused too
+  (rasterize first).
+- Tests: engine — `tests/test_fill.cpp` grows a synthetic broken-line
+  gap case (gap 0 crosses, gap 2 bridges) and a two-cavity surround
+  case (normal fills the seed cavity only, surround fills both);
+  `tests/test_retouch.cpp` (new header) locks clone offset alignment,
+  smudge direction across a black/white boundary, dodge/burn
+  luminance + alpha preservation, pattern spacing/rotation/jitter and
+  the procedural motifs; `tests/test_texture.cpp` locks
+  determinism, alpha preservation, strength 0 = identity and the ORA
+  round trip. Instrumented — one test per tool: bucket gap/surround,
+  clone (aligned + non-aligned), smudge, dodge, burn, pattern, texture
+  — each produces ink (or a composite change) and undoes in ONE
+  `nUndo` step.

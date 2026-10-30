@@ -13,6 +13,7 @@ build/
 out/
 .cxx/
 .gradle/
+.kotlin/
 app/build/
 engine/obj/
 LOCAL.properties

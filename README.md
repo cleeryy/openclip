@@ -65,6 +65,16 @@ stamps (rectangle, ellipse, polygon), feather and quick mask, unsharp
 mask / color balance / threshold filters. Four documented JNI entry
 points (`nFloodFill`, `nMagicWand`, `nPaintGradient`, `nStampShape`).
 
+### Retouch and ink — B1 (issue #30)
+
+Bucket gap closing (0–16 px) and surround-and-fill, a clone stamp
+(aligned / non-aligned, source picked by long press, layer or composite
+sampling), smudge / dodge / burn as real pressure brush modes, a pattern
+brush (procedural dot/ring/star/cross motifs stamped along the stroke
+with spacing, scale, rotation and seeded jitter) and a non-destructive
+paper/canvas/grain layer texture (bake optional). Three documented JNI
+entry points (`nSetCloneSource`, `nSetPatternBrush`, `nSetLayerTexture`).
+
 ### Text and vector tools — T2
 
 Editable text with runs (multiple fonts/sizes/colors per layer), inline

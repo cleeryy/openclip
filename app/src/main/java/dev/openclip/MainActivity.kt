@@ -102,6 +102,7 @@ import dev.openclip.ui.WorkspaceStore
 import dev.openclip.ui.parseHexColor
 import dev.openclip.ui.ExportDialog
 import dev.openclip.ui.FillPanel
+import dev.openclip.ui.TexturePanel
 import dev.openclip.ui.ImportPanel
 import dev.openclip.ui.ColorMatchDialog
 import dev.openclip.ui.T5PagesPanel
@@ -308,6 +309,8 @@ class MainActivity : ComponentActivity() {
         val exportFormat = remember { mutableStateOf("ora") }
         // T5 échanges + pages + productivité (spec docs/t5-exchange.md).
         val showT5Fill = remember { mutableStateOf(false) }
+        // B1 (ARCHITECTURE.md "B1 additions" §5): layer texture dialog.
+        val showB1Texture = remember { mutableStateOf(false) }
         val showT5Import = remember { mutableStateOf(false) }
         val showT5Match = remember { mutableStateOf(false) }
         val showT5Pages = remember { mutableStateOf(false) }
@@ -2203,6 +2206,10 @@ class MainActivity : ComponentActivity() {
                                     onClick = { showT5Fill.value = true }
                                 ),
                                 StudioMenuItem(
+                                    label = stringResource(R.string.b1_texture_title),
+                                    onClick = { showB1Texture.value = true }
+                                ),
+                                StudioMenuItem(
                                     label = stringResource(R.string.import_grd),
                                     onClick = { showT5Import.value = true }
                                 ),
@@ -3331,6 +3338,20 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     } ?: run { showT5Fill.value = false }
+                }
+                if (showB1Texture.value) {
+                    activeSurface()?.let { s ->
+                        TexturePanel(
+                            surface = s,
+                            onDismiss = { showB1Texture.value = false },
+                            onStatus = { status.value = it },
+                            onChanged = {
+                                val aid = activeDocId.value
+                                if (aid != null) docRegistry.markDirty(aid, true)
+                                refreshKey.value++
+                            }
+                        )
+                    } ?: run { showB1Texture.value = false }
                 }
                 if (showT5Import.value) {
                     activeSurface()?.let { s ->
