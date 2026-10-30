@@ -17,7 +17,13 @@ out/
 app/build/
 engine/obj/
 LOCAL.properties
+local.properties
 .ccls-cache/
+
+# Signing material (issue #32) — never commit a keystore or a base64 copy
+*.jks
+*.keystore
+*.p12
 
 # IDE
 .idea/
