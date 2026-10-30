@@ -3428,8 +3428,14 @@ class EngineConformanceTest {
             "onion OFF must keep byte-identical pixels",
             offPx.contentEquals(plainPx)
         )
+        // Cleanup: a stroke commits as ONE history command, but how the
+        // render loop batches the queued points (one drained batch or two)
+        // is timing-dependent, so undo until the cel is clean instead of
+        // assuming an exact count. The first undo must exist.
         assertTrue(onUi { it.undo() })
-        assertTrue(onUi { it.undo() })
+        while (onUi { it.undo() }) {
+            // drain any extra batch-split command
+        }
         } finally {
             settleTimeline()
         }
