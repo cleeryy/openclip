@@ -1608,6 +1608,18 @@ class MainActivity : ComponentActivity() {
                 status.value = ctx.getString(R.string.newcanvas_too_big)
                 return false
             }
+            // Issue #32 §3: refuse past the measured device limit (the
+            // dialog already greys the button; this is the JNI-side
+            // safety net for callers that bypass the dialog).
+            val docBudget = dev.openclip.engine.MemoryBudget.fromContext(ctx).first
+            val needBytes = spec.w.toLong() * spec.h.toLong() * 4L
+            if (needBytes > docBudget) {
+                status.value = ctx.getString(
+                    R.string.newcanvas_mem_refuse,
+                    dev.openclip.engine.MemoryBudget.mb(docBudget).toString()
+                )
+                return false
+            }
             showNewCanvas.value = false
             openDocTab(spec.name, spec.w, spec.h, spec.dpi, bgArgbFor(spec.bg))
             return true
@@ -3314,6 +3326,19 @@ class MainActivity : ComponentActivity() {
                                     intervalMin = autosaveMin.value,
                                     onInterval = { autosaveMin.value = it },
                                     lastWrite = autosaveLast.value,
+                                    // Issue #32 §3: the cap is a policy the
+                                    // user can read, not a hidden limit.
+                                    policyText = ctx.getString(
+                                        R.string.memory_policy,
+                                        dev.openclip.engine.MemoryBudget.mb(
+                                            dev.openclip.engine.MemoryBudget
+                                                .fromContext(ctx).first
+                                        ).toString(),
+                                        dev.openclip.engine.MemoryBudget.mb(
+                                            dev.openclip.engine.MemoryBudget
+                                                .fromContext(ctx).second
+                                        ).toString()
+                                    ),
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             } else {

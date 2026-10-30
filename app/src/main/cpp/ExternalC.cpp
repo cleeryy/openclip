@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <memory>
 #include <new>
 #include <optional>
 #include <string>
@@ -131,6 +132,21 @@ struct Session {
     // documented). T3: same, scoped per active track.
     std::vector<Track> tracks;
     std::size_t activeTrack = 0;
+    // Issue #32 §3 memory policy. docBudget bounds the live document
+    // (layer/mask surfaces); 0 disables the guard (legacy tests).
+    // undoBudget is the per-frame History byte cap. The app sets both
+    // from the device RAM through nSetBudget; the values below are the
+    // conservative engine defaults.
+    std::size_t docBudget = 0;
+    std::size_t undoBudget = openclip::History::kDefaultMaxBytes;
+    // Issue #32 §3 perf: composite the layers BELOW the active one once
+    // per stroke instead of every frame. The cache is only used while a
+    // stroke is open on the live frame, with one visible track, no
+    // camera crop and no animation samples; it is dropped when the
+    // stroke closes (any structural change happens outside a stroke).
+    std::unique_ptr<openclip::Surface> belowCache;
+    int belowCacheLayer = -1;
+    int belowCacheW = 0, belowCacheH = 0;
     // M7 playback rate, app-side only (no engine loop, no JNI symbol;
     // default 12 per the contract; the Compose timeline owns the value).
     float fps = 12.0f;
@@ -255,6 +271,30 @@ inline openclip::History& hist(Session* s) {
 }
 inline std::map<std::size_t, openclip::VectorHistory>& vecs(Session* s) {
     return trk(s).frames[trk(s).cur].vectors;
+}
+
+// Issue #32 §3: the stroke composite cache never survives a state change.
+inline void dropBelowCache(Session* s) {
+    if (!s) return;
+    s->belowCache.reset();
+    s->belowCacheLayer = -1;
+    s->belowCacheW = s->belowCacheH = 0;
+}
+
+// Issue #32 §3: a new frame always inherits the session undo budget.
+inline Frame makeFrame(Session* s, openclip::Canvas c) {
+    Frame f(std::move(c));
+    f.history.setMaxBytes(s->undoBudget);
+    return f;
+}
+
+// Issue #32 §3: true when the live canvas + `extraBytes` (one more
+// layer/mask surface) stays inside the document budget. A zero budget
+// means legacy unlimited (engine tests, headless callers).
+inline bool docFits(const Session* s, const openclip::Canvas& c,
+                    std::size_t extraBytes) {
+    if (s->docBudget == 0) return true;
+    return openclip::canvasMemoryBytes(c) + extraBytes <= s->docBudget;
 }
 
 std::string toStd(JNIEnv* env, jstring jstr) {
@@ -597,6 +637,9 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_dev_openclip_engine_EngineHost_nInit(JNIEnv* env, jclass, jint w, jint h,
                                           jfloat /*dpi*/) {
     if (w <= 0 || h <= 0) return 0;
+    // Issue #32 §3 hard ceiling: one RGBA8 layer must stay far below a
+    // device OOM (8192² = 268 MB; a bogus JNI size is refused).
+    if (w > 8192 || h > 8192) return 0;
     Session* s = new (std::nothrow) Session();
     if (!s) return 0;
     // M7: nInit creates the initial single-frame clip on track 0
@@ -611,7 +654,7 @@ Java_dev_openclip_engine_EngineHost_nInit(JNIEnv* env, jclass, jint w, jint h,
                                        openclip::Pixel{255, 255, 255, 255});
     first.setActiveLayer(0);
     Track t0;
-    t0.frames.push_back(Frame(std::move(first)));
+    t0.frames.push_back(makeFrame(s, std::move(first)));
     s->tracks.push_back(std::move(t0));
     s->activeTrack = 0;
     return reinterpret_cast<jlong>(s);
@@ -621,6 +664,55 @@ extern "C" JNIEXPORT void JNICALL
 Java_dev_openclip_engine_EngineHost_nDispose(JNIEnv* env, jclass,
                                              jlong handle) {
     delete asSession(handle);
+}
+
+// Issue #32 §3 (ARCHITECTURE.md "Issue #32 additions"): explicit memory
+// policy. docBytes bounds the document surfaces (0 = unlimited, legacy),
+// undoBytes is applied to every frame's History (oldest-first eviction,
+// minimum 1 MiB). Refuses nothing by itself — the guards live in
+// nAddLayer/nAddVectorLayer/nAddLayerMask/nAppendChild/nCanvasOp and in
+// History::beginSnapshot.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetBudget(JNIEnv*, jclass, jlong handle,
+                                               jlong docBytes,
+                                               jlong undoBytes) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    s->docBudget = docBytes > 0 ? static_cast<std::size_t>(docBytes) : 0;
+    if (undoBytes > 0)
+        s->undoBudget = static_cast<std::size_t>(undoBytes);
+    for (auto& t : s->tracks)
+        for (auto& f : t.frames) f.history.setMaxBytes(s->undoBudget);
+    return JNI_TRUE;
+}
+
+// Compact JSON snapshot of the memory policy + live undo accounting:
+// {"docBytes":..,"docBudget":..,"undoBytes":..,"undoBudget":..,
+//  "undoDepth":..,"redoDepth":..,"dropped":..,"layers":..}
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_openclip_engine_EngineHost_nBudgetState(JNIEnv* env, jclass,
+                                                 jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return env->NewStringUTF("{}");
+    openclip::History& h = hist(s);
+    std::string out = "{\"docBytes\":";
+    out += std::to_string(openclip::canvasMemoryBytes(cur(s)));
+    out += ",\"docBudget\":";
+    out += std::to_string(s->docBudget);
+    out += ",\"undoBytes\":";
+    out += std::to_string(h.bytes());
+    out += ",\"undoBudget\":";
+    out += std::to_string(h.maxBytes());
+    out += ",\"undoDepth\":";
+    out += std::to_string(h.undoDepth());
+    out += ",\"redoDepth\":";
+    out += std::to_string(h.redoDepth());
+    out += ",\"dropped\":";
+    out += std::to_string(h.dropped());
+    out += ",\"layers\":";
+    out += std::to_string(cur(s).layerCount());
+    out += "}";
+    return env->NewStringUTF(out.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -856,6 +948,10 @@ Java_dev_openclip_engine_EngineHost_nAddLayer(JNIEnv* env, jclass,
     std::string name =
         jname ? toStd(env, jname) : std::string();
     if (name.empty()) name = "Layer";
+    const std::size_t layerBytes =
+        static_cast<std::size_t>(cur(s).width()) *
+        static_cast<std::size_t>(cur(s).height()) * 4u;
+    if (!docFits(s, cur(s), layerBytes)) return -1;  // polite refusal
     return static_cast<jint>(cur(s).addLayer(name));
 }
 
@@ -965,6 +1061,10 @@ Java_dev_openclip_engine_EngineHost_nAppendChild(JNIEnv* env, jclass,
     openclip::Layer& p =
         cur(s).layer(static_cast<std::size_t>(parent));
     if (!p.isGroup) return -1;
+    const std::size_t layerBytes =
+        static_cast<std::size_t>(cur(s).width()) *
+        static_cast<std::size_t>(cur(s).height()) * 4u;
+    if (!docFits(s, cur(s), layerBytes)) return -1;
     openclip::Layer ch;
     std::string name = jname ? toStd(env, jname) : std::string();
     ch.name = name.empty() ? "Layer" : name;
@@ -995,6 +1095,10 @@ Java_dev_openclip_engine_EngineHost_nAddLayerMask(JNIEnv*, jclass,
         return JNI_FALSE;
     openclip::Layer& l = cur(s).layer(static_cast<std::size_t>(index));
     if (l.isGroup) return JNI_FALSE;
+    const std::size_t maskBytes =
+        static_cast<std::size_t>(cur(s).width()) *
+        static_cast<std::size_t>(cur(s).height()) * 4u;
+    if (!docFits(s, cur(s), maskBytes)) return JNI_FALSE;
     l.addMask(cur(s).width(), cur(s).height());
     return JNI_TRUE;
 }
@@ -1827,6 +1931,7 @@ static jint blitArgb(JNIEnv* env, const std::vector<std::uint8_t>& px,
 // pending cel-move undos (frame indexes shifted); plain switches keep
 // both (moves stay undoable after returning).
 static void resetFrameLocalState(Session* s, bool structural) {
+    dropBelowCache(s);
     s->maskTarget = -1;
     s->maskTargetOn = false;
     if (structural) {
@@ -1904,7 +2009,36 @@ Java_dev_openclip_engine_EngineHost_nCompositeInto(JNIEnv* env, jclass,
     if (width <= 0 || height <= 0) return -2;
 
     openclip::Surface comp;
-    if (!compositeCell(s, s->activeTrack,
+    // Issue #32 §3 perf: while a stroke is open only the active layer
+    // changes, so reuse the composite of the layers below it and paint
+    // the active one + the layers above. Byte-identical to a full
+    // composite (locked by test_canvas_ops). Fallbacks keep every other
+    // state on the proven full path.
+    const int actTop = cur(s).activeLayer();
+    const bool strokeCacheable =
+        s->strokeOpen && actTop > 0 &&
+        actTop < static_cast<int>(cur(s).layerCount()) &&
+        !cur(s).layer(static_cast<std::size_t>(actTop)).isGroup &&
+        s->layerAnims.empty() && !s->camEnabled && s->tracks.size() == 1;
+    bool composed = false;
+    if (strokeCacheable) {
+        openclip::Canvas& c = cur(s);
+        if (!s->belowCache || s->belowCacheLayer != actTop ||
+            s->belowCacheW != c.width() || s->belowCacheH != c.height()) {
+            s->belowCache = std::make_unique<openclip::Surface>();
+            c.compositeRange(*s->belowCache, 0,
+                             static_cast<std::size_t>(actTop));
+            s->belowCacheLayer = actTop;
+            s->belowCacheW = c.width();
+            s->belowCacheH = c.height();
+        }
+        comp = *s->belowCache;  // copy of the unchanged prefix
+        c.compositeRange(comp, static_cast<std::size_t>(actTop),
+                         c.layerCount());
+        composed = true;
+    }
+    if (!composed &&
+        !compositeCell(s, s->activeTrack,
                        static_cast<int>(trk(s).cur), comp))
         return -1;
     std::vector<std::uint8_t> px = comp.bytes();  // premult RGBA8
@@ -1967,6 +2101,7 @@ Java_dev_openclip_engine_EngineHost_nStrokeEnd(JNIEnv*, jclass, jlong handle,
     if (!s) return;
     s->strokeOpen = false;
     hist(s).endStroke(cur(s));
+    dropBelowCache(s);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -2558,6 +2693,10 @@ Java_dev_openclip_engine_EngineHost_nAddVectorLayer(JNIEnv* env, jclass,
     Session* s = asSession(handle);
     if (!s) return -1;
     const std::string nm = toStd(env, name);
+    const std::size_t layerBytes =
+        static_cast<std::size_t>(cur(s).width()) *
+        static_cast<std::size_t>(cur(s).height()) * 4u;
+    if (!docFits(s, cur(s), layerBytes)) return -1;  // polite refusal
     const int idx = static_cast<int>(cur(s).addLayer(nm.empty() ? "vector"
                                                                   : nm));
     if (idx >= 0 && idx < static_cast<int>(cur(s).layerCount()))
@@ -3015,7 +3154,7 @@ Java_dev_openclip_engine_EngineHost_nAddFrame(JNIEnv*, jclass, jlong handle) {
                                        openclip::Pixel{255, 255, 255, 255});
     blank.setActiveLayer(0);
     trk(s).frames.insert(trk(s).frames.begin() + static_cast<std::ptrdiff_t>(trk(s).cur) + 1,
-                     Frame(std::move(blank)));
+                     makeFrame(s, std::move(blank)));
     ++trk(s).cur;
     resetFrameLocalState(s, true);
     return static_cast<jint>(trk(s).cur);
@@ -3029,7 +3168,7 @@ Java_dev_openclip_engine_EngineHost_nDuplicateFrame(JNIEnv*, jclass,
     // Full Canvas copy (layers + framebuffers) with a fresh empty undo
     // stack: a duplicate is a new frame, not a history fork.
     trk(s).frames.insert(trk(s).frames.begin() + static_cast<std::ptrdiff_t>(trk(s).cur) + 1,
-                     Frame(cur(s)));
+                     makeFrame(s, openclip::Canvas(cur(s))));
     ++trk(s).cur;
     resetFrameLocalState(s, true);
     return static_cast<jint>(trk(s).cur);
@@ -3649,7 +3788,7 @@ Java_dev_openclip_engine_EngineHost_nAddTrack(JNIEnv* env, jclass,
     blank.addLayer("Layer 1");
     blank.setActiveLayer(0);
     Track t;
-    t.frames.push_back(Frame(std::move(blank)));
+    t.frames.push_back(makeFrame(s, std::move(blank)));
     t.name = name ? openclip::sanitizeTrackName(toStd(env, name)) : "";
     s->tracks.push_back(std::move(t));
     return static_cast<jint>(s->tracks.size() - 1);
@@ -4287,7 +4426,9 @@ Java_dev_openclip_engine_EngineHost_nMergeLayers(JNIEnv* env, jclass,
     if (op != "down" && op != "visible" && op != "flatten" &&
         op != "rasterize")
         return JNI_FALSE;
-    hist(s).beginSnapshot(cur(s));
+    // Issue #32 §3: the two-copy structural snapshot must fit the undo
+    // budget, otherwise refuse the op (it would be unrecoverable).
+    if (!hist(s).beginSnapshot(cur(s))) return JNI_FALSE;
     if (op == "down") {
         ok = openclip::mergeDown(cur(s), static_cast<std::size_t>(index), err);
     } else if (op == "visible") {
@@ -4323,11 +4464,22 @@ Java_dev_openclip_engine_EngineHost_nCanvasOp(JNIEnv* env, jclass,
         double wd = jsonNum(j, "width", jsonNum(j, "w", -1));
         double hd = jsonNum(j, "height", jsonNum(j, "h", -1));
         if (wd < 1 || hd < 1 || wd > 8192 || hd > 8192) return JNI_FALSE;
+        // Issue #32 §3: refuse a resize that cannot fit the document
+        // budget (every layer + its mask grows to the new size).
+        if (s->docBudget != 0) {
+            std::size_t surfaces = cur(s).layerCount();
+            for (std::size_t i = 0; i < cur(s).layerCount(); ++i)
+                if (cur(s).layer(i).hasMask) ++surfaces;
+            const std::size_t need = static_cast<std::size_t>(wd) *
+                                     static_cast<std::size_t>(hd) * 4u *
+                                     surfaces;
+            if (need > s->docBudget) return JNI_FALSE;
+        }
         const std::string an = jsonStr(j, "anchor");
         const openclip::CanvasAnchor a =
             openclip::anchorFromName(an.empty() ? nullptr : an.c_str());
         const bool resample = jsonBool(j, "resample", true);
-        hist(s).beginSnapshot(cur(s));
+        if (!hist(s).beginSnapshot(cur(s))) return JNI_FALSE;
         ok = openclip::resizeCanvas(cur(s), static_cast<int>(wd),
                                     static_cast<int>(hd), a, resample, err);
     } else if (op == "crop") {
@@ -4336,7 +4488,7 @@ Java_dev_openclip_engine_EngineHost_nCanvasOp(JNIEnv* env, jclass,
         const double wd = jsonNum(j, "width", jsonNum(j, "w", -1));
         const double hd = jsonNum(j, "height", jsonNum(j, "h", -1));
         if (wd < 1 || hd < 1) return JNI_FALSE;
-        hist(s).beginSnapshot(cur(s));
+        if (!hist(s).beginSnapshot(cur(s))) return JNI_FALSE;
         ok = openclip::cropCanvas(cur(s), x, y, static_cast<int>(wd),
                                   static_cast<int>(hd), err);
     } else {

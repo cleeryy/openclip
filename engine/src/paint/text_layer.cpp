@@ -82,7 +82,10 @@ bool commitTextLayer(Canvas& c, History& h, const TextLayerCommit& spec,
         err = "text_layer: another structural op is pending";
         return false;
     }
-    h.beginSnapshot(c);
+    if (!h.beginSnapshot(c)) {
+        err = "text_layer: undo budget too small for this commit";
+        return false;
+    }
     int idx = spec.index;
     if (idx < 0) {
         idx = static_cast<int>(

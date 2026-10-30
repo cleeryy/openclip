@@ -194,6 +194,16 @@ public:
     // composite children into a temp surface first, then blend the temp
     // with the group's blend mode and opacity.
     void composite(Surface& out) const;
+    // Issue #32 §3 perf: incremental composite. Paints only the top-level
+    // layers [firstLayer, lastLayer) into `out`, which the caller
+    // pre-filled with the composite of [0, firstLayer) (obtained from an
+    // earlier compositeRange(out, 0, firstLayer)). The result is exactly
+    // the same bytes as composite(out) — locked by test. Used by the shim
+    // to reuse the layers-below cache while a stroke is open, so a frame
+    // never recomposites layers that did not change. `out` must already
+    // be w x h (resize() is the caller's job for firstLayer == 0).
+    void compositeRange(Surface& out, std::size_t firstLayer,
+                        std::size_t lastLayer) const;
     // T5: export walk — like composite() but top-level reference/draft
     // layers are skipped (ARCHITECTURE.md "T5 additions" §1). ORA keeps
     // everything (working round trip); PNG/PSD/file exports use this.

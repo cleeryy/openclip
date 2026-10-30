@@ -30,6 +30,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
 import java.io.File
@@ -237,21 +239,27 @@ fun WarpPanel(
                                     .testTag("t4-pin-$i$k")
                             )
                         }
+                        val pinDelDesc = stringResource(R.string.a11y_remove)
                         OutlinedButton(
                             onClick = {
                                 pins = pins.filterIndexed { j, _ -> j != i }
                             },
                             modifier = Modifier.testTag("t4-pin-del-$i")
+                                .semantics {
+                                    contentDescription = pinDelDesc
+                                }
                         ) { Text("×") }
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val pinAddDesc = stringResource(R.string.a11y_add)
                     OutlinedButton(
                         onClick = {
                             if (pins.size < 64) pins = pins + PuppetPinUi()
                             else onStatus(ctx.getString(R.string.v2_panel_failed))
                         },
                         modifier = Modifier.testTag("t4-pin-add")
+                            .semantics { contentDescription = pinAddDesc }
                     ) { Text("+") }
                 }
                 Text(

@@ -160,3 +160,73 @@ TEST(canvas_resize_undo_snapshot) {
     CHECK(h.redo(c));
     CHECK_EQ(c.width(), 24);
 }
+
+// Issue #32 §3 perf: compositeRange(out, from, to) over a pre-filled
+// below-composite must be byte-identical to a full composite, whatever
+// blend / opacity / mask / clip / group / adjustment the document uses.
+// This is what lets the shim skip unchanged layers while a stroke is open.
+TEST(canvas_composite_range_matches_full) {
+    Canvas c(48, 40);
+    // 0: opaque painted base
+    const std::size_t base = c.addLayer("base");
+    for (int y = 0; y < 40; ++y)
+        for (int x = 0; x < 48; ++x)
+            c.layer(base).surface.set(x, y, Pixel{200, 180, 160, 255});
+    // 1: multiply layer, partial alpha
+    const std::size_t mul = c.addLayer("mult");
+    c.layer(mul).blend = openclip::BlendMode::Multiply;
+    c.layer(mul).opacity = 0.6f;
+    for (int y = 0; y < 40; y += 2)
+        for (int x = 0; x < 48; x += 2)
+            c.layer(mul).surface.set(x, y, Pixel{120, 90, 60, 255});
+    // 2: layer with a half mask + clipped child
+    const std::size_t masked = c.addLayer("masked");
+    c.layer(masked).addMask(48, 40);
+    for (int y = 0; y < 40; ++y)
+        for (int x = 24; x < 48; ++x)
+            c.layer(masked).surface.set(x, y, Pixel{20, 220, 60, 255});
+    for (int y = 0; y < 40; ++y)
+        for (int x = 0; x < 24; ++x)
+            c.layer(masked).mask.set(x, y, Pixel{255, 255, 255, 0});
+    // 3: adjustment layer (transforms everything below)
+    const std::size_t adj = c.addLayer("adj");
+    c.layer(adj).adjustType = "brightness";
+    c.layer(adj).adjustAmount = 0.2;
+    // 4: pass-through group with a normal + a screen child
+    const std::size_t grp = c.addGroup("grp");
+    Layer child;
+    child.name = "g0";
+    child.surface.resize(48, 40);
+    child.surface.set(5, 5, Pixel{255, 0, 0, 255});
+    c.layer(grp).children.push_back(std::move(child));
+    Layer child2;
+    child2.name = "g1";
+    child2.blend = openclip::BlendMode::Screen;
+    child2.surface.resize(48, 40);
+    child2.surface.set(6, 6, Pixel{0, 255, 0, 200});
+    c.layer(grp).children.push_back(std::move(child2));
+    // 5: clipped top layer
+    const std::size_t clip = c.addLayer("clip");
+    c.layer(clip).clipped = true;
+    for (int y = 0; y < 40; y += 3)
+        c.layer(clip).surface.set(8, y, Pixel{0, 0, 255, 180});
+
+    Surface full;
+    c.composite(full);
+
+    for (std::size_t split = 1; split < c.layerCount(); ++split) {
+        Surface cached;
+        c.compositeRange(cached, 0, split);
+        c.compositeRange(cached, split, c.layerCount());
+        CHECK(cached.bytes() == full.bytes());
+    }
+    // A cached prefix reused twice (two frames of one stroke) stays exact.
+    Surface below;
+    c.compositeRange(below, 0, 4);
+    Surface frame = below;
+    c.layer(5).surface.set(10, 10, Pixel{255, 255, 0, 255});
+    c.compositeRange(frame, 4, c.layerCount());
+    Surface full2;
+    c.composite(full2);
+    CHECK(frame.bytes() == full2.bytes());
+}

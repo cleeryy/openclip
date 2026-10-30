@@ -122,7 +122,16 @@ install_retry() {
 }
 install_retry "$APP_APK" && install_retry "$TEST_APK"
 say "installed app + test APKs; running suite"
-adb -s "$SERIAL" shell am instrument -w -r \
+# Issue #32 §5: the .clip corpus harness skips itself unless a DEVICE
+# path is provided (the files are local-only and never committed):
+#   adb push ~/clip-corpus /sdcard/Download/clip-corpus
+#   CALQUE_CLIP_CORPUS=/sdcard/Download/clip-corpus bash scripts/emutest.sh
+EXTRA_ARGS=()
+if [ -n "${CALQUE_CLIP_CORPUS:-}" ]; then
+  say "clip corpus: $CALQUE_CLIP_CORPUS"
+  EXTRA_ARGS+=(-e CALQUE_CLIP_CORPUS "$CALQUE_CLIP_CORPUS")
+fi
+adb -s "$SERIAL" shell am instrument -w -r "${EXTRA_ARGS[@]}" \
   dev.openclip.test/androidx.test.runner.AndroidJUnitRunner 2>&1 | tee "$OUT_LOG" || true
 
 if grep -q 'FAILURES!!!' "$OUT_LOG"; then

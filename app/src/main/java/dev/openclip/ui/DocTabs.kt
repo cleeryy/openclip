@@ -27,11 +27,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import dev.openclip.R
 import dev.openclip.doc.DocEntry
 
 @Composable
@@ -117,11 +121,13 @@ fun DocTabs(
             )
         }
         } // hideNames: "+"-only row, same height, no name chip (V3).
+        val addDesc = stringResource(R.string.a11y_doc_new)
         IconButton(
             onClick = onAdd,
             modifier = Modifier
                 .size(48.dp)
                 .testTag("doc-tab-add")
+                .semantics { contentDescription = addDesc }
         ) {
             Text(
                 "+",

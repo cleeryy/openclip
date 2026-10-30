@@ -284,9 +284,14 @@ inline bool walkChildAdjustment(
 }
 
 // Composite `layers` (document order, bottom-to-top) onto `out` (w x h).
+// Issue #32 §3: [firstLayer, lastLayer) restricts the painted range so a
+// caller that already owns the composite below can skip it.
 void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
-                   int h, const std::vector<LayerAnimSample>* animTop,
-                   bool topLevel, bool forExport);
+                   int h,
+                   const std::vector<LayerAnimSample>* animTop = nullptr,
+                   bool topLevel = true, bool forExport = false,
+                   std::size_t firstLayer = 0,
+                   std::size_t lastLayer = static_cast<std::size_t>(-1));
 
 // A2: clip gate for one group level. `clipped` follows the M5 stencil
 // rule at the level that owns the group (previous sibling when it is a
@@ -453,8 +458,10 @@ void compositePassThroughGroup(const Layer& g, Surface& out, int w, int h,
 // (ARCHITECTURE.md "T5 additions" §1 — editor composites keep them).
 void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
                    int h,
-                   const std::vector<LayerAnimSample>* animTop = nullptr,
-                   bool topLevel = true, bool forExport = false) {
+                   const std::vector<LayerAnimSample>* animTop,
+                   bool topLevel, bool forExport,
+                   std::size_t firstLayer,
+                   std::size_t lastLayer) {
     std::vector<Surface> vecScratch;
     const std::vector<const Surface*> vecCache =
         rasterizeAllVectors(layers, vecScratch, w, h);
@@ -465,7 +472,9 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
     const std::vector<const Surface*> fillCache =
         renderAllFills(layers, fillScratch, w, h);
     const TextureCache texCache = renderAllTextures(layers, w, h);
-    for (std::size_t li = 0; li < layers.size(); ++li) {
+    const std::size_t end = lastLayer < layers.size() ? lastLayer
+                                                      : layers.size();
+    for (std::size_t li = firstLayer; li < end; ++li) {
         const auto& l = layers[li];
         if (!l.visible || l.opacity <= 0.0f) continue;
         // T5 §1: reference/draft layers never reach an export — but
@@ -514,6 +523,82 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
         if (topLevel && animTop && li < animTop->size() &&
             (*animTop)[li].on && !l.isGroup)
             samp = &(*animTop)[li];
+        // Issue #32 §3 perf: the common layer (normal blend, full
+        // opacity, no mask/texture/clip/fill/bubble/adjustment/anim)
+        // takes a raw-bytes source-over loop. Same float math and same
+        // rounding as blendPixel(Normal) — byte-identical, locked by
+        // tests — without a bounds-checked get/set per pixel.
+        const bool rawFast =
+            !samp && !vecTmp && !bubTmp && fillCache[li] == nullptr &&
+            !l.hasMask &&
+            !l.clipped && l.adjustType.empty() &&
+            l.blend == BlendMode::Normal && l.opacity >= 1.0f &&
+            texCache.strength[li] <= 0.0f &&
+            l.surface.bytes().size() >=
+                static_cast<std::size_t>(w) * h * 4u &&
+            out.bytes().size() >= static_cast<std::size_t>(w) * h * 4u;
+        if (rawFast) {
+            const std::uint8_t* src = l.surface.bytes().data();
+            std::uint8_t* dst = out.bytes().data();
+            const std::size_t n =
+                static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t o = i * 4;
+                const std::uint8_t a = src[o + 3];
+                if (a == 0) continue;
+                if (a == 255) {
+                    dst[o] = src[o];
+                    dst[o + 1] = src[o + 1];
+                    dst[o + 2] = src[o + 2];
+                    dst[o + 3] = 255;
+                    continue;
+                }
+                // Same normalisation and same operation order as
+                // blendPixel(Normal): u8() is /255, so the straight
+                // colours are (byte/255)/alpha (bit-identical test).
+                const float sa = static_cast<float>(a) / 255.0f;
+                const float da = static_cast<float>(dst[o + 3]) / 255.0f;
+                const float ia = 1.0f - sa;
+                const float oa = sa + da * ia;
+                const float sr = (static_cast<float>(src[o]) / 255.0f) / sa;
+                const float sg =
+                    (static_cast<float>(src[o + 1]) / 255.0f) / sa;
+                const float sb =
+                    (static_cast<float>(src[o + 2]) / 255.0f) / sa;
+                const float dr = da > 0.0f
+                                     ? (static_cast<float>(dst[o]) / 255.0f) / da
+                                     : 0.0f;
+                const float dg = da > 0.0f
+                                     ? (static_cast<float>(dst[o + 1]) / 255.0f) / da
+                                     : 0.0f;
+                const float db = da > 0.0f
+                                     ? (static_cast<float>(dst[o + 2]) / 255.0f) / da
+                                     : 0.0f;
+                const float cr = sr * sa + dr * da * ia;
+                const float cg = sg * sa + dg * da * ia;
+                const float cb = sb * sa + db * da * ia;
+                const long ra = std::lround(oa * 255.0f);
+                const long rr = std::lround(cr * 255.0f);
+                const long rg = std::lround(cg * 255.0f);
+                const long rb = std::lround(cb * 255.0f);
+                std::uint8_t va = static_cast<std::uint8_t>(
+                    ra < 0 ? 0 : (ra > 255 ? 255 : ra));
+                std::uint8_t vr = static_cast<std::uint8_t>(
+                    rr < 0 ? 0 : (rr > 255 ? 255 : rr));
+                std::uint8_t vg = static_cast<std::uint8_t>(
+                    rg < 0 ? 0 : (rg > 255 ? 255 : rg));
+                std::uint8_t vb = static_cast<std::uint8_t>(
+                    rb < 0 ? 0 : (rb > 255 ? 255 : rb));
+                if (vr > va) vr = va;
+                if (vg > va) vg = va;
+                if (vb > va) vb = va;
+                dst[o] = vr;
+                dst[o + 1] = vg;
+                dst[o + 2] = vb;
+                dst[o + 3] = va;
+            }
+            continue;
+        }
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 // M8: adjustment layers paint no pixels; their op
@@ -677,6 +762,16 @@ void Canvas::composite(Surface& out) const {
     out.resize(w_, h_);
     out.clear();
     compositeInto(layers_, out, w_, h_);
+}
+
+void Canvas::compositeRange(Surface& out, std::size_t firstLayer,
+                            std::size_t lastLayer) const {
+    if (firstLayer == 0) {
+        out.resize(w_, h_);
+        out.clear();
+    }
+    compositeInto(layers_, out, w_, h_, nullptr, true, false, firstLayer,
+                  lastLayer);
 }
 
 void Canvas::compositeExport(Surface& out) const {

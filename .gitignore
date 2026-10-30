@@ -8,6 +8,11 @@ apk-dec/
 base_dec/
 csp/
 
+# Issue #32 §5: local .clip validation corpus — never commit real files
+*.clip
+clip-corpus/
+corpus-clip/
+
 # Build
 build/
 out/

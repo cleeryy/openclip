@@ -36,6 +36,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
 import java.util.Locale
@@ -326,9 +328,12 @@ fun VectorStylePanel(
                 },
                 modifier = Modifier.height(48.dp).testTag("t2-vector-style-apply")
             ) { Text(stringResource(R.string.vector_style_apply)) }
+            val prevDesc = stringResource(R.string.a11y_prev)
+            val nextDesc = stringResource(R.string.a11y_next)
             OutlinedButton(
                 onClick = { pathIdx = maxOf(0, pathIdx - 1) },
                 modifier = Modifier.height(48.dp).testTag("t2-vector-path-prev")
+                    .semantics { contentDescription = prevDesc }
             ) { Text("−") }
             Text(
                 "#$pathIdx $info",
@@ -338,6 +343,7 @@ fun VectorStylePanel(
             OutlinedButton(
                 onClick = { pathIdx += 1 },
                 modifier = Modifier.height(48.dp).testTag("t2-vector-path-next")
+                    .semantics { contentDescription = nextDesc }
             ) { Text("+") }
         }
     }
@@ -399,6 +405,7 @@ fun VectorOpsPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val inflateDesc = stringResource(R.string.a11y_increase)
                 FilterChip(
                     selected = inflate,
                     onClick = {
@@ -407,7 +414,9 @@ fun VectorOpsPanel(
                     },
                     label = { Text("+") },
                     modifier = Modifier.height(48.dp).testTag("t2-vector-inflate")
+                        .semantics { contentDescription = inflateDesc }
                 )
+                val deflateDesc = stringResource(R.string.a11y_decrease)
                 FilterChip(
                     selected = !inflate,
                     onClick = {
@@ -416,6 +425,7 @@ fun VectorOpsPanel(
                     },
                     label = { Text("−") },
                     modifier = Modifier.height(48.dp).testTag("t2-vector-deflate")
+                        .semantics { contentDescription = deflateDesc }
                 )
             }
         }
@@ -466,9 +476,11 @@ fun VectorOpsPanel(
             style = MaterialTheme.typography.labelSmall
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val ptPrevDesc = stringResource(R.string.a11y_prev)
             OutlinedButton(
                 onClick = { cornerPt = maxOf(0, cornerPt - 1) },
                 modifier = Modifier.height(48.dp).testTag("t2-vector-pt-prev")
+                    .semantics { contentDescription = ptPrevDesc }
             ) { Text("−") }
             OutlinedButton(
                 onClick = {
@@ -517,9 +529,11 @@ fun VectorOpsPanel(
                 },
                 modifier = Modifier.height(48.dp).testTag("t2-vector-corner-toggle")
             ) { Text("#$cornerPt") }
+            val ptNextDesc = stringResource(R.string.a11y_next)
             OutlinedButton(
                 onClick = { cornerPt += 1 },
                 modifier = Modifier.height(48.dp).testTag("t2-vector-pt-next")
+                    .semantics { contentDescription = ptNextDesc }
             ) { Text("+") }
         }
     }

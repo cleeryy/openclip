@@ -39,6 +39,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -72,6 +74,7 @@ fun PinnedBrushBar(
     }
 
     if (collapsed) {
+        val showDesc = stringResource(R.string.a11y_pinned_add)
         Box(
             contentAlignment = Alignment.Center,
             modifier = modifier
@@ -80,6 +83,7 @@ fun PinnedBrushBar(
                 .clip(RoundedCornerShape(24.dp))
                 .background(Color(0xEB282832))
                 .clickable { collapsed = false }
+                .semantics { contentDescription = showDesc }
                 .testTag("pinned-show")
         ) {
             Text("+", color = Color(0xFFECECF1))
@@ -322,11 +326,13 @@ private fun RowScope.PinnedCells(
             overflow = TextOverflow.Ellipsis
         )
     }
+    val hideDesc = stringResource(R.string.a11y_pinned_hide)
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
             .size(48.dp)
             .clickable { onHide() }
+            .semantics { contentDescription = hideDesc }
             .testTag("pinned-hide")
     ) {
         Text("–", color = Color(0xFFB8B8C8))

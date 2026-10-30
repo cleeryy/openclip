@@ -31,13 +31,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import dev.openclip.R
-import dev.openclip.doc.DocOra
+import dev.openclip.engine.MemoryBudget
 
 const val NEWCANVAS_MIN_PRESET_HINT = 2000
 const val NEWCANVAS_MAX_DIM = 4096
@@ -71,7 +74,17 @@ fun NewCanvasDialog(
         t.toIntOrNull()?.coerceIn(1, 99999) ?: fallback
     val w = intOf(wText.value, defaultW)
     val h = intOf(hText.value, defaultH)
-    val estimate = DocOra.estimateMb(w.coerceAtLeast(1), h.coerceAtLeast(1))
+    // Issue #32 §3: the estimate is the real one-layer RGBA8 cost, and
+    // the confirm button refuses anything above the device document
+    // budget instead of letting the engine OOM later (measured limits
+    // live in docs/TASKS.md).
+    val ctx = LocalContext.current
+    val docBudget = remember { MemoryBudget.fromContext(ctx).first }
+    val estimateBytes = w.coerceAtLeast(1).toLong() * h.coerceAtLeast(1).toLong() * 4L
+    val estimateMb = estimateBytes / MemoryBudget.MB
+    val budgetMb = MemoryBudget.mb(docBudget)
+    val overBudget = estimateBytes > docBudget ||
+        w > NEWCANVAS_MAX_DIM || h > NEWCANVAS_MAX_DIM
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -130,6 +143,7 @@ fun NewCanvasDialog(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val swapDesc = stringResource(R.string.a11y_swap_wh)
                     TextButton(
                         onClick = {
                             val tw = wText.value
@@ -139,6 +153,7 @@ fun NewCanvasDialog(
                         modifier = Modifier
                             .height(48.dp)
                             .testTag("newcanvas-orient")
+                            .semantics { contentDescription = swapDesc }
                     ) {
                         Text("⇄", style = MaterialTheme.typography.titleMedium)
                     }
@@ -213,11 +228,28 @@ fun NewCanvasDialog(
                     )
                 }
                 Text(
-                    String.format(java.util.Locale.US, "≈ %.0f MB", estimate),
+                    stringResource(
+                        R.string.newcanvas_mem_line,
+                        estimateMb.toString(),
+                        budgetMb.toString()
+                    ),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF787888),
                     modifier = Modifier.testTag("newcanvas-estimate")
                 )
+                if (overBudget) {
+                    val refusedText = if (w > NEWCANVAS_MAX_DIM || h > NEWCANVAS_MAX_DIM) {
+                        stringResource(R.string.newcanvas_too_big)
+                    } else {
+                        stringResource(R.string.newcanvas_mem_refuse, budgetMb.toString())
+                    }
+                    Text(
+                        refusedText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFE07050),
+                        modifier = Modifier.testTag("newcanvas-mem-refuse")
+                    )
+                }
                 if (maxOf(w, h) < NEWCANVAS_MIN_PRESET_HINT) {
                     Text(
                         stringResource(R.string.newcanvas_small_hint),
@@ -231,6 +263,7 @@ fun NewCanvasDialog(
         confirmButton = {
             TextButton(
                 onClick = {
+                    if (overBudget) return@TextButton
                     onConfirm(
                         NewCanvasSpec(
                             name = name.value.ifBlank { defaultName },
@@ -240,6 +273,7 @@ fun NewCanvasDialog(
                         )
                     )
                 },
+                enabled = !overBudget,
                 modifier = Modifier
                     .height(48.dp)
                     .testTag("newcanvas-confirm")
@@ -278,11 +312,14 @@ private fun DimRow(
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.size(20.dp)
         )
+        val minusDesc = stringResource(R.string.a11y_decrease)
+        val plusDesc = stringResource(R.string.a11y_increase)
         TextButton(
             onClick = onMinus,
             modifier = Modifier
                 .size(48.dp)
                 .testTag("$tag-minus")
+                .semantics { contentDescription = minusDesc }
         ) {
             Text("−", style = MaterialTheme.typography.titleMedium)
         }
@@ -300,6 +337,7 @@ private fun DimRow(
             modifier = Modifier
                 .size(48.dp)
                 .testTag("$tag-plus")
+                .semantics { contentDescription = plusDesc }
         ) {
             Text("+", style = MaterialTheme.typography.titleMedium)
         }
