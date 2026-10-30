@@ -2000,6 +2000,13 @@ fun AutosavePanel(
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.testTag("v2-autosave-status")
         )
+        // Issue #32 §2: autosave now writes timestamped recovery snapshots
+        // (on by default), not silent writes over the user's file.
+        Text(
+            stringResource(R.string.v2_autosave_recovery),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag("v2-autosave-recovery")
+        )
     }
 }
 

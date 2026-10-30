@@ -412,7 +412,16 @@
     <string name="v2_off">Off</string>
     <string name="v2_autosave_min">%1$d min</string>
     <string name="v2_autosave_never">Never saved yet.</string>
-    <string name="v2_autosave_saved">Saved %1$s.</string>
+    <string name="v2_autosave_saved">Snapshot %1$s.</string>
+    <string name="v2_autosave_recovery">Crash recovery is on: snapshots stay on this device and the newest one is offered at next launch when it is newer than your last save.</string>
+    <string name="recovery_title">Recover unsaved work?</string>
+    <string name="recovery_body">%1$s was modified after its last save. A snapshot from %2$s is available.</string>
+    <string name="recovery_more">%1$d more document(s) can be restored too.</string>
+    <string name="recovery_restore">Restore</string>
+    <string name="recovery_discard">Ignore</string>
+    <string name="recovery_restored_count">Restored %1$d document(s).</string>
+    <string name="recovery_failed">Snapshot could not be restored.</string>
+    <string name="recovery_discarded">Snapshot discarded.</string>
     <string name="v2_curves_title">Tone curves</string>
     <string name="v2_bd_tab">Comic</string>
     <string name="v2_psd_approx">PSD saved with %1$d approximations (masked/group layers flattened).</string>
