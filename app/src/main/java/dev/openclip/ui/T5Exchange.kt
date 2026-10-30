@@ -482,6 +482,8 @@ fun ImportPanel(
     onChanged: () -> Unit
 ) {
     var library by remember { mutableStateOf(GradientStore.load(filesDir)) }
+    // B2 §3: installed tips (persisted preset library).
+    var tips by remember { mutableStateOf(AbrTipStore.load(filesDir)) }
     var note by remember { mutableStateOf("") }
     // Hoisted (stringResource is @Composable: never call it from the
     // file-picker callbacks below).
@@ -537,16 +539,24 @@ fun ImportPanel(
                             onPickFile("*/*") { f ->
                                 if (f == null) return@onPickFile
                                 try {
-                                    val (tips, msgs) =
+                                    val (parsed, msgs) =
                                         AbrParser.parse(f.readBytes())
-                                    note = if (tips.isEmpty()) {
-                                        "✕ " + importRefused +
+                                    if (parsed.isEmpty()) {
+                                        note = "✕ " + importRefused +
                                             msgs.joinToString(",")
                                     } else {
-                                        "≈ " + importApprox +
-                                            msgs.joinToString(",")
+                                        // B2 §3: install = usable presets.
+                                        val installed = AbrTipStore.install(
+                                            filesDir, parsed,
+                                            f.name.substringBeforeLast('.')
+                                        )
+                                        tips = AbrTipStore.load(filesDir)
+                                        note = "≈ " + importApprox +
+                                            msgs.joinToString(",") +
+                                            " · " + installed.size + "/" +
+                                            parsed.size
+                                        onStatus(importOk)
                                     }
-                                    if (tips.isNotEmpty()) onStatus(importOk)
                                 } catch (_: Exception) {
                                     note = "✕ " + importRefused
                                 }
@@ -605,11 +615,79 @@ fun ImportPanel(
                         }
                     }
                 }
+                if (tips.isNotEmpty()) {
+                    Text(
+                        stringResource(R.string.abr_installed, tips.size),
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 220.dp)
+                            .testTag("abr-presets")
+                    ) {
+                        items(tips, key = { it.name }) { t ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                InstalledTipPreview(t)
+                                Text(
+                                    "${t.name} (${t.w}×${t.h})",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = {
+                                        if (surface.setBrushTip(t.path)) {
+                                            onStatus(importOk)
+                                        } else {
+                                            onStatus(importRefused)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .heightIn(min = 48.dp)
+                                        .testTag("abr-use-${t.name}")
+                                ) { Text(stringResource(R.string.abr_use)) }
+                            }
+                        }
+                    }
+                    Text(
+                        stringResource(R.string.abr_fidelity),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    TextButton(
+                        onClick = { surface.setBrushTip(null) },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("abr-tip-clear")
+                    ) { Text(stringResource(R.string.abr_clear_tip)) }
+                }
                 TextButton(onClick = onDismiss) {
                     Text(stringResource(R.string.cancel))
                 }
             }
         }
+    }
+}
+
+/** Aperçu d'une pointe installée (PNG alpha déjà sur disque). */
+@Composable
+fun InstalledTipPreview(tip: InstalledTip) {
+    val bmp = remember(tip.path) { AbrTipStore.previewBitmap(tip) }
+    androidx.compose.runtime.DisposableEffect(bmp) {
+        onDispose { if (bmp != null && !bmp.isRecycled) bmp.recycle() }
+    }
+    if (bmp != null) {
+        Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = tip.name,
+            modifier = Modifier
+                .padding(end = 4.dp)
+                .testTag("abr-preview-${tip.name}")
+        )
     }
 }
 
@@ -725,6 +803,126 @@ fun ColorMatchDialog(
                 }
             }
         }
+    }
+}
+
+// ------------------------------------------------- installable tips
+//
+// B2 §3 (ARCHITECTURE.md "B2 additions") : les pointes lues deviennent
+// des presets UTILISABLES. Chaque masque 8-bit est écrit en PNG RGBA
+// (rgb=0, alpha=échantillon) dans filesDir/abr-tips + un index.json ;
+// le moteur (nSetBrushTip) décode le PNG et estampille son alpha.
+// Fidélité documentée : enveloppe v1/v2 échantillonnée brute seulement
+// (dual brush / dynamics / texture / scatter ignorés et annoncés).
+
+data class InstalledTip(
+    val name: String,
+    val w: Int,
+    val h: Int,
+    val path: String
+)
+
+object AbrTipStore {
+    private const val INDEX = "index.json"
+
+    fun dir(filesDir: File): File = File(filesDir, "abr-tips")
+
+    private fun sanitize(s: String): String =
+        s.take(40).map {
+            if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_'
+        }.joinToString("").ifEmpty { "tip" }
+
+    /** Write every parsed tip as an RGBA PNG preset; returns the list. */
+    fun install(
+        filesDir: File,
+        tips: List<AbrTip>,
+        base: String
+    ): List<InstalledTip> {
+        val d = dir(filesDir)
+        if (!d.exists()) d.mkdirs()
+        val current = load(filesDir).toMutableList()
+        val out = mutableListOf<InstalledTip>()
+        for ((i, tip) in tips.withIndex()) {
+            if (tip.w <= 0 || tip.h <= 0 ||
+                tip.bits.size < tip.w * tip.h
+            ) continue
+            var name = "${sanitize(base)}-${i + 1}"
+            var n = 2
+            while (current.any { it.name == name }) {
+                name = "${sanitize(base)}-${i + 1}-$n"
+                n++
+            }
+            val bmp = android.graphics.Bitmap.createBitmap(
+                tip.w, tip.h, android.graphics.Bitmap.Config.ARGB_8888
+            )
+            val px = IntArray(tip.w * tip.h) { k ->
+                ((tip.bits[k].toInt() and 0xFF) shl 24) or 0x202020
+            }
+            bmp.setPixels(px, 0, tip.w, 0, 0, tip.w, tip.h)
+            val f = File(d, "$name.png")
+            try {
+                f.outputStream().use {
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+            } catch (_: Exception) {
+                bmp.recycle()
+                continue
+            }
+            bmp.recycle()
+            val entry = InstalledTip(name, tip.w, tip.h, f.absolutePath)
+            current.add(entry)
+            out.add(entry)
+        }
+        save(filesDir, current)
+        return out
+    }
+
+    fun load(filesDir: File): List<InstalledTip> {
+        val idx = File(dir(filesDir), INDEX)
+        if (!idx.isFile) return emptyList()
+        return try {
+            val arr = org.json.JSONArray(idx.readText())
+            val out = mutableListOf<InstalledTip>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val p = o.optString("path", "")
+                if (p.isEmpty() || !File(p).isFile) continue
+                out.add(
+                    InstalledTip(
+                        o.optString("name", "tip"),
+                        o.optInt("w", 0), o.optInt("h", 0), p
+                    )
+                )
+            }
+            out
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun save(filesDir: File, tips: List<InstalledTip>) {
+        val d = dir(filesDir)
+        if (!d.exists()) d.mkdirs()
+        val arr = org.json.JSONArray()
+        for (t in tips) {
+            arr.put(
+                org.json.JSONObject()
+                    .put("name", t.name)
+                    .put("w", t.w)
+                    .put("h", t.h)
+                    .put("path", t.path)
+            )
+        }
+        try {
+            File(d, INDEX).writeText(arr.toString())
+        } catch (_: Exception) {
+        }
+    }
+
+    fun previewBitmap(tip: InstalledTip): android.graphics.Bitmap? = try {
+        android.graphics.BitmapFactory.decodeFile(tip.path)
+    } catch (_: Exception) {
+        null
     }
 }
 

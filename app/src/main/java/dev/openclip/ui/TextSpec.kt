@@ -207,7 +207,13 @@ data class TextSpec(
     val outline: TextOutline? = null, // null = OFF
     val fontFile: String = "", // imported file name (REPRO repli)
     val dir: String = "h", // h|v (vertical = columns)
-    val hyphen: Boolean = false
+    val hyphen: Boolean = false,
+    // B2 §1 (ARCHITECTURE.md "B2 additions"): transform of the text
+    // block around (boxX, boxY). Identity = the legacy rendering.
+    val rot: Float = 0f,      // degrees, -180..180
+    val scaleX: Float = 1f,   // 0.1..8
+    val scaleY: Float = 1f,   // 0.1..8
+    val skew: Float = 0f      // degrees, -45..45
 ) {
     val styleName: String
         get() = when {
@@ -216,6 +222,22 @@ data class TextSpec(
             italic -> "italic"
             else -> "regular"
         }
+
+    /** Normalised transform tuple ("rot,sx,sy,skew"). */
+    fun xformTuple(): String {
+        val r = rot.coerceIn(-180f, 180f)
+        val sx = scaleX.coerceIn(0.1f, 8f)
+        val sy = scaleY.coerceIn(0.1f, 8f)
+        val sk = skew.coerceIn(-45f, 45f)
+        return "$r,$sx,$sy,$sk"
+    }
+
+    /** True when the block is rotated / scaled / skewed. */
+    fun hasTransform(): Boolean =
+        kotlin.math.abs(rot) > 0.01f ||
+            kotlin.math.abs(scaleX - 1f) > 0.001f ||
+            kotlin.math.abs(scaleY - 1f) > 0.001f ||
+            kotlin.math.abs(skew) > 0.01f
 
     fun toJson(): String {
         val sb = StringBuilder("{")
@@ -260,6 +282,7 @@ data class TextSpec(
         if (fontFile.isNotEmpty()) str("fontfile", fontFile)
         if (dir == "v") str("dir", "v")
         if (hyphen) sb.append("\"hyphen\":true,")
+        if (hasTransform()) str("xf", xformTuple())
         sb.append("\"end\":1}")
         return sb.toString()
     }
@@ -311,6 +334,7 @@ data class TextSpec(
                 if (t.isEmpty()) return null
                 val style = o.optString("style", "regular")
                 val (bx, by, bw) = parseBox(o)
+                val xf = parseXform(o.optString("xf", ""))
                 TextSpec(
                     text = t,
                     font = o.optString("font", "sans-serif"),
@@ -330,11 +354,29 @@ data class TextSpec(
                     outline = parseOutline(o),
                     fontFile = o.optString("fontfile", ""),
                     dir = if (o.optString("dir", "h") == "v") "v" else "h",
-                    hyphen = o.optBoolean("hyphen", false)
+                    hyphen = o.optBoolean("hyphen", false),
+                    rot = xf.getOrNull(0) ?: 0f,
+                    scaleX = xf.getOrNull(1) ?: 1f,
+                    scaleY = xf.getOrNull(2) ?: 1f,
+                    skew = xf.getOrNull(3) ?: 0f
                 )
             } catch (_: Exception) {
                 null
             }
+        }
+
+        /** B2 §1: parse "rot,sx,sy,skew" with honest clamps. */
+        fun parseXform(raw: String): List<Float> {
+            if (raw.isEmpty()) return emptyList()
+            val parts = raw.split(",")
+            if (parts.size != 4) return emptyList()
+            val v = parts.map { it.trim().toFloatOrNull() ?: return emptyList() }
+            return listOf(
+                v[0].coerceIn(-180f, 180f),
+                v[1].coerceIn(0.1f, 8f),
+                v[2].coerceIn(0.1f, 8f),
+                v[3].coerceIn(-45f, 45f)
+            )
         }
 
         /** Rebuild a fiche from an nLayerState "text" object. */
@@ -366,6 +408,7 @@ data class TextSpec(
                 } catch (_: Exception) {
                     null
                 }
+                val xf = parseXform(o.optString("xform", ""))
                 TextSpec(
                     text = t,
                     font = o.optString("font", "sans-serif"),
@@ -385,7 +428,11 @@ data class TextSpec(
                     outline = outline,
                     fontFile = o.optString("fontfile", ""),
                     dir = if (o.optString("dir", "h") == "v") "v" else "h",
-                    hyphen = o.optBoolean("hyphen", false)
+                    hyphen = o.optBoolean("hyphen", false),
+                    rot = xf.getOrNull(0) ?: 0f,
+                    scaleX = xf.getOrNull(1) ?: 1f,
+                    scaleY = xf.getOrNull(2) ?: 1f,
+                    skew = xf.getOrNull(3) ?: 0f
                 )
             } catch (_: Exception) {
                 null
@@ -594,6 +641,15 @@ object TextLineLayout {
         }
     }
 
+    /** B2 §1: layout frame (wrap width, total line height) for the
+     *  transform handles and the preview matrix. */
+    fun frameSize(spec: TextSpec, canvasW: Int): Pair<Float, Float> {
+        val wrapW = if (spec.boxW > 1f) spec.boxW
+        else (canvasW - spec.boxX).coerceAtLeast(8f)
+        val lines = layout(spec, wrapW)
+        return Pair(wrapW, lines.sumOf { it.height.toDouble() }.toFloat())
+    }
+
     private fun parseColor(hex: String): Int {
         return try {
             val h = hex.trimStart('#')
@@ -631,6 +687,25 @@ object TextRenderer {
         val bmp = Bitmap.createBitmap(canvasW, canvasH, Bitmap.Config.ARGB_8888)
         val c = android.graphics.Canvas(bmp)
         val align = spec.align
+        // B2 §1: rotate / skew / scale around the text frame origin
+        // (boxX, boxY), exactly the app-side matrix the overlay preview
+        // uses. Identity = the legacy byte path.
+        c.save()
+        if (spec.hasTransform()) {
+            c.translate(spec.boxX, spec.boxY)
+            c.rotate(spec.rot.coerceIn(-180f, 180f))
+            c.skew(
+                kotlin.math.tan(
+                    Math.toRadians(spec.skew.coerceIn(-45f, 45f).toDouble())
+                ).toFloat(),
+                0f
+            )
+            c.scale(
+                spec.scaleX.coerceIn(0.1f, 8f),
+                spec.scaleY.coerceIn(0.1f, 8f)
+            )
+            c.translate(-spec.boxX, -spec.boxY)
+        }
         if (spec.dir == "v") {
             // Tategaki simplifié (honnête) : chaque ligne devient une
             // colonne haut→bas ; colonnes droite→gauche ; latin pivoté
@@ -654,6 +729,7 @@ object TextRenderer {
                 y += ln.height
             }
         }
+        c.restore()
         return Rendered(bmp, substituted)
     }
 

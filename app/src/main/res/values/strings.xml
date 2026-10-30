@@ -773,4 +773,27 @@
     <string name="b1_texture_grain">Grain</string>
     <string name="b1_texture_scale">Scale %1$.2f</string>
     <string name="b1_texture_strength">Strength %1$d%%</string>
+    <string name="close">Close</string>
+    <string name="glyph_title">Glyphs — %1$s</string>
+    <string name="glyph_hint">%1$d characters in this font (tap to insert)</string>
+    <string name="glyph_open">Glyphs</string>
+    <string name="story_title">Story — %1$d paragraphs</string>
+    <string name="story_para_add">＋ Paragraph</string>
+    <string name="story_para_hint">Paragraph text</string>
+    <string name="story_layout">%1$d paragraphs · %2$d wrapped lines</string>
+    <string name="story_open">Story</string>
+    <string name="text_xform_open">Handles</string>
+    <string name="text_xform_values">Rot %1$d° · Scale %2$.2f · Skew %3$d°</string>
+    <string name="text_xform_reset">Reset</string>
+    <string name="text_xform_committed">Text transform applied (one undo)</string>
+    <string name="abr_installed">Installed tips (%1$d)</string>
+    <string name="abr_use">Use</string>
+    <string name="abr_clear_tip">Clear brush tip</string>
+    <string name="abr_fidelity">Sampled tips only (type 2, raw 8-bit), stamped at the brush size: dynamics, dual brush, texture and scatter are ignored.</string>
+    <string name="timelapse_on">Timelapse ●</string>
+    <string name="timelapse_off">Timelapse ○</string>
+    <string name="timelapse_frames">%1$d frames</string>
+    <string name="timelapse_every">every %1$d</string>
+    <string name="timelapse_export">Export timelapse</string>
+    <string name="timelapse_started">Timelapse recording started</string>
 </resources>

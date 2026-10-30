@@ -106,6 +106,9 @@ class EngineSurface @JvmOverloads constructor(
     @Volatile private var needsComposite = true
 
     var onStrokeChanged: (() -> Unit)? = null
+    /** B2 §5: committed undo step WITH its history label (timelapse
+     *  counts real paint strokes, never layer/flag ops). */
+    var onCommittedStroke: ((String?) -> Unit)? = null
 
     // ---- Slice 3 solo-render (app-side only, no new JNI) ----
     // While true the render loop skips compositing (needsComposite stays
@@ -2451,8 +2454,10 @@ class EngineSurface @JvmOverloads constructor(
         // T5 §7: every committed undo step publishes to the session
         // history log (name + time; tap-to-return = N normal undos).
         if (historyLabel != null) HistoryLog.push(historyLabel)
-        val cb = onStrokeChanged ?: return
-        post { cb() }
+        val cb = onStrokeChanged
+        val labelled = onCommittedStroke
+        if (cb != null) post { cb() }
+        if (labelled != null) post { labelled(historyLabel) }
     }
 
     // T5 §1: app-side guard (the engine refuses too — belt and
@@ -3465,6 +3470,9 @@ class EngineSurface @JvmOverloads constructor(
 
     /** True when the last text commit substituted the font. */
     @Volatile var lastFontFallback = false
+
+    /** B2: index of the layer written by the last text commit (-1 none). */
+    @Volatile var lastTextIndex = -1
 
     fun hasSelection(): Boolean = synchronized(selectionLock) {
         selectionMask != null
@@ -4557,6 +4565,17 @@ class EngineSurface @JvmOverloads constructor(
             .also { if (it) needsComposite = true } else false
     }
 
+    /** B2 §1: screen pixels per engine unit (view fit * zoom). */
+    fun pixelsPerEngineUnit(): Float {
+        if (width <= 0 || height <= 0) return 0f
+        return fitScale(width, height) * viewScaleMul
+    }
+
+    /** B2 §3: install/clear the brush tip mask (RGBA PNG, alpha). */
+    fun setBrushTip(path: String?): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSetBrushTip(handle, path) else false
+    }
+
     fun blitPngIntoLayer(index: Int, path: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nBlitPngIntoLayer(handle, index, path)
             .also {
@@ -4654,19 +4673,29 @@ class EngineSurface @JvmOverloads constructor(
                 return@Thread
             }
             rendered.bitmap.recycle()
-            val idx = if (layer < 0) {
-                addLayerNamed("Tx " + spec.text.take(12))
-            } else {
-                layer
+            // B2 §1: ONE atomic commit (pixels + fiche in a single
+            // engine document snapshot) so a text transform — or a
+            // whole text creation — undoes with exactly one nUndo.
+            val ok = synchronized(engineLock) {
+                if (handle != 0L) {
+                    EngineHost.nCommitTextLayer(
+                        handle,
+                        layer,
+                        png.absolutePath,
+                        spec.toJson(),
+                        "Tx " + spec.text.take(12)
+                    )
+                } else false
             }
-            var ok = idx >= 0 && blitPngIntoLayer(idx, png.absolutePath)
             try {
                 png.delete()
             } catch (_: Exception) {
             }
             if (ok) {
-                ok = setLayerText(idx, spec.toJson())
-                if (ok) notifyStrokeChanged("text")
+                lastTextIndex =
+                    if (layer < 0) layerCount() - 1 else layer
+                needsComposite = true
+                notifyStrokeChanged("text")
             }
             val done = ok
             post { onResult(done) }
