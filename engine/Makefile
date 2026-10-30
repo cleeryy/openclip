@@ -30,6 +30,8 @@ SRCS = src/raster/surface.cpp \
        src/paint/fill_layer.cpp \
        src/paint/retouch.cpp \
        src/paint/texture.cpp \
+       src/paint/text_layer.cpp \
+       src/brush/brush_tip.cpp \
        src/ref/ref.cpp \
        src/raster/anim.cpp \
        src/raster/tracks.cpp \
@@ -70,7 +72,9 @@ TEST_SRCS = tests/main.cpp \
             tests/test_canvas_ops.cpp \
             tests/test_selection.cpp \
             tests/test_retouch.cpp \
-            tests/test_texture.cpp
+            tests/test_texture.cpp \
+            tests/test_text_layer.cpp \
+            tests/test_brush_tip.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a

@@ -703,6 +703,94 @@ TEST(psd_type_tool_present) {
     std::remove(path.c_str());
 }
 
+// B2 §1: the transform tuple survives ORA untouched.
+TEST(text_xform_ora_round_trip) {
+    Canvas c(32, 32);
+    c.addLayer("title");
+    Layer& l = c.layer(0);
+    l.textContent = "Rotated";
+    l.textFont = "serif";
+    l.textSizePx = 20;
+    l.textXform = "30,1.5,0.5,-8";
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            l.surface.set(x, y, Pixel{5, 6, 7, 255});
+    const std::string path = testh::tmpPath("oc_textxf.ora");
+    std::string err;
+    CHECK(openclip::saveOra(c, path, err));
+    Canvas d(1, 1);
+    CHECK(openclip::loadOra(d, path, err));
+    CHECK_EQ(d.layerCount(), std::size_t{1});
+    CHECK_EQ(d.layer(0).textContent, std::string("Rotated"));
+    CHECK_EQ(d.layer(0).textXform, std::string("30,1.5,0.5,-8"));
+    std::remove(path.c_str());
+}
+
+// B2 §1: TySh payload v2 carries the transform floats after the frame,
+// and runs > 1 still count as one flattening approximation.
+TEST(psd_tysh_v2_transform_floats) {
+    Canvas c(32, 32);
+    c.addLayer("xf");
+    Layer& l = c.layer(0);
+    l.textContent = "Go";
+    l.textFont = "serif";
+    l.textSizePx = 18;
+    l.textBox = "3,5,24";
+    l.textXform = "15,1.25,0.75,-10";
+    l.textRuns =
+        "[{\"start\":0,\"len\":1,\"style\":\"bold\"},"
+        "{\"start\":1,\"len\":1,\"style\":\"italic\"}]";
+    const std::string path = testh::tmpPath("oc_tysh2.psd");
+    std::string err;
+    int approx = -1;
+    CHECK(openclip::savePsd(c, path, err, &approx));
+    CHECK_EQ(approx, 1);  // runs flatten: transform is exact in the block
+    std::vector<std::uint8_t> d;
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    CHECK(f != nullptr);
+    if (f) {
+        std::fseek(f, 0, SEEK_END);
+        const long n = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        d.resize(static_cast<std::size_t>(n));
+        CHECK(std::fread(d.data(), 1, d.size(), f) == d.size());
+        std::fclose(f);
+    }
+    std::size_t at = 0;
+    for (std::size_t i = 0; i + 4 < d.size(); ++i)
+        if (d[i] == 'T' && d[i + 1] == 'y' && d[i + 2] == 'S' &&
+            d[i + 3] == 'h') {
+            at = i + 4;
+            break;
+        }
+    CHECK(at != 0);
+    if (at == 0) return;
+    const std::uint32_t len = psdBe32(d, at);
+    std::size_t o = at + 4;
+    CHECK_EQ(psdBe16(d, o), std::uint16_t{2});  // B2 subset version
+    o += 2;
+    // Pascal font name, padded so (1 + len) is even.
+    const std::size_t fontLen = d[o];
+    o += 1 + fontLen;
+    if ((1 + fontLen) & 1) ++o;
+    o += 2;   // size
+    o += 4;   // color + filler
+    const std::uint16_t units = psdBe16(d, o);
+    o += 2 + static_cast<std::size_t>(units) * 2;
+    auto rdF = [&](std::size_t pos) -> float {
+        const std::uint32_t u = psdBe32(d, pos);
+        float v = 0;
+        std::memcpy(&v, &u, 4);
+        return v;
+    };
+    CHECK(rdF(o + 16) > 14.9f && rdF(o + 16) < 15.1f);      // rot
+    CHECK(rdF(o + 20) > 1.24f && rdF(o + 20) < 1.26f);      // sx
+    CHECK(rdF(o + 24) > 0.74f && rdF(o + 24) < 0.76f);      // sy
+    CHECK(rdF(o + 28) > -10.1f && rdF(o + 28) < -9.9f);     // skew
+    CHECK(o + 32 == at + 4 + len);  // exact payload, no trailing slack
+    std::remove(path.c_str());
+}
+
 TEST(psd_runs_flatten_counted) {
     Canvas c(32, 32);
     c.addLayer("mixed");

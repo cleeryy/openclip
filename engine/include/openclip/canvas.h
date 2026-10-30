@@ -111,6 +111,10 @@ struct Layer {
     std::string textFontFile;  // x-openclip-text-fontfile
     std::string textDir;      // x-openclip-text-dir ("v" = vertical)
     std::string textHyphen;   // x-openclip-text-hyphen ("1" = on)
+    // B2 text transform (ARCHITECTURE.md "B2 additions" §1): opaque
+    // "rot,sx,sy,skew" tuple (empty = identity), persisted as
+    // x-openclip-text-xform and read back by nLayerState "xform".
+    std::string textXform;
     bool hasText() const { return !textContent.empty(); }
 
     // T2 bubble fiche (ARCHITECTURE.md §T2 §5, opaque like M8/V+1):

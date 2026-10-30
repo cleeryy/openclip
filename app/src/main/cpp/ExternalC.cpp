@@ -43,6 +43,7 @@
 #include "openclip/apng.h"
 #include "openclip/blend.h"
 #include "openclip/brush.h"
+#include "openclip/brush_tip.h"
 #include "openclip/bubble.h"
 #include "openclip/canvas.h"
 #include "openclip/canvas_ops.h"
@@ -51,6 +52,7 @@
 #include "openclip/filters.h"
 #include "openclip/fill.h"
 #include "openclip/retouch.h"
+#include "openclip/text_layer.h"
 #include "openclip/texture.h"
 #include "openclip/fill_layer.h"
 #include "openclip/gif.h"
@@ -175,6 +177,10 @@ struct Session {
     openclip::RefScene refScene;
     bool sceneOn = false;
     openclip::BrushParams brush;
+    // B2 §3: installed brush tip (decoded PNG alpha mask). Empty = the
+    // legacy round stamp, byte-identical path.
+    openclip::BrushTip tip;
+    bool tipReady = false;
     std::uint8_t r = 20, g = 20, b = 20;
     // M2 shim-side brush state (engine takes over when its M2 lane lands):
     // stabilize = input smoothing 0..1, curve = pressure exponent 0..1,
@@ -397,6 +403,10 @@ bool paintStamp(Session* s, const openclip::Dab& dab) {
                                               dab.pressure, dab.r, dab.g,
                                               dab.b),
                     s->brush);
+            } else if (s->tipReady) {
+                // B2 §3: installed .abr tip replaces the round falloff;
+                // size/opacity/spacing/alpha-lock stay the shared ones.
+                openclip::paintTipDab(surf, dab, s->brush, s->tip, aLock);
             } else {
                 openclip::paintDab(surf, dab, s->brush, aLock);
             }
@@ -668,6 +678,32 @@ Java_dev_openclip_engine_EngineHost_nSetBrush(JNIEnv* env, jclass,
     if (!color.empty()) parseColor(color, s->r, s->g, s->b);
 }
 
+// B2 §3 (ARCHITECTURE.md "B2 additions"): install the brush tip mask
+// from an RGBA PNG (alpha = coverage). Empty/null path clears the tip
+// (the round stamp comes back byte-identical); a decode failure keeps
+// the previous tip and returns false.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSetBrushTip(JNIEnv* env, jclass,
+                                                 jlong handle,
+                                                 jstring path) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string p = path ? toStd(env, path) : std::string();
+    if (p.empty()) {
+        s->tip.clear();
+        s->tipReady = false;
+        return JNI_TRUE;
+    }
+    openclip::Surface decoded;
+    std::string error;
+    if (!openclip::decodePngFile(p, decoded, error)) return JNI_FALSE;
+    openclip::BrushTip tip;
+    if (!openclip::brushTipFromSurface(decoded, tip)) return JNI_FALSE;
+    s->tip = std::move(tip);
+    s->tipReady = true;
+    return JNI_TRUE;
+}
+
 // V+1 text fiche parser (ARCHITECTURE.md "V+1 additions", M8 pattern):
 // unknown keys ignored, missing keys keep code defaults.
 void parseTextDescriptor(const std::string& j, openclip::Layer& l) {
@@ -775,6 +811,10 @@ void parseTextDescriptor(const std::string& j, openclip::Layer& l) {
     const std::string hy = jsonStr(j, "hyphen");
     const double hyn = jsonNum(j, "hyphen", -1.0);
     l.textHyphen = (hy == "1" || hy == "true" || hyn == 1.0) ? "1" : "";
+    // B2 §1: transform tuple, opaque ("rot,sx,sy,skew"; absent/identity
+    // clears it like the other optional fiches).
+    const std::string xf = jsonStr(j, "xf");
+    l.textXform = (xf.size() <= 96 && xf != "0,1,1,0") ? xf : "";
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -1138,6 +1178,11 @@ void appendLayerJson(std::string& out, const openclip::Layer& l,
         if (!l.textHyphen.empty()) {
             out += ",\"hyphen\":true";
         }
+        // B2 §1: transform tuple (absent = identity).
+        if (!l.textXform.empty()) {
+            out += ",\"xform\":";
+            appendJsonStr(out, l.textXform);
+        }
         out += "}";
     }
     // T2 bubble fiche (absent = normal layer; the app shows the o
@@ -1287,6 +1332,7 @@ Java_dev_openclip_engine_EngineHost_nSetLayerText(JNIEnv* env, jclass,
         l.textFontFile.clear();
         l.textDir.clear();
         l.textHyphen.clear();
+        l.textXform.clear();
         return JNI_TRUE;
     }
     parseTextDescriptor(j, l);
@@ -1330,6 +1376,61 @@ Java_dev_openclip_engine_EngineHost_nBlitPngIntoLayer(JNIEnv* env, jclass,
     ly.surface.bytes().swap(decoded.bytes());
     h.endStroke(cur(s));
     return JNI_TRUE;
+}
+
+// B2 §1 (ARCHITECTURE.md "B2 additions"): atomic text commit — create
+// (index < 0) or replace a raster layer's pixels AND apply the text
+// fiche inside ONE document snapshot, so the whole text transform
+// undoes with exactly one nUndo. False + document/history untouched on
+// a bad target, a non canvas-sized PNG or an empty text fiche.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nCommitTextLayer(JNIEnv* env, jclass,
+                                                     jlong handle,
+                                                     jint index,
+                                                     jstring path,
+                                                     jstring json,
+                                                     jstring name) {
+    Session* s = asSession(handle);
+    if (!s || !path) return JNI_FALSE;
+    if (index < -1 || index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    const std::string p = toStd(env, path);
+    if (p.empty()) return JNI_FALSE;
+    openclip::Surface decoded;
+    std::string error;
+    if (!openclip::decodePngFile(p, decoded, error)) return JNI_FALSE;
+    if (decoded.width() != cur(s).width() ||
+        decoded.height() != cur(s).height())
+        return JNI_FALSE;
+    // Parse the opaque fiche through the V+1 parser (one source of
+    // truth), then hand the engine a plain struct.
+    openclip::Layer tmp;
+    parseTextDescriptor(json ? toStd(env, json) : std::string(), tmp);
+    if (tmp.textContent.empty()) return JNI_FALSE;
+    openclip::TextLayerFiche f;
+    f.content = tmp.textContent;
+    f.font = tmp.textFont;
+    f.style = tmp.textStyle;
+    f.align = tmp.textAlign;
+    f.color = tmp.textColor;
+    f.box = tmp.textBox;
+    f.runs = tmp.textRuns;
+    f.outline = tmp.textOutline;
+    f.fontFile = tmp.textFontFile;
+    f.dir = tmp.textDir;
+    f.hyphen = tmp.textHyphen;
+    f.xform = tmp.textXform;
+    f.sizePx = tmp.textSizePx;
+    f.leading = tmp.textLeading;
+    f.tracking = tmp.textTracking;
+    openclip::TextLayerCommit spec;
+    spec.index = index;
+    spec.name = (name ? toStd(env, name) : std::string()).substr(0, 64);
+    spec.pixels = &decoded;
+    spec.fiche = f;
+    return openclip::commitTextLayer(cur(s), hist(s), spec, error)
+               ? JNI_TRUE
+               : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jint JNICALL

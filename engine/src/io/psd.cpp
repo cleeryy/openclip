@@ -95,9 +95,13 @@ void utf8ToUtf16Be(const std::string& in, std::vector<std::uint8_t>& out) {
 // minimal): version u16=1, Pascal font name, u16 size px, 4 straight
 // bytes color+0, u16 unit count + UTF-16BE text, 4 big-endian floats
 // frame (x,y,w,h parsed from textBox "x,y,w", h=0 when absent).
+// B2 §1 appends four floats (rot, sx, sy, skew) after the frame and
+// bumps the subset version to 2: a version-1 reader stops at the
+// frame, so older parses stay valid. The transform itself is exact;
+// runs still flatten + count (unchanged T2 rule).
 std::vector<std::uint8_t> buildTypeToolPayload(const Layer& l) {
     std::vector<std::uint8_t> p;
-    wr16(p, 1);  // subset version
+    wr16(p, 2);  // subset version (B2: 2 adds the transform tuple)
     const std::string font =
         l.textFont.empty() ? "sans-serif" : l.textFont.substr(0, 63);
     p.push_back(static_cast<std::uint8_t>(font.size() & 0xff));
@@ -171,6 +175,28 @@ std::vector<std::uint8_t> buildTypeToolPayload(const Layer& l) {
     wrF(fy);
     wrF(fw);
     wrF(fh);
+    // B2: transform tuple "rot,sx,sy,skew" (identity when absent or
+    // malformed: a bad opaque value never corrupts the block).
+    float xf[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+    {
+        float v[4] = {0, 1, 1, 0};
+        int n = 0;
+        std::size_t pos = 0;
+        while (n < 4 && pos < l.textXform.size()) {
+            while (pos < l.textXform.size() &&
+                   (l.textXform[pos] == ' ' || l.textXform[pos] == ','))
+                ++pos;
+            if (pos >= l.textXform.size()) break;
+            char* e = nullptr;
+            v[n++] = std::strtof(l.textXform.c_str() + pos, &e);
+            if (e == l.textXform.c_str() + pos) break;
+            pos = static_cast<std::size_t>(e - l.textXform.c_str());
+        }
+        if (n == 4) {
+            for (int k = 0; k < 4; ++k) xf[k] = v[k];
+        }
+    }
+    for (float f : xf) wrF(f);
     return p;
 }
 
