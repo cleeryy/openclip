@@ -6257,9 +6257,13 @@ class EngineConformanceTest {
                 b.recycle()
             }
             assertTrue("fallback commit must undo", es.undo())
-            // Undo restores pixels (touchTile history); the fiche is layer
-            // metadata and survives (same rule as the M8 adjust descriptor).
-            assertTrue(es.layerTextForTest(idx)?.text == "Fallback")
+            // B2 §1: the text commit is ONE document snapshot, so undo
+            // removes the created layer with its fiche (previously the
+            // pixels-only undo left an empty text layer behind).
+            assertNull(
+                "atomic undo removes the created text layer",
+                es.layerTextForTest(idx)
+            )
         } finally {
             closeFreshDoc(id)
         }
@@ -9695,12 +9699,14 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             bp.recycle()
             assertTrue(es.undo())
             val out = base.copy(outline = TextOutline(6f, "#000000"))
-            commitTextSync(es, out)
+            // B2 §1: the atomic undo removed the first text layer, so the
+            // second commit lands at the same index (not plain + 1).
+            val outIdx = commitTextSync(es, out)
             val bo = pullFull(es)
             val nOut = inkCount(bo)
             bo.recycle()
             assertTrue("outline must widen the glyph ($nPlain -> $nOut)", nOut > nPlain + 20)
-            val fiche = es.layerTextForTest(plain + 1)
+            val fiche = es.layerTextForTest(outIdx)
             assertNotNull(fiche)
             assertNotNull(fiche!!.outline)
             assertTrue(es.undo())
@@ -12675,6 +12681,377 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             )
         } finally {
             EngineHost.nDispose(handle)
+        }
+    }
+
+
+    // ---- B2 §1–§5 (issue #31): lettering and timing ----
+
+    // B2 §1: a transform re-commit changes the pixels and undoes with
+    // ONE nUndo; the fiche keeps the tuple and survives ORA.
+    @Test
+    fun b2TextTransformCommitIsOneUndo() {
+        val id = openFreshDoc("b2-xform")
+        val es = freshSurface(id)
+        try {
+            val base = dev.openclip.ui.TextSpec(
+                text = "Rotate", font = "sans-serif", sizePx = 64,
+                boxX = 20f, boxY = 30f, boxW = 200f
+            )
+            val idx = commitTextSync(es, base)
+            val before = pullFull(es)
+            val xf = base.copy(
+                rot = 30f, scaleX = 1.3f, scaleY = 0.8f, skew = 12f
+            )
+            assertTrue(
+                "transform re-commit must succeed",
+                awaitBool { cb -> es.reeditText(idx, xf, cb) }
+            )
+            val f = es.layerTextForTest(idx)
+            assertNotNull("fiche must survive the transform", f)
+            assertTrue("rot stored ${f!!.rot}", kotlin.math.abs(f.rot - 30f) < 0.01f)
+            assertTrue("sx stored ${f.scaleX}", kotlin.math.abs(f.scaleX - 1.3f) < 0.01f)
+            assertTrue("sy stored ${f.scaleY}", kotlin.math.abs(f.scaleY - 0.8f) < 0.01f)
+            assertTrue("skew stored ${f.skew}", kotlin.math.abs(f.skew - 12f) < 0.01f)
+            val after = pullFull(es)
+            try {
+                assertFalse(
+                    "transformed text must move pixels",
+                    bitmapPixels(before).contentEquals(bitmapPixels(after))
+                )
+            } finally {
+                after.recycle()
+            }
+            // ONE undo restores the untransformed composite + fiche.
+            assertTrue("one undo must restore the transform", es.undo())
+            val undone = pullFull(es)
+            try {
+                assertTrue(
+                    "one undo restores the pre-transform composite",
+                    bitmapPixels(before).contentEquals(bitmapPixels(undone))
+                )
+            } finally {
+                undone.recycle()
+            }
+            val f0 = es.layerTextForTest(idx)
+            assertNotNull("layer stays after the pixel undo", f0)
+            assertTrue("undo restores the identity tuple", kotlin.math.abs(f0!!.rot) < 0.01f)
+            // ORA keeps the tuple (re-apply, save, load).
+            assertTrue(awaitBool { cb -> es.reeditText(idx, xf, cb) })
+            val ora = File(
+                InstrumentationRegistry.getInstrumentation()
+                    .targetContext.cacheDir, "b2-xform.ora"
+            )
+            assertTrue(awaitBool { cb -> es.saveTo(ora.absolutePath, "ora", cb) })
+            assertTrue(awaitBool { cb -> es.loadFrom(ora.absolutePath, cb) })
+            val fr = es.layerTextForTest(idx)
+            assertNotNull("ORA keeps the fiche", fr)
+            assertTrue(
+                "ORA keeps the transform tuple (${fr!!.rot})",
+                kotlin.math.abs(fr.rot - 30f) < 0.01f
+            )
+            ora.delete()
+            before.recycle()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // B2 §1: the on-canvas handles really drive the commit (rotate drag
+    // -> one atomic re-commit -> one undo).
+    @Test
+    fun b2TextTransformHandlesCommit() {
+        val id = openFreshDoc("b2-handles")
+        val es = freshSurface(id)
+        try {
+            val base = dev.openclip.ui.TextSpec(
+                text = "Handles", font = "sans-serif", sizePx = 72,
+                boxX = 20f, boxY = 40f, boxW = 180f
+            )
+            val idx = commitTextSync(es, base)
+            val before = pullFull(es)
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.openTextTransform?.invoke(idx, base)
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("text-transform-overlay").assertExists()
+            // Proof shot (pulled from the app cache by the gate): one
+            // frame settles the Compose overlay over the SurfaceView.
+            Thread.sleep(1000)
+            composeRule.waitForIdle()
+            shot("openclip-b2.png")
+            composeRule.onNodeWithTag("tt-rotate").performTouchInput {
+                val c = center
+                swipe(c, Offset(c.x + 30f, c.y + 20f), 250L)
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("tt-validate").performClick()
+            var rot = 0f
+            val deadline = SystemClock.uptimeMillis() + 15000
+            while (SystemClock.uptimeMillis() < deadline) {
+                composeRule.waitForIdle()
+                val f = es.layerTextForTest(idx)
+                rot = f?.rot ?: 0f
+                if (kotlin.math.abs(rot) > 0.5f) break
+                Thread.sleep(200)
+            }
+            assertTrue("rotate handle must set a non-zero angle ($rot)", kotlin.math.abs(rot) > 0.5f)
+            val after = pullFull(es)
+            try {
+                assertFalse(
+                    "handle commit must change pixels",
+                    bitmapPixels(before).contentEquals(bitmapPixels(after))
+                )
+            } finally {
+                after.recycle()
+            }
+            assertTrue("handle commit undoes in ONE step", es.undo())
+            val undone = pullFull(es)
+            try {
+                assertTrue(
+                    "one undo restores the handle-free composite",
+                    bitmapPixels(before).contentEquals(bitmapPixels(undone))
+                )
+            } finally {
+                undone.recycle()
+            }
+            before.recycle()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // B2 §2: glyph catalog from the loaded font + insertion at selection.
+    @Test
+    fun b2GlyphCatalogInsert() {
+        val glyphs = dev.openclip.ui.GlyphCatalog.glyphsFor(
+            "sans-serif", false, false
+        )
+        assertTrue("catalog must not be empty", glyphs.size >= 40)
+        assertTrue("ASCII letter present", glyphs.contains("A"))
+        assertTrue("Latin-1 accent present", glyphs.contains("é"))
+        assertTrue("catalog capped", glyphs.size <= 320)
+        val tag = dev.openclip.ui.GlyphCatalog.tagOf("é")
+        assertEquals("glyph-u+00E9", tag)
+        val (t1, c1) = dev.openclip.ui.GlyphCatalog.insertAt("abcd", 1, 3, "É")
+        assertEquals("aÉd", t1)
+        assertEquals(2, c1)
+        val (t2, c2) = dev.openclip.ui.GlyphCatalog.insertAt("", 0, 0, "ß")
+        assertEquals("ß", t2)
+        assertEquals(1, c2)
+    }
+
+    // B2 §2: story paragraphs keep offsets and runs across edits; the
+    // preview reuses the existing TextLineLayout.
+    @Test
+    fun b2StoryParagraphsAndRuns() {
+        val paras = dev.openclip.ui.storyParagraphs("A\n\nBB")
+        assertEquals(3, paras.size)
+        assertEquals(0, paras[0].start)
+        assertEquals(2, paras[1].start)
+        assertEquals(3, paras[2].start)
+        assertEquals("BB", paras[2].text)
+        val runs = dev.openclip.ui.storyApplyRun(
+            emptyList(), 3, 2,
+            dev.openclip.ui.TextRun(
+                start = 3, len = 2, font = "serif", style = "bold"
+            )
+        )
+        assertEquals(1, runs.size)
+        assertEquals(3, runs[0].start)
+        // Editing paragraph 0 shifts the paragraph-2 run.
+        val shifted = dev.openclip.ui.storyShiftRuns(runs, 1, 4, 10)
+        assertEquals(7, shifted[0].start)
+        // Layout reuse: a narrow measure wraps the story over 2+ lines.
+        val spec = dev.openclip.ui.TextSpec(
+            text = "A long story line that must wrap several times",
+            sizePx = 24, boxW = 90f
+        )
+        val frame = dev.openclip.ui.TextLineLayout.frameSize(spec, 256)
+        val lines = dev.openclip.ui.TextLineLayout.layout(spec, frame.first)
+        assertTrue("story preview must wrap (${lines.size})", lines.size >= 2)
+        assertEquals(90f, frame.first, 0.01f)
+    }
+
+    // B2 §3: the parsed .abr tip becomes an installable, USABLE preset
+    // (file + preview) and the engine stamps its mask.
+    @Test
+    fun b2AbrTipInstallAndPaint() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(ctx.cacheDir, "b2-abr")
+        root.deleteRecursively()
+        root.mkdirs()
+        val (tips, _) = dev.openclip.ui.AbrParser.parse(
+            dev.openclip.ui.AbrParser.fixtureTip()
+        )
+        assertEquals(1, tips.size)
+        val installed = dev.openclip.ui.AbrTipStore.install(root, tips, "fixture")
+        assertEquals(1, installed.size)
+        assertTrue("tip PNG written", File(installed[0].path).isFile)
+        assertTrue("tip PNG non-empty", File(installed[0].path).length() > 0)
+        val reloaded = dev.openclip.ui.AbrTipStore.load(root)
+        assertEquals(1, reloaded.size)
+        assertEquals("fixture-1", reloaded[0].name)
+        val preview = dev.openclip.ui.AbrTipStore.previewBitmap(reloaded[0])
+        assertNotNull("tip preview must decode", preview)
+        preview!!.recycle()
+
+        val handle = EngineHost.nInit(64, 64, 160f)
+        try {
+            EngineHost.nSetBrush(
+                handle,
+                """{"radius":8,"hardness":1.0,"opaque":1.0,"spacing":0.1,"color":"#FF0000","mode":"brush"}"""
+            )
+            // Round reference dab.
+            var sid = EngineHost.nStrokeBegin(handle, 32f, 32f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            val round = b1Composite(handle, 64, 64)
+            assertTrue(EngineHost.nUndo(handle))
+            // Tip dab: the fixture is a 2x2 center block, so the painted
+            // area must be clearly smaller than the round disc.
+            assertTrue(
+                "installed tip must load",
+                EngineHost.nSetBrushTip(handle, reloaded[0].path)
+            )
+            sid = EngineHost.nStrokeBegin(handle, 32f, 32f, 1f)
+            EngineHost.nStrokeEnd(handle, sid)
+            val tipped = b1Composite(handle, 64, 64)
+            var roundInk = 0
+            var tipInk = 0
+            for (k in round.indices) {
+                if (round[k] != -1) roundInk++
+                if (tipped[k] != -1) tipInk++
+            }
+            assertTrue("round dab paints ($roundInk)", roundInk > 100)
+            assertTrue("tip dab paints ($tipInk)", tipInk > 10)
+            assertTrue(
+                "tip mask must shrink the stamp ($tipInk vs $roundInk)",
+                tipInk > 0 && tipInk < roundInk
+            )
+            // Mask shape: the transparent outer texel of the fixture
+            // leaves the stamp edge faint where the round dab is solid
+            // (composite over the white paper: green channel).
+            val roundEdge = (round[32 * 64 + 25] ushr 8) and 0xFF
+            val tipEdge = (tipped[32 * 64 + 25] ushr 8) and 0xFF
+            assertTrue(
+                "round edge is solid ink ($roundEdge)",
+                roundEdge < 40
+            )
+            assertTrue(
+                "tip edge follows the mask ($tipEdge vs $roundEdge)",
+                tipEdge > 120
+            )
+            // Clearing the tip returns to the round stamp.
+            assertTrue(EngineHost.nSetBrushTip(handle, ""))
+            val sid2 = EngineHost.nStrokeBegin(handle, 32f, 32f, 1f)
+            EngineHost.nStrokeEnd(handle, sid2)
+            val cleared = b1Composite(handle, 64, 64)
+            var clearedInk = 0
+            for (k in cleared.indices) if (cleared[k] != -1) clearedInk++
+            assertTrue("cleared tip uses the round stamp ($clearedInk)", clearedInk >= roundInk)
+        } finally {
+            EngineHost.nDispose(handle)
+            root.deleteRecursively()
+        }
+    }
+
+    // B2 §4: ClipAudio seek on a generated WAV (emulator MediaPlayer).
+    @Test
+    fun b2AudioScrubSeek() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val wav = File(ctx.cacheDir, "b2-scrub.wav")
+        // 1 s of silence, 8 kHz mono 16-bit.
+        val rate = 8000
+        val samples = rate
+        val data = samples * 2
+        val out = java.io.ByteArrayOutputStream()
+        fun le16(v: Int) {
+            out.write(v and 0xFF)
+            out.write((v shr 8) and 0xFF)
+        }
+        fun le32(v: Int) {
+            for (k in 0 until 4) out.write((v shr (8 * k)) and 0xFF)
+        }
+        out.write("RIFF".toByteArray())
+        le32(36 + data)
+        out.write("WAVE".toByteArray())
+        out.write("fmt ".toByteArray())
+        le32(16)
+        le16(1)              // PCM
+        le16(1)              // mono
+        le32(rate)
+        le32(rate * 2)      // byte rate
+        le16(2)              // block align
+        le16(16)             // bits
+        out.write("data".toByteArray())
+        le32(data)
+        out.write(ByteArray(data))
+        wav.writeBytes(out.toByteArray())
+        val audio = dev.openclip.media.ClipAudio()
+        try {
+            assertTrue("WAV must attach", audio.attach(wav.absolutePath, "b2.wav"))
+            assertTrue("duration detected", audio.durationMs() in 800..1200)
+            assertEquals(
+                "cel 6 at 12 fps = 500 ms",
+                500, dev.openclip.media.ClipAudio.celToMs(6, 12f)
+            )
+            assertTrue("seek must succeed", audio.seekTo(500))
+            Thread.sleep(300)
+            val pos = audio.positionMs()
+            assertTrue("seek lands near 500ms (got $pos)", pos in 300..900)
+            assertTrue("out-of-range seek clamps", audio.seekTo(99999))
+            Thread.sleep(200)
+            assertTrue("clamped position stays in range", audio.positionMs() <= audio.durationMs())
+            assertTrue("negative seek clamps", audio.seekTo(-50))
+        } finally {
+            audio.clear()
+            wav.delete()
+        }
+    }
+
+    // B2 §5: one frame every N strokes + WebM export from the stills.
+    @Test
+    fun b2TimelapseCaptureExport() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dir = File(ctx.cacheDir, "b2-timelapse")
+        dir.deleteRecursively()
+        val out = File(ctx.cacheDir, "b2-timelapse.webm")
+        out.delete()
+        val rec = dev.openclip.media.Timelapse.Recorder()
+        rec.everyN = 2
+        try {
+            val due = (1..5).map { rec.onStroke() }
+            assertEquals(
+                listOf(false, true, false, true, false), due
+            )
+            var n = 0
+            for (k in 0 until 2) {
+                val bmp = Bitmap.createBitmap(600, 400, Bitmap.Config.ARGB_8888)
+                val c = android.graphics.Canvas(bmp)
+                c.drawColor(0xFFFFFFFF.toInt())
+                val p = android.graphics.Paint()
+                p.color = 0xFF204060.toInt()
+                c.drawCircle(100f + k * 60f, 200f, 60f, p)
+                assertTrue("capture $k must store a frame", rec.capture(bmp, dir))
+                bmp.recycle()
+                n++
+            }
+            assertEquals(2, rec.frames.size)
+            assertEquals(2, n)
+            // Bounded downscale keeps the WebM small and the aspect.
+            val first = android.graphics.BitmapFactory.decodeFile(
+                rec.frames[0].absolutePath
+            )
+            assertNotNull("stored frame must decode", first)
+            assertEquals(480, first!!.width)
+            assertEquals(320, first.height)
+            first.recycle()
+            assertTrue("timelapse export must succeed", rec.exportWebm(12f, out))
+            assertTrue("WebM file must exist", out.isFile)
+            assertTrue("WebM must be non-empty", out.length() > 100)
+        } finally {
+            out.delete()
+            dir.deleteRecursively()
         }
     }
 

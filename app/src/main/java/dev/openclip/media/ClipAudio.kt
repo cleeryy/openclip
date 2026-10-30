@@ -9,6 +9,12 @@ package dev.openclip.media
 import android.media.MediaPlayer
 
 class ClipAudio {
+    companion object {
+        /** B2 §4: cel index -> clip time in ms (fps clamped to >= 1). */
+        fun celToMs(frame: Int, fps: Float): Int =
+            (frame.coerceAtLeast(0) * 1000f / fps.coerceAtLeast(1f)).toInt()
+    }
+
     private var player: MediaPlayer? = null
 
     var fileName: String? = null
@@ -60,6 +66,31 @@ class ClipAudio {
         } finally {
             isPlaying = false
         }
+    }
+
+    /**
+     * B2 §4 (ARCHITECTURE.md "B2 additions"): seek the attached track
+     * to `ms` (clamped to the duration). Never throws; false without
+     * audio or on a torn-down player. Playback state is untouched
+     * (seeking while paused stays paused).
+     */
+    fun seekTo(ms: Int): Boolean {
+        val p = player ?: return false
+        return try {
+            val d = p.duration
+            if (d <= 0) return false
+            p.seekTo(ms.coerceIn(0, d))
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Current playback position in ms (0 without audio). */
+    fun positionMs(): Int = try {
+        player?.currentPosition ?: 0
+    } catch (_: Exception) {
+        0
     }
 
     fun durationMs(): Int = try {

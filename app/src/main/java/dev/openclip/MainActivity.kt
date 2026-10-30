@@ -78,6 +78,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
+import dev.openclip.media.Timelapse
 import dev.openclip.media.WebdavClient
 import dev.openclip.doc.DocClip
 import dev.openclip.doc.DocOra
@@ -154,6 +155,7 @@ import dev.openclip.ui.restoreTextFiches
 import dev.openclip.ui.stashTextFiches
 import dev.openclip.ui.TextPanel
 import dev.openclip.ui.TextSpec
+import dev.openclip.ui.TextTransformOverlay
 import dev.openclip.ui.VectorOpsPanel
 import dev.openclip.ui.VectorStylePanel
 import dev.openclip.ui.RecomposeTestHooks
@@ -232,6 +234,8 @@ class MainActivity : ComponentActivity() {
         var clearLastWorkspace: (() -> Unit)? = null
         var pendingTab: (() -> String?)? = null
         var requestActivate: ((String) -> Unit)? = null
+        // B2 §1: open the transform handles for a text layer (test hook).
+        var openTextTransform: ((Int, TextSpec) -> Unit)? = null
     }
     val activityTestHooks = ActivityTestHooks()
 
@@ -330,6 +334,13 @@ class MainActivity : ComponentActivity() {
         }
         val clipAudio = remember { ClipAudio() }
         val audioName = remember { mutableStateOf<String?>(null) }
+        // B2 §5: session timelapse recorder (every N committed strokes).
+        val timelapse = remember { Timelapse.Recorder() }
+        val timelapseOn = remember { mutableStateOf(false) }
+        val timelapseFrames = remember { mutableStateOf(0) }
+        val timelapseEvery = remember {
+            mutableStateOf(Timelapse.DEFAULT_EVERY)
+        }
         // T3 §4 : chemin du cache audio (export audio seul = copie
         // byte-identique, 0 JNI).
         val audioPath = remember { mutableStateOf<String?>(null) }
@@ -434,6 +445,10 @@ class MainActivity : ComponentActivity() {
         val textAnchor = remember { mutableStateOf<Pair<Float, Float>?>(null) }
         val textEditLayer = remember { mutableStateOf(-1) }
         val textInitial = remember { mutableStateOf(TextSpec(text = "")) }
+        // B2 §1: transform handles over the committed text frame.
+        val showTextXform = remember { mutableStateOf(false) }
+        val textXformLayer = remember { mutableStateOf(-1) }
+        val textXformSpec = remember { mutableStateOf(TextSpec(text = "")) }
         // T2: inline canvas editor (Valider = commit, Réglages = panel),
         // font library liveness, PSD text inclusion.
         val showInline = remember { mutableStateOf(false) }
@@ -1011,6 +1026,37 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // B2 §5: timelapse WebM export (same SAF + cache pattern as the
+        // clip WebM lane; frames are the recorder's PNG stills).
+        val createTimelapse = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("video/webm")
+        ) { uri: Uri? ->
+            if (uri != null && !exporting.value) {
+                exporting.value = true
+                val dst = java.io.File(
+                    ctx.cacheDir,
+                    "timelapse-${System.currentTimeMillis()}.webm"
+                )
+                Thread {
+                    val ok = try {
+                        timelapse.exportWebm(clipFps.value, dst)
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (ok) copyFromTo(ctx, dst, uri)
+                    dst.delete()
+                    Handler(Looper.getMainLooper()).post {
+                        status.value = ctx.getString(
+                            if (ok) R.string.export_ok else R.string.export_failed
+                        )
+                        exporting.value = false
+                    }
+                }.start()
+            } else if (uri != null) {
+                status.value = ctx.getString(R.string.export_failed)
+            }
+        }
+
         // V+2 long exports (GIF/webtoon/SVG): panels render to cache,
         // one SAF hop per file (mime + suggested name hoisted here).
         val pendingExportMime = remember { mutableStateOf("image/gif") }
@@ -1126,7 +1172,9 @@ class MainActivity : ComponentActivity() {
         }
 
         // T2 §1–§2: shared text commit outcome (inline + panel).
-        fun textCommitDone(surf: EngineSurface, ok: Boolean) {
+        // B2 §1: the committed layer opens its transform handles (one
+        // undo per transform commit).
+        fun textCommitDone(surf: EngineSurface, ok: Boolean, spec: TextSpec) {
             status.value = if (ok) {
                 ctx.getString(R.string.text_committed)
             } else {
@@ -1137,6 +1185,12 @@ class MainActivity : ComponentActivity() {
                 if (aid != null) {
                     docRegistry.markDirty(aid, true)
                 }
+                val idx = surf.lastTextIndex
+                if (idx >= 0) {
+                    textXformLayer.value = idx
+                    textXformSpec.value = spec
+                    showTextXform.value = true
+                }
             }
             if (surf.lastFontFallback) {
                 status.value = ctx.getString(
@@ -1144,6 +1198,31 @@ class MainActivity : ComponentActivity() {
                 )
             }
             refreshKey.value++
+        }
+
+        // B2 §5: pull the current composite and store one timelapse
+        // frame (background thread; failures never surface as crashes).
+        fun captureTimelapse(surf: EngineSurface) {
+            Thread {
+                val bmp = try {
+                    // The CURRENT cel (multi-frame docs), not frame 0.
+                    surf.pullExportBitmap(surf.currentFrameIndex())
+                } catch (_: Exception) {
+                    null
+                }
+                if (bmp != null) {
+                    try {
+                        timelapse.capture(
+                            bmp, java.io.File(ctx.cacheDir, "timelapse")
+                        )
+                    } finally {
+                        if (!bmp.isRecycled) bmp.recycle()
+                    }
+                }
+                Handler(Looper.getMainLooper()).post {
+                    timelapseFrames.value = timelapse.frames.size
+                }
+            }.start()
         }
 
         fun wireSurface(cv: EngineSurface, docId: String) {
@@ -1217,6 +1296,19 @@ class MainActivity : ComponentActivity() {
                 refreshKey.value++
                 docRegistry.markDirty(docId, true)
                 store.pushRecent(store.inkHex)
+            }
+            // B2 §5: one frame every N PAINT strokes (layer/flag edits
+            // never count); the label gate keeps milestones meaningful.
+            val tlLabels = setOf(
+                "stroke", "vector", "smart", "refpaint", "blit",
+                "fill", "gradient", "shape", "text"
+            )
+            cv.onCommittedStroke = { label ->
+                if (timelapseOn.value && label in tlLabels &&
+                    timelapse.onStroke()
+                ) {
+                    captureTimelapse(cv)
+                }
             }
             cv.onPipetteDown = { vx, vy ->
                 cv.sampleCompositeAt(vx, vy) { hex, onPaper ->
@@ -1709,6 +1801,12 @@ class MainActivity : ComponentActivity() {
             activityTestHooks.pendingTab = { pendingTabId.value }
             activityTestHooks.requestActivate = { id: String -> requestActivate(id) }
             activityTestHooks.paperReady = { id: String -> paperDone[id] == true }
+            activityTestHooks.openTextTransform = { layer, spec ->
+                textXformLayer.value = layer
+                textXformSpec.value = spec
+                showTextXform.value = true
+                poke()
+            }
             activityTestHooks.clearLastWorkspace = {
                 workspaceStore.lastWorkspace.value = null
                 workspaceStore.flush()
@@ -2631,7 +2729,7 @@ class MainActivity : ComponentActivity() {
                                         val spec =
                                             textInitial.value.copy(text = text)
                                         val done: (Boolean) -> Unit = { ok ->
-                                            textCommitDone(surf, ok)
+                                            textCommitDone(surf, ok, spec)
                                         }
                                         if (layer >= 0) surf.reeditText(
                                             layer, spec, done
@@ -2650,6 +2748,48 @@ class MainActivity : ComponentActivity() {
                             showInline.value = false
                         }
                     }
+                    // B2 §1: transform handles over the text frame
+                    // (auto-opened after a text commit; 48dp targets).
+                    if (showTextXform.value) {
+                        val surf = activeSurface()
+                        val layer = textXformLayer.value
+                        if (surf != null && layer >= 0) {
+                            key(viewZoomTick.value + loupeTick.value) {
+                                TextTransformOverlay(
+                                    surface = surf,
+                                    layer = layer,
+                                    initial = textXformSpec.value,
+                                    onCommit = { spec ->
+                                        showTextXform.value = false
+                                        surf.reeditText(layer, spec) { ok ->
+                                            status.value = if (ok) {
+                                                ctx.getString(
+                                                    R.string.text_xform_committed
+                                                )
+                                            } else {
+                                                ctx.getString(
+                                                    R.string.filter_failed
+                                                )
+                                            }
+                                            if (ok) {
+                                                val aid = activeDocId.value
+                                                if (aid != null) {
+                                                    docRegistry.markDirty(
+                                                        aid, true
+                                                    )
+                                                }
+                                            }
+                                            refreshKey.value++
+                                        }
+                                    },
+                                    onDismiss = { showTextXform.value = false },
+                                    modifier = Modifier.align(Alignment.TopStart)
+                                )
+                            }
+                        } else {
+                            showTextXform.value = false
+                        }
+                    }
                     // V+1: the raster eraser is a real dest-out erase
                     // (alpha-erase) — the honest banner is gone. A
                     // one-shot migration note announces the new
@@ -2664,7 +2804,9 @@ class MainActivity : ComponentActivity() {
                         PinnedBrushBar(
                             surface = surface,
                             prefs = brushPrefs,
-                            hidden = showTimeline.value,
+                            // B2 §1: the transform bar owns the canvas
+                            // bottom while the handles are open.
+                            hidden = showTimeline.value || showTextXform.value,
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .padding(
@@ -3131,6 +3273,43 @@ class MainActivity : ComponentActivity() {
                                     "calque-${System.currentTimeMillis()}.webm"
                                 )
                             },
+                            // B2 §4: audio follows the scrub drag.
+                            onScrubSeek = { frame ->
+                                if (clipAudio.hasAudio) {
+                                    clipAudio.seekTo(
+                                        ClipAudio.celToMs(
+                                            frame, clipFps.value
+                                        )
+                                    )
+                                }
+                            },
+                            // B2 §5: timelapse recorder controls.
+                            timelapseOn = timelapseOn.value,
+                            timelapseFrames = timelapseFrames.value,
+                            timelapseEvery = timelapseEvery.value,
+                            onToggleTimelapse = {
+                                if (timelapseOn.value) {
+                                    timelapseOn.value = false
+                                } else {
+                                    timelapse.reset()
+                                    timelapse.everyN = timelapseEvery.value
+                                    timelapseFrames.value = 0
+                                    timelapseOn.value = true
+                                    captureTimelapse(surface)
+                                    status.value = ctx.getString(
+                                        R.string.timelapse_started
+                                    )
+                                }
+                            },
+                            onTimelapseEvery = { n ->
+                                timelapseEvery.value = n.coerceIn(1, 50)
+                                timelapse.everyN = timelapseEvery.value
+                            },
+                            onExportTimelapse = {
+                                createTimelapse.launch(
+                                    "timelapse-${System.currentTimeMillis()}.webm"
+                                )
+                            },
                             onExportCsv = { csv ->
                                 pendingCsv.value = csv
                                 createCsv.launch(
@@ -3293,11 +3472,25 @@ class MainActivity : ComponentActivity() {
                             inkHex = inkHex,
                             fonts = FontRegistry.families(),
                             onImportFont = { openFont.launch(arrayOf("font/*")) },
+                            onTransform = { spec ->
+                                showTextPanel.value = false
+                                val layer = textEditLayer.value
+                                if (layer >= 0) {
+                                    textXformLayer.value = layer
+                                    textXformSpec.value = spec
+                                    showTextXform.value = true
+                                } else {
+                                    val done: (Boolean) -> Unit = { ok ->
+                                        textCommitDone(surf, ok, spec)
+                                    }
+                                    surf.commitText(spec, done)
+                                }
+                            },
                             onCommit = { spec ->
                                 showTextPanel.value = false
                                 val layer = textEditLayer.value
                                 val done: (Boolean) -> Unit = { ok ->
-                                    textCommitDone(surf, ok)
+                                    textCommitDone(surf, ok, spec)
                                 }
                                 if (layer >= 0) surf.reeditText(layer, spec, done)
                                 else surf.commitText(spec, done)

@@ -75,6 +75,14 @@ object EngineHost {
     external fun nSetLayerText(handle: Long, index: Int, json: String?): Boolean
     external fun nBlitPngIntoLayer(handle: Long, index: Int, path: String): Boolean
 
+    // B2 additions (ARCHITECTURE.md "B2 additions"): atomic text commit
+    // (pixels + fiche = ONE undo; index < 0 creates the layer) and
+    // installable brush tips (RGBA PNG, alpha = mask; empty clears).
+    external fun nCommitTextLayer(
+        handle: Long, index: Int, path: String, json: String, name: String
+    ): Boolean
+    external fun nSetBrushTip(handle: Long, path: String?): Boolean
+
     // V+2 additions (ARCHITECTURE.md): cel rhythm + onion counts,
     // selection mask/transform, GIF export, generic fiche, PSD count.
     external fun nMoveCel(handle: Long, from: Int, to: Int): Boolean

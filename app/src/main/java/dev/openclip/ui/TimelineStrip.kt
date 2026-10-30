@@ -51,6 +51,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,6 +92,14 @@ fun TimelineStrip(
     onImportAudio: () -> Unit = {},
     onClearAudio: () -> Unit = {},
     onExportWebm: () -> Unit = {},
+    // B2 §4/§5: audio scrub while dragging + timelapse controls.
+    onScrubSeek: (Int) -> Unit = {},
+    timelapseOn: Boolean = false,
+    timelapseFrames: Int = 0,
+    timelapseEvery: Int = 5,
+    onToggleTimelapse: () -> Unit = {},
+    onTimelapseEvery: (Int) -> Unit = {},
+    onExportTimelapse: () -> Unit = {},
     onAiUpscale: (Int) -> Unit = {},
     // T3 animation productive (ARCHITECTURE.md §T3) : CSV de la
     // feuille via SAF (MainActivity), le reste est engine direct.
@@ -250,6 +259,9 @@ fun TimelineStrip(
     // cel from the drag-start cel; setFrame only on release.
     var scrubStart by remember { mutableStateOf(0) }
     var scrubDx by remember { mutableStateOf(0f) }
+    // B2 §4: last cel reported to the audio seek (only on change).
+    var lastSeekCel by remember { mutableStateOf(-1) }
+    val scrubSeek = rememberUpdatedState(onScrubSeek)
     val density = LocalDensity.current
     val armPx = with(density) { SCRUB_ARM_DP.dp.toPx() }
     val stepPx = with(density) { SCRUB_STEP_DP.dp.toPx() }
@@ -282,6 +294,13 @@ fun TimelineStrip(
                             (scrubStart + (sign(scrubDx) * steps).toInt())
                                 .coerceIn(0, count - 1)
                         }
+                        // B2 §4: seek the attached audio DURING the drag
+                        // (one seek per changed cel, never per pixel).
+                        val cand = scrubCandidate
+                        if (cand != null && cand != lastSeekCel) {
+                            lastSeekCel = cand
+                            scrubSeek.value(cand)
+                        }
                     },
                     orientation = Orientation.Horizontal,
                     onDragStarted = {
@@ -292,8 +311,11 @@ fun TimelineStrip(
                     onDragStopped = {
                         scrubCandidate?.let { c ->
                             if (c != cur) gotoFrame(c)
+                            // Final seek lands exactly on the release cel.
+                            scrubSeek.value(c)
                         }
                         scrubCandidate = null
+                        lastSeekCel = -1
                     }
                 )
         ) {
@@ -862,6 +884,57 @@ fun TimelineStrip(
                     maxLines = 1
                 )
             }
+        }
+        // B2 §5: timelapse controls (session-only recorder, WebM export).
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(
+                onClick = onToggleTimelapse,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("timelapse-toggle")
+            ) {
+                Text(
+                    stringResource(
+                        if (timelapseOn) R.string.timelapse_on
+                        else R.string.timelapse_off
+                    ),
+                    maxLines = 1
+                )
+            }
+            Text(
+                stringResource(R.string.timelapse_frames, timelapseFrames),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                modifier = Modifier.testTag("timelapse-count")
+            )
+            TextButton(
+                onClick = { onTimelapseEvery((timelapseEvery - 1).coerceIn(1, 50)) },
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("timelapse-every-minus")
+            ) { Text("−", maxLines = 1) }
+            Text(
+                stringResource(R.string.timelapse_every, timelapseEvery),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                modifier = Modifier.testTag("timelapse-every")
+            )
+            TextButton(
+                onClick = { onTimelapseEvery((timelapseEvery + 1).coerceIn(1, 50)) },
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("timelapse-every-plus")
+            ) { Text("+", maxLines = 1) }
+            TextButton(
+                enabled = !exporting && timelapseFrames > 0,
+                onClick = onExportTimelapse,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("timelapse-export")
+            ) { Text(stringResource(R.string.timelapse_export), maxLines = 1) }
         }
         // T3 animation productive (ARCHITECTURE.md §T3) : cles /
         // camera / pistes / feuille. Les dialogues poussent le moteur

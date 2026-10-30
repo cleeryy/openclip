@@ -1494,3 +1494,99 @@ EXACTLY 3 new symbols (`nSetCloneSource`, `nSetPatternBrush`,
   clone (aligned + non-aligned), smudge, dodge, burn, pattern, texture
   — each produces ink (or a composite change) and undoes in ONE
   `nUndo` step.
+
+B2 additions (decided 2026-10-30, issue #31 slice B "lettering and
+timing" — text transform, glyph palette, story editor, installable
+`.abr` tips, audio scrub, timelapse). Documented BEFORE code per the
+frozen-JNI rule. EXACTLY 2 new symbols (`nCommitTextLayer`,
+`nSetBrushTip`); everything else is app-side or grows existing JSON.
+
+- Conventions: M3 alpha contract unchanged (pixels stay premultiplied,
+  rgb <= alpha). Text transforms are baked by the app into the PNG it
+  commits, exactly like the V+1 text raster; the engine only stores
+  the transform tuple so re-edits and exports stay lossless. Audio
+  scrub and timelapse never touch engine state. Nothing removed: every
+  existing symbol, JSON key and fiche keeps its behaviour.
+- §1 text transform handles (ONE new symbol). `TextSpec` (app) grows
+  `rot` (degrees, -180..180), `scaleX`/`scaleY` (0.1..8) and `skew`
+  (degrees, -45..45), rendered around the text frame origin (`boxX`,
+  `boxY`): translate(origin) * rotate(rot) * skew(tan(skew), 0) *
+  scale(sx, sy) * translate(-origin). The fiche serializes them as
+  `"xf":"rot,sx,sy,skew"`; the engine stores the opaque
+  `Layer::textXform` string (<= 96 bytes, same clean-degrade rule as
+  the T2 fiches), `nLayerState` surfaces `"xform"` inside the `text`
+  object and ORA persists `x-openclip-text-xform`. PSD keeps the T2
+  TySh subset block and bumps its payload to version 2 by APPENDING
+  four big-endian floats (rot, sx, sy, skew) after the frame — a
+  version-1 reader stops at the frame, so old parses stay valid. Runs
+  > 1 still flatten onto the base style and count +1 approximation
+  (unchanged T2 rule); the transform itself is exact in the block.
+  `nCommitTextLayer(handle, index, pngPath, json, name)` performs the
+  whole commit (create or replace layer pixels + parse the text fiche)
+  inside ONE `History` document snapshot: a new layer, a re-edit and a
+  transform-only re-commit each undo with exactly one `nUndo`. False +
+  document untouched on a bad index (group/locked/fill/alphaLock),
+  a non canvas-sized PNG, or an empty text; no undo entry on refusal.
+  The legacy `nBlitPngIntoLayer` + `nSetLayerText` pair stays
+  byte-identical for existing callers. Engine-side helper
+  `openclip/text_layer.h` (pure Canvas + History, no JNI/Android).
+- §2 glyph palette + story editor (0 new symbols, app-side only). The
+  glyph browser enumerates the LOADED typeface with
+  `Paint.hasGlyph` over the ASCII, Latin-1, Latin Extended-A,
+  punctuation, currency and arrow blocks, capped at 256 entries per
+  family/style (cached; no font file is parsed by hand). Insertion
+  replaces the current selection (pure `glyphInsert`). The story
+  editor splits the fiche text into paragraphs, edits each paragraph
+  with its own field and applies runs through the existing
+  `TextRun{start,len,...}` contract (`storyApplyRun` keeps offsets
+  valid across paragraph separators) and previews paragraph wrapping
+  with the existing `TextLineLayout` — no second layout engine.
+- §3 installable `.abr` tips (ONE new symbol). `AbrParser` already
+  reads the open v1/v2 sampled-tip envelope; the import panel now
+  INSTALLS each parsed tip: an 8-bit alpha mask is written as an
+  RGBA PNG (rgb = 0, alpha = tip sample) under `filesDir/abr-tips/`
+  plus an `index.json` registry, and the list survives process
+  restarts. Installing is not the promise — USING is:
+  `nSetBrushTip(handle, path)` decodes the PNG, keeps its ALPHA
+  channel as the stamp mask (`BrushTip` in the new pure header
+  `openclip/brush_tip.h`), and every subsequent paint dab stamps that
+  mask instead of the round falloff; an empty string / null path
+  clears it (`nSetBrushTip(handle, "")`). `paintTipDab` scales the
+  mask to the pressure-modulated dab diameter (aspect preserved,
+  bilinear alpha, source-over premultiplied, alpha lock honoured), so
+  size/opacity/spacing/curve/stabilization keep working. Fidelity is
+  documented in the panel: only sampled tips (type 2, raw 8-bit, no
+  RLE) are read; dual-brush, dynamics, texture and scatter descriptors
+  are ignored and announced — the preset reproduces the STAMP, not
+  Photoshop's engine. Retouch modes (smudge/dodge/burn/clone/pattern)
+  and the eraser keep the round stamp (documented: a tip is a brush
+  paint feature; mask painting stays M5 black/white). Engine tests
+  cover mask extraction, scaling, alpha lock and off-canvas clipping.
+- §4 audio scrub (0 new symbols). `ClipAudio` grows `seekTo(ms)` /
+  `positionMs()` over the platform `MediaPlayer` (never throws,
+  clamped to the duration, no-op without audio). The timeline strip
+  reports the scrub candidate cel while the finger is down
+  (`onScrubSeek(frame)`); the app maps cel -> clip time
+  (`frame * 1000 / fps`, pure helper) and seeks the attached track so
+  the audio follows the drag, then seeks once more on release. No
+  engine state, no ORA field (audio stays session-only, M7b rule).
+- §5 timelapse (0 new symbols). App-side `Timelapse` recorder: every
+  N committed strokes (N = 1..50, default 5) it pulls the export
+  composite of the current frame, scales it to a 480px longest side
+  and stores a PNG in `cacheDir/timelapse/` (bounded 240 frames, the
+  oldest dropped and counted). Export reuses `ExportWebm.export`
+  (MediaCodec VP8 + MediaMuxer, the M7b lane) at the clip fps.
+  Session-only, never stored in ORA; the recorder is cleared on
+  document switch. Failure to capture or export is surfaced as
+  `export_failed` and never crashes.
+- Tests: engine — `tests/test_text_layer.cpp` (new header) locks the
+  atomic commit (new layer + fiche = one undo, re-edit = one undo,
+  refusals leave no history), `tests/test_brush_tip.cpp` (new header)
+  locks mask extraction, scaled stamping, alpha lock and clipping;
+  `tests/test_document.cpp` grows the ORA xform round trip and the
+  TySh v2 payload scan (runs still counted, transform floats
+  present). Instrumented — text transform commit (pixels change, ONE
+  undo restores, fiche keeps the tuple, ORA round trip), glyph
+  catalog + insertion, story paragraphs + run offsets, ABR install
+  from the in-code fixture (files + preview + engine tip paints ink),
+  audio seek on a generated WAV, timelapse capture + WebM file.

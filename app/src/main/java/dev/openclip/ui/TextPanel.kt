@@ -50,6 +50,7 @@ fun TextPanel(
         FontRegistry.Entry(it, null, true)
     },
     onImportFont: () -> Unit = {},
+    onTransform: (TextSpec) -> Unit = {},
     onCommit: (TextSpec) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -70,6 +71,9 @@ fun TextPanel(
     var runs by remember { mutableStateOf(initial.runs) }
     var runSize by remember { mutableStateOf(initial.sizePx.toFloat()) }
     var fontMenu by remember { mutableStateOf(false) }
+    // B2 §2: glyph palette + story editor (both edit the same field/runs).
+    var glyphsOpen by remember { mutableStateOf(false) }
+    var storyOpen by remember { mutableStateOf(false) }
 
     fun selRange(): IntRange? {
         val s = field.selection.start
@@ -218,12 +222,9 @@ fun TextPanel(
                                 size = runSize.roundToInt().coerceIn(8, 1024),
                                 colorHex = inkHex
                             )
-                            // Replace overlapping runs (first wins ->
-                            // drop the covered ones).
-                            runs = (runs.filter {
-                                it.start + it.len <= nr.start ||
-                                    it.start >= nr.start + nr.len
-                            } + nr).sortedBy { it.start }
+                            // B2 §2: one shared overlapping-run rule
+                            // (identical to the story editor).
+                            runs = storyApplyRun(runs, nr.start, nr.len, nr)
                         },
                         enabled = selRange() != null,
                         modifier = Modifier
@@ -247,6 +248,93 @@ fun TextPanel(
                     Text(
                         stringResource(R.string.text_run_empty),
                         style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                // B2 §2: glyph browser (loaded font) + story editor.
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { glyphsOpen = true },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("text-glyphs")
+                    ) { Text(stringResource(R.string.glyph_open)) }
+                    OutlinedButton(
+                        onClick = { storyOpen = true },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("text-story")
+                    ) { Text(stringResource(R.string.story_open)) }
+                    OutlinedButton(
+                        onClick = {
+                            onTransform(
+                                initial.copy(
+                                    text = field.text,
+                                    font = font,
+                                    sizePx = size.roundToInt().coerceIn(8, 1024),
+                                    bold = bold,
+                                    italic = italic,
+                                    align = align,
+                                    leading = leading.coerceIn(0.5f, 4f),
+                                    tracking = tracking.coerceIn(-64f, 64f),
+                                    colorHex = inkHex,
+                                    runs = runs,
+                                    outline = if (outlineOn) TextOutline(
+                                        outlineW.coerceIn(0.5f, 8f), inkHex
+                                    ) else null,
+                                    dir = dir,
+                                    hyphen = hyphen
+                                )
+                            )
+                        },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("text-transform-open")
+                    ) { Text(stringResource(R.string.text_xform_open)) }
+                }
+                if (glyphsOpen) {
+                    GlyphPaletteDialog(
+                        family = font,
+                        bold = bold,
+                        italic = italic,
+                        onInsert = { g ->
+                            val (nt, caret) = GlyphCatalog.insertAt(
+                                field.text,
+                                field.selection.start,
+                                field.selection.end,
+                                g
+                            )
+                            field = TextFieldValue(
+                                nt,
+                                androidx.compose.ui.text.TextRange(caret)
+                            )
+                        },
+                        onDismiss = { glyphsOpen = false }
+                    )
+                }
+                if (storyOpen) {
+                    StoryEditorDialog(
+                        initial = initial.copy(
+                            text = field.text,
+                            font = font,
+                            sizePx = size.roundToInt().coerceIn(8, 1024),
+                            bold = bold,
+                            italic = italic,
+                            align = align,
+                            leading = leading.coerceIn(0.5f, 4f),
+                            tracking = tracking.coerceIn(-64f, 64f),
+                            colorHex = inkHex,
+                            runs = runs,
+                            dir = dir,
+                            hyphen = hyphen
+                        ),
+                        onApply = { text, newRuns ->
+                            field = TextFieldValue(text)
+                            runs = newRuns
+                            storyOpen = false
+                        },
+                        onDismiss = { storyOpen = false }
                     )
                 }
                 // Outline (T2 §1): toggle + width (color = ink).

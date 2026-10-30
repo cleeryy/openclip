@@ -167,6 +167,10 @@ void writeTextAttrs(const Layer& l, std::ostringstream& xml) {
     if (!l.textHyphen.empty())
         xml << " x-openclip-text-hyphen=\""
             << xmlEscape(l.textHyphen) << "\"";
+    // B2 §1: transform tuple (absent = identity).
+    if (!l.textXform.empty())
+        xml << " x-openclip-text-xform=\""
+            << xmlEscape(l.textXform) << "\"";
 }
 
 // T2 bubble fiche attrs (ARCHITECTURE.md §T2 §5): written only when
@@ -473,6 +477,7 @@ void applyMetaAttrs(const std::string& xml, std::size_t tagStart,
             name == "x-openclip-text-fontfile" ||
             name == "x-openclip-text-dir" ||
             name == "x-openclip-text-hyphen" ||
+            name == "x-openclip-text-xform" ||
             name == "x-openclip-bubble" ||
             name == "x-openclip-bubble-frame" ||
             name == "x-openclip-bubble-tail" ||
@@ -570,6 +575,10 @@ void applyTextAttrs(const std::string& xml, std::size_t tagStart,
         const std::string hh = capped(v);
         if (hh == "1" || hh == "true") l.textHyphen = "1";
     }
+    // B2 §1: transform tuple, opaque (empty = identity).
+    l.textXform.clear();
+    if (tagAttr(xml, tagStart, "x-openclip-text-xform", v))
+        l.textXform = v.substr(0, 96);
 }
 
 // T2 bubble fiche reader (ARCHITECTURE.md §T2 §5, same M8 contract as
