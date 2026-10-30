@@ -316,11 +316,14 @@ fun CommandBar(
                             },
                             modifier = Modifier.testTag("cmdbar-vis-$action")
                         )
+                        val upDesc = stringResource(R.string.a11y_cmdbar_up)
+                        val downDesc = stringResource(R.string.a11y_cmdbar_down)
                         TextButton(
                             onClick = { store.move(action, -1) },
                             modifier = Modifier
                                 .size(48.dp)
                                 .testTag("cmdbar-up-$action")
+                                .semantics { contentDescription = upDesc }
                         ) {
                             Text("↑")
                         }
@@ -329,6 +332,7 @@ fun CommandBar(
                             modifier = Modifier
                                 .size(48.dp)
                                 .testTag("cmdbar-down-$action")
+                                .semantics { contentDescription = downDesc }
                         ) {
                             Text("↓")
                         }
@@ -544,6 +548,10 @@ fun WorkspaceDialog(
     val renameTarget = remember { mutableStateOf<String?>(null) }
     val renameField = remember { mutableStateOf("") }
     val error = remember { mutableStateOf<String?>(null) }
+    // Issue #32 §4: glyph-only actions carry a localized description.
+    val confirmDesc = stringResource(R.string.a11y_confirm)
+    val renameDesc = stringResource(R.string.a11y_ws_rename)
+    val deleteDesc = stringResource(R.string.a11y_ws_delete)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -639,6 +647,9 @@ fun WorkspaceDialog(
                                 modifier = Modifier
                                     .size(48.dp)
                                     .testTag("workspace-rename-ok-$wsName")
+                                    .semantics {
+                                        contentDescription = confirmDesc
+                                    }
                             ) {
                                 Text("✓")
                             }
@@ -651,6 +662,9 @@ fun WorkspaceDialog(
                                 modifier = Modifier
                                     .size(48.dp)
                                     .testTag("workspace-rename-$wsName")
+                                    .semantics {
+                                        contentDescription = renameDesc
+                                    }
                             ) {
                                 Text("✎")
                             }
@@ -667,6 +681,9 @@ fun WorkspaceDialog(
                                 modifier = Modifier
                                     .size(48.dp)
                                     .testTag("workspace-delete-$wsName")
+                                    .semantics {
+                                        contentDescription = deleteDesc
+                                    }
                             ) {
                                 Text("🗑")
                             }

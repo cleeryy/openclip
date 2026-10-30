@@ -27,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.openclip.R
 import java.io.File
@@ -1856,6 +1858,8 @@ fun PagesPanel(
             ) { Text(stringResource(R.string.v2_page_delete)) }
         }
         // Reorder + open: one row per page (garde jamais-0-pages, spec §2.2).
+        val pageUpDesc = stringResource(R.string.a11y_page_up)
+        val pageDownDesc = stringResource(R.string.a11y_page_down)
         pages.forEachIndexed { i, p ->
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1876,6 +1880,9 @@ fun PagesPanel(
                                 persist()
                             }
                         }
+                    },
+                    modifier = Modifier.semantics {
+                        contentDescription = pageUpDesc
                     }
                 ) { Text("↑") }
                 OutlinedButton(
@@ -1888,6 +1895,9 @@ fun PagesPanel(
                                 persist()
                             }
                         }
+                    },
+                    modifier = Modifier.semantics {
+                        contentDescription = pageDownDesc
                     }
                 ) { Text("↓") }
                 OutlinedButton(
@@ -1967,6 +1977,8 @@ fun AutosavePanel(
     intervalMin: Int,
     onInterval: (Int) -> Unit,
     lastWrite: String,
+    // Issue #32 §3: visible memory policy (undo/doc caps). Empty hides it.
+    policyText: String = "",
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -2007,6 +2019,17 @@ fun AutosavePanel(
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.testTag("v2-autosave-recovery")
         )
+        if (policyText.isNotEmpty()) {
+            Text(
+                stringResource(R.string.memory_policy_title),
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                policyText,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("memory-policy")
+            )
+        }
     }
 }
 

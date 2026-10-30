@@ -28,6 +28,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import dev.openclip.R
@@ -154,16 +156,21 @@ fun FillPanel(
                                         .weight(2f)
                                         .testTag("fill-stop-$i")
                                 )
+                                val stopDelDesc = stringResource(R.string.a11y_remove)
                                 TextButton(
                                     onClick = {
                                         if (stops.size > 2) stops =
                                             stops.toMutableList().also { it.removeAt(i) }
                                     },
                                     modifier = Modifier.testTag("fill-stop-del-$i")
+                                        .semantics {
+                                            contentDescription = stopDelDesc
+                                        }
                                 ) { Text("−") }
                             }
                         }
                     }
+                    val stopAddDesc = stringResource(R.string.a11y_add)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = {
@@ -173,6 +180,9 @@ fun FillPanel(
                             modifier = Modifier
                                 .heightIn(min = 48.dp)
                                 .testTag("fill-stop-add")
+                                .semantics {
+                                    contentDescription = stopAddDesc
+                                }
                         ) { Text("+") }
                     }
                 }

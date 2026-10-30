@@ -21,6 +21,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import dev.openclip.R
 import dev.openclip.engine.EngineHost
+import dev.openclip.engine.MemoryBudget
 import java.io.File
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -723,6 +724,11 @@ class EngineSurface @JvmOverloads constructor(
             if (handle == 0L) {
                 handle = EngineHost.nInit(engineWidth, engineHeight, dpi)
                 if (handle != 0L) {
+                    // Issue #32 §3: explicit memory policy before any
+                    // layer is added (the dialog already refuses absurd
+                    // sizes; the engine enforces the same budget).
+                    val (docBytes, undoBytes) = MemoryBudget.fromContext(context)
+                    EngineHost.nSetBudget(handle, docBytes, undoBytes)
                     EngineHost.nSetBrush(handle, DEFAULT_BRUSH)
                     liveHandles++
                 }
@@ -795,6 +801,11 @@ class EngineSurface @JvmOverloads constructor(
     fun addGroup(name: String): Int = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nAddGroup(handle, name)
             .also { if (it >= 0) needsComposite = true } else -1
+    }
+
+    /** Issue #32 §3: live memory policy JSON (empty when no handle). */
+    fun budgetState(): String = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nBudgetState(handle) else "{}"
     }
 
     fun layerState(): String = synchronized(engineLock) {

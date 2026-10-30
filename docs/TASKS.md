@@ -187,3 +187,60 @@ fonctionnelle décrite. Mettre à jour ce fichier à chaque livrable.
 
 ## Journal — 2026-10-30 (2)
 - Issue #30 tranche B1 « retouche et encrage » : seau avec fermeture de gaps 0..16 px (dilatation carrée de la barrière + regrowth limité aux pixels membres, `gapPx=0` byte-identique verrouillé) et mode « entourer et remplir » (cavités fermées via flood depuis les bords, barrière jamais peinte, refus si la graine n'est dans aucune cavité) ; tampon de duplication aligné/non aligné (source par appui long, UN snapshot par trait pour les deux modes — pas d'auto-alimentation —, échantillonnage calque ou composite) ; estompe / dodge / burn vrais modes de brosse (état porté pour l'estompe, dodge/burn luminance seule, alpha intact, pression) ; motif au trait procédural (dots/ring/star/cross, espacement/échelle/rotation + jitter position/rotation à graine, pas de dabs ronds) ; texture de calque NON destructive papier/toile/grain (fiche composite-time, bake 1 pas d'undo, ORA `x-openclip-texture*`). EXACTEMENT 3 symboles JNI (`nSetCloneSource`, `nSetPatternBrush`, `nSetLayerTexture`) documentés ARCHITECTURE.md « B1 additions » AVANT code ; `nFloodFill` gagne `gap`/`surround`, `nSetBrush` gagne `smudge|dodge|burn|clone|pattern` + `smudgeStrength` (0 nouveau symbole). Gates : engine 315/315 (test_retouch 14, test_texture 7, +3 gaps/surround dans test_fill), prepush vert, émulateur local 265/265 (6 tests JNI directs + appui long clone UI + 258 existants), preuve `/tmp/opencode/openclip-b1.png` relue (avant/après : remplissage entouré, tampon, estompe, densité ±, motif étoile, texture toile).
+
+## Issue #32 §3 — budget mémoire/perf (mesuré, 2026-10-30)
+
+Émulateur de référence : Android 34 x86_64, KVM, `MemTotal` invité **2474 MB**
+(`emulator -memory 1536`), APK debug x86_64. Politique appliquée par l'app
+(`MemoryBudget`, dérivée de la RAM) : **documents ≤ 824 MB**, **annulation
+≤ 247 MB**. Les caps sont dans le moteur (`History` + `nSetBudget`), pas
+seulement documentés — voir ARCHITECTURE.md « Issue #32 additions ».
+
+| Mesure (moteur réel, JNI) | Avant | Après optim | Facteur |
+|---|---|---|---|
+| Composite complet 4096² × 12 calques | 4609–4761 ms | 704–788 ms | ×6,1 |
+| Frame pendant un trait 4096² × 12 calques (calque actif en haut) | 4683–5111 ms | 429–433 ms (1ʳᵉ frame 645 ms = construction du cache) | ×11 |
+| Composite complet 2048×1536 × 8 calques | 699–719 ms | 123–134 ms | ×5,6 |
+| Frame pendant un trait 2048×1536 × 8 calques | 699–724 ms | 79–84 ms (1ʳᵉ 113 ms) | ×8,8 |
+| Composite complet 2048×1536 × **50 calques** (600 MB) | — | 264–282 ms | — |
+| Frame pendant un trait 2048×1536 × 50 calques | — | 92–93 ms | ×3 vs complet |
+| Ouverture 4096² (1 calque, remplissage blanc) | — | 141–181 ms | — |
+| nAddLayer 4096² | — | ~12 calques en 768 MB, 13ᵉ refusé | — |
+| Undo/redo d'un trait de 40 points à 4096² | — | 1 ms | — |
+| Autosave ORA (2048×1536 × 8 calques) | — | 2,84–2,98 s, 5–6 Kio (calques vides) | — |
+| 4 documents 2048×1536 × 8 calques | — | 108–137 ms/doc, RSS 207 → 592 MB | — |
+
+Goulot identifié et corrigé : le rendu recomposait **tous** les calques à
+chaque frame de trait. Deux changements moteur (byte-identiques, verrouillés
+par tests) :
+1. `Canvas::compositeRange(out, first, last)` : pendant un trait, le shim
+   garde le composite des calques **sous** le calque actif et ne recompose
+   que le calque actif + ceux du dessus (`nCompositeInto`, invalidation à la
+   fin du trait / changement de frame / changement structurel).
+2. Chemin rapide source-over en octets bruts pour le calque courant
+   (Normal, opacité 1, sans masque/texture/clip/fill/bulle/réglage) — mêmes
+   opérations flottantes et même arrondi que `blendPixel`, égalité octet
+   pour octet vérifiée (`canvas_composite_range_matches_full` + suite
+   existante).
+
+Limites **mesurées** (ce qui est autorisé vs refusé poliment) :
+- **4096² × 50 calques = 3,36 Go** de pixels : impossible sur l'appareil de
+  test (et sur la plupart des tablettes). Le budget refuse le 13ᵉ calque ;
+  capacité mesurée **4096² × 12 calques (768 MB)** sans OOM.
+- **2048×1536 × 50 calques = 600 MB** : mesuré et autorisé (composite 264 ms,
+  frame de trait 92 ms, RSS +600 MB).
+- 4 documents simultanés : plafonnés à 4 par `DocRegistry` ; 4 × 8 calques
+  2048×1536 = ~400 MB de pixels, RSS mesuré +385 MB. 4 × 50 calques
+  (2,4 Go) serait refusé par le budget document.
+- Annulation : budget 247 MB sur cet appareil ; test à 8 MB → 12 des 40
+  traits conservés (7,86 MB), éviction des plus anciens, `dropped=0`,
+  l'undo le plus récent fonctionne toujours. Un snapshot structurel
+  (merge/flatten/resize) coûte 2 copies du document : refusé si > budget/2.
+- L'autosave reste le poste le plus lourd (2,9 s pour 8 calques 2048×1536,
+  écrit sur un thread de fond) : à 5 min d'intervalle c'est acceptable,
+  4 documents = ~12 s par cycle.
+
+Repro : `scripts/emutest.sh` puis
+`adb logcat -d -s OPENCLIP_PERF` (les tests `MemoryPerfTest` impriment
+toutes les lignes ci-dessus). Mesures « avant » capturées sur le même
+émulateur avant le commit d'optimisation.

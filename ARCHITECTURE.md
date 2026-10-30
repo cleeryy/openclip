@@ -1590,3 +1590,51 @@ frozen-JNI rule. EXACTLY 2 new symbols (`nCommitTextLayer`,
   catalog + insertion, story paragraphs + run offsets, ABR install
   from the in-code fixture (files + preview + engine tip paints ink),
   audio seek on a generated WAV, timelapse capture + WebM file.
+
+## Issue #32 additions — explicit memory budgets
+
+Two JNI symbols, engine-owned accounting (frozen contract untouched,
+all existing callers keep working with the conservative defaults).
+
+- `nSetBudget(handle, docBytes, undoBytes) -> Boolean`. `docBytes`
+  bounds the document surfaces (`layerCount × w × h × 4` plus masks
+  and nested group children); `0` disables the document guard
+  (headless callers and engine tests). `undoBytes` is applied to the
+  `History` of every frame of every track (clamped to
+  `[1 MiB, 4 GiB]`). The app derives both from the device RAM
+  (`MemoryBudget`, doc ≈ RAM/3 clamped `[256 MiB, 2 GiB]`, undo ≈
+  RAM/10 clamped `[64 MiB, 512 MiB]`) right after `nInit`; before
+  that the engine uses `History::kDefaultMaxBytes` (256 MiB) and no
+  document cap.
+- `nBudgetState(handle) -> String`, compact JSON:
+  `{"docBytes":…,"docBudget":…,"undoBytes":…,"undoBudget":…,
+  "undoDepth":…,"redoDepth":…,"dropped":…,"layers":…}`. Read-only;
+  drives the settings policy line and the perf conformance test.
+
+Enforcement, in the engine:
+
+- `History` keeps two bounds: stroke count (legacy 64) and bytes.
+  Every committed command is measured (`TileSnap.before/after` sizes,
+  or `canvasMemoryBytes` of the two document copies). On overflow the
+  OLDEST entries are evicted first; a command that alone exceeds the
+  budget is dropped and counted in `dropped` (never retained). Undo
+  and redo move entries between the two stacks without allocating a
+  document copy, so a capped history cannot OOM.
+- `History::beginSnapshot` estimates the two-copy cost
+  (`2 × canvasMemoryBytes`) and returns `false` when it does not fit;
+  the shim then REFUSES the structural op (`nMergeLayers`,
+  `nCanvasOp`; `commitTextLayer` refuses too) instead of mutating a
+  document it could never restore. `nAddLayer`, `nAddVectorLayer`,
+  `nAddLayerMask`, `nAppendChild` and a resize in `nCanvasOp` return
+  their normal failure value (`-1` / `false`) past the document
+  budget. `nInit` refuses `w` or `h` > 8192 outright.
+- The new-canvas dialog shows the real one-layer estimate and the
+  device cap (`newcanvas_mem_line`), greys out OK past the cap and
+  shows `newcanvas_mem_refuse`; `MainActivity.confirmSpec` repeats
+  the check before `nInit`. Layer growth past the cap surfaces
+  `layer_mem_refused` in the layer panel. The autosave panel prints
+  the live policy (`memory_policy`).
+- Measured limits (dev emulator, Android 34 x86_64, 1536 MB guest):
+  see `docs/TASKS.md` "Issue #32 §3 — memory/perf budget". Tests:
+  `engine/tests/test_undo.cpp` (`undo_budget_*`) and the instrumented
+  `perfBudget` / `budget*` cases.

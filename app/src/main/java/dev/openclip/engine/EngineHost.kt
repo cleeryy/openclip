@@ -170,4 +170,13 @@ object EngineHost {
     external fun nSetCloneSource(handle: Long, json: String): Boolean
     external fun nSetPatternBrush(handle: Long, json: String): Boolean
     external fun nSetLayerTexture(handle: Long, index: Int, json: String?): Boolean
+
+    // Issue #32 §3 additions (ARCHITECTURE.md "Issue #32 additions"):
+    // explicit memory policy. docBytes bounds the document surfaces
+    // (layer add / vector add / mask add / child add / canvas resize
+    // refuse politely past it), undoBytes caps every frame's History
+    // (oldest-first eviction, never an OOM). nBudgetState returns the
+    // live JSON accounting used by the settings panel and the tests.
+    external fun nSetBudget(handle: Long, docBytes: Long, undoBytes: Long): Boolean
+    external fun nBudgetState(handle: Long): String
 }

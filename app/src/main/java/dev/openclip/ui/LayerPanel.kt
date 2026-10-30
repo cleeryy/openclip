@@ -288,6 +288,16 @@ fun LayerPanel(
     var draftHide by remember { mutableStateOf(false) }
     var strokeGen by remember { mutableStateOf(0) }
     var menuIndex by remember { mutableStateOf<Int?>(null) }
+    // Issue #32 §3: polite refusal when the document memory budget is
+    // reached (the engine returns -1 instead of allocating into an OOM).
+    var memRefused by remember { mutableStateOf(false) }
+    val layerAddDesc = stringResource(R.string.a11y_layer_add)
+    val memCtx = androidx.compose.ui.platform.LocalContext.current
+    val memBudgetMb = remember(memCtx) {
+        dev.openclip.engine.MemoryBudget.mb(
+            dev.openclip.engine.MemoryBudget.fromContext(memCtx).first
+        ).toString()
+    }
 
     // Thumbnail LRU (≤ 60 entries, ~9 Ko each).
     val thumbs = remember {
@@ -592,6 +602,14 @@ fun LayerPanel(
             }
         }
         val compactPad = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+        if (memRefused) {
+            Text(
+                stringResource(R.string.layer_mem_refused, memBudgetMb),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFE07050),
+                modifier = Modifier.testTag("layer-mem-refused")
+            )
+        }
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -599,13 +617,14 @@ fun LayerPanel(
         ) {
             OutlinedButton(
                 onClick = {
-                    surface.layerOp { addLayer() }
+                    memRefused = surface.addLayer() < 0
                     refresh()
                 },
                 contentPadding = compactPad,
                 modifier = Modifier
                     .height(48.dp)
                     .testTag("layer-add")
+                    .semantics { contentDescription = layerAddDesc }
             ) { Text("+", style = MaterialTheme.typography.labelSmall) }
             OutlinedButton(
                 onClick = {

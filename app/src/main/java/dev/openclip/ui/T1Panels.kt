@@ -38,6 +38,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import dev.openclip.R
@@ -479,9 +481,12 @@ private fun GradientPanel(
                         .testTag("t1-stop-pos-$i")
                 )
                 if (stops.size > 2) {
+                    val delDesc = stringResource(R.string.a11y_remove)
                     TextButton(
                         onClick = { stops.removeAt(i) },
-                        modifier = Modifier.testTag("t1-stop-del-$i")
+                        modifier = Modifier
+                            .testTag("t1-stop-del-$i")
+                            .semantics { contentDescription = delDesc }
                     ) { Text("−") }
                 }
             }
@@ -546,9 +551,13 @@ private fun ShapePanel(
                 )
             }
             if (kind == "polygon") {
+                val minusDesc = stringResource(R.string.a11y_decrease)
+                val plusDesc = stringResource(R.string.a11y_increase)
                 TextButton(
                     onClick = { onSides((sides - 1).coerceAtLeast(3)) },
-                    modifier = Modifier.testTag("t1-sides-minus")
+                    modifier = Modifier
+                        .testTag("t1-sides-minus")
+                        .semantics { contentDescription = minusDesc }
                 ) { Text("−") }
                 Text(
                     stringResource(R.string.t1_sides, sides),
@@ -556,7 +565,9 @@ private fun ShapePanel(
                 )
                 TextButton(
                     onClick = { onSides((sides + 1).coerceAtMost(12)) },
-                    modifier = Modifier.testTag("t1-sides-plus")
+                    modifier = Modifier
+                        .testTag("t1-sides-plus")
+                        .semantics { contentDescription = plusDesc }
                 ) { Text("+") }
                 Text(stringResource(R.string.t1_rotation, rotation.roundToInt()))
                 Slider(

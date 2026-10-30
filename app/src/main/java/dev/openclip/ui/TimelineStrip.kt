@@ -441,6 +441,7 @@ fun TimelineStrip(
             ) {
                 Text("⏮", maxLines = 1)
             }
+            val playDesc = stringResource(R.string.a11y_play_pause)
             TextButton(
                 onClick = {
                     if (playing) {
@@ -454,6 +455,7 @@ fun TimelineStrip(
                 modifier = Modifier
                     .heightIn(min = 48.dp)
                     .testTag("transport-play")
+                    .semantics { contentDescription = playDesc }
             ) {
                 Text(
                     if (playing) "⏸" else "▶",
