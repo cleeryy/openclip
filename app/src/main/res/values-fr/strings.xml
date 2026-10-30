@@ -678,4 +678,35 @@
     <string name="info_zoom">Zoom</string>
     <string name="info_memory">Mémoire</string>
     <string name="menu_t5">Échanges</string>
+
+    <!-- W1 (issue #28 tranche A) : fusion / canevas / miroir / sélection / référence -->
+    <string name="w1_merge_down">Fusionner vers le bas</string>
+    <string name="w1_merge_visible">Fusionner les visibles</string>
+    <string name="w1_flatten">Aplatir l\'image</string>
+    <string name="w1_rasterize">Rasteriser le calque</string>
+    <string name="w1_canvas_size">Taille du canevas…</string>
+    <string name="w1_width">Largeur</string>
+    <string name="w1_height">Hauteur</string>
+    <string name="w1_anchor">Ancre</string>
+    <string name="w1_resample">Rééchantillonner (étirer)</string>
+    <string name="w1_print_size">Taille d\'impression : %1$s mm à %2$d dpi</string>
+    <string name="w1_crop_selection">Rogner sur la sélection</string>
+    <string name="w1_apply">Appliquer</string>
+    <string name="w1_sel_grow">Étendre la sélection…</string>
+    <string name="w1_sel_shrink">Réduire la sélection…</string>
+    <string name="w1_sel_featherpx">Plume de la sélection… px</string>
+    <string name="w1_sel_radius">%1$d px</string>
+    <string name="w1_sel_from_layer">Sélection depuis l\'alpha du calque</string>
+    <string name="selection_polyline">Polyligne</string>
+    <string name="w1_flip_h">Miroir horizontal de la vue</string>
+    <string name="w1_flip_h_on">Miroir horizontal de la vue (actif)</string>
+    <string name="w1_flip_v">Miroir vertical de la vue</string>
+    <string name="w1_flip_v_on">Miroir vertical de la vue (actif)</string>
+    <string name="w1_ref_title">Image de référence</string>
+    <string name="w1_ref_import">Importer</string>
+    <string name="w1_ref_fit">Ajuster</string>
+    <string name="w1_ref_100">100%%</string>
+    <string name="w1_ref_close">Fermer</string>
+    <string name="w1_ref_empty">Importez une photo pour la décalquer à côté du canevas (jamais exportée).</string>
+    <string name="w1_ref_hint">Glisser pour déplacer, pincer pour zoomer. Session seule, indépendant du document.</string>
 </resources>

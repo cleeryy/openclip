@@ -82,8 +82,12 @@ class EngineSurface @JvmOverloads constructor(
         const val EDGE_BOTTOM = 2
     }
 
-    private val engineWidth: Int = canvasW.coerceIn(1, 8192)
-    private val engineHeight: Int = canvasH.coerceIn(1, 8192)
+    // W1: canvas geometry ops (resize/crop) change the document size in
+    // place, so these are mutable (the render loop reallocates its frame
+    // buffers when they change).
+    @Volatile private var engineWidth: Int = canvasW.coerceIn(1, 8192)
+    @Volatile private var engineHeight: Int = canvasH.coerceIn(1, 8192)
+    @Volatile private var docDpi: Float = 96f
     private val engineLock = Any()
     @Volatile private var handle: Long = 0
     // Slice 6 multi-docs: pause parks the render loop (no composite, no
@@ -399,6 +403,12 @@ class EngineSurface @JvmOverloads constructor(
     @Volatile private var viewAngleDeg = 0f
     @Volatile private var viewOffX = 0f
     @Volatile private var viewOffY = 0f
+    // W1 §3 (issue #28): VIEW-ONLY mirror. Never touches engine state,
+    // never alters stroke/selection/ruler coordinates (screenToEngine
+    // applies the inverse mirror), never changes exports (the composite
+    // bytes are untouched — locked by an emulator test).
+    @Volatile private var viewFlipH = false
+    @Volatile private var viewFlipV = false
     @Volatile var navigateMode = false
     @Volatile var edgeBottomEnabled = false
     @Volatile private var lastNavTime = 0L
@@ -423,6 +433,20 @@ class EngineSurface @JvmOverloads constructor(
     fun viewOffset(): Pair<Float, Float> = Pair(viewOffX, viewOffY)
     fun viewScale(): Float = viewScaleMul
     fun viewAngle(): Float = viewAngleDeg
+    fun viewFlipHorizontal(): Boolean = viewFlipH
+    fun viewFlipVertical(): Boolean = viewFlipV
+    fun toggleViewFlipH(): Boolean {
+        viewFlipH = !viewFlipH
+        markNavChanged()
+        return viewFlipH
+    }
+    fun toggleViewFlipV(): Boolean {
+        viewFlipV = !viewFlipV
+        markNavChanged()
+        return viewFlipV
+    }
+    private fun flipSignX(): Float = if (viewFlipH) -1f else 1f
+    private fun flipSignY(): Float = if (viewFlipV) -1f else 1f
     fun viewZoomPercent(): Int = (viewScaleMul * 100f).toInt()
 
     // T5 §6: synchronous export pull (nFrameCompositeInto = the export
@@ -492,6 +516,8 @@ class EngineSurface @JvmOverloads constructor(
         viewAngleDeg = 0f
         viewOffX = 0f
         viewOffY = 0f
+        viewFlipH = false
+        viewFlipV = false
         needsComposite = true
         val cb = onViewChanged
         if (cb != null) post { cb() }
@@ -558,10 +584,14 @@ class EngineSurface @JvmOverloads constructor(
         val r = Math.toRadians(viewAngleDeg.toDouble())
         val cosA = cos(r).toFloat()
         val sinA = sin(r).toFloat()
-        // Inverse of canvas rotate(a): rotate by -a.
+        // Inverse of canvas rotate(a): rotate by -a, then undo the
+        // view mirror (W1 §3 — coordinates are never altered).
         val rx = dx * cosA + dy * sinA
         val ry = -dx * sinA + dy * cosA
-        return Pair(rx / s + engineWidth * 0.5f, ry / s + engineHeight * 0.5f)
+        return Pair(
+            flipSignX() * rx / s + engineWidth * 0.5f,
+            flipSignY() * ry / s + engineHeight * 0.5f
+        )
     }
 
     /** True when the view point lands on engine paper (pipette hit). */
@@ -697,6 +727,7 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     fun start(dpi: Float) {
+        if (dpi > 0f) docDpi = dpi
         ensureHandle(dpi)
         holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
@@ -1165,6 +1196,187 @@ class EngineSurface @JvmOverloads constructor(
         if (handle != 0L) EngineHost.nSetSelectionMask(handle, path) else false
     }
 
+    // ---- W1 (issue #28 slice A): structural + canvas geometry ops,
+    // selection refinement. ARCHITECTURE.md "W1 additions". All engine
+    // calls are one undo step; refusals leave the document untouched.
+
+    /** Merge down / merge visible / flatten / rasterize. */
+    fun mergeLayers(op: String, index: Int = -1): Boolean {
+        val ok = synchronized(engineLock) {
+            if (handle == 0L) false
+            else try {
+                EngineHost.nMergeLayers(handle, "{\"op\":\"$op\",\"index\":$index}")
+            } catch (_: Exception) {
+                false
+            }
+        }
+        if (ok) {
+            needsComposite = true
+            HistoryLog.push(
+                when (op) {
+                    "down" -> "merge-down"
+                    "visible" -> "merge-visible"
+                    "flatten" -> "flatten"
+                    else -> "rasterize"
+                }
+            )
+        }
+        return ok
+    }
+
+    /** Anchored canvas resize (resample = stretch, else crop/pad). */
+    fun resizeCanvas(w: Int, h: Int, anchor: String, resample: Boolean): Boolean {
+        val ok = synchronized(engineLock) {
+            if (handle == 0L) false
+            else try {
+                val r = EngineHost.nCanvasOp(
+                    handle,
+                    "{\"op\":\"resize\",\"w\":$w,\"h\":$h," +
+                        "\"anchor\":\"$anchor\",\"resample\":$resample}"
+                )
+                if (r) {
+                    engineWidth = w.coerceIn(1, 8192)
+                    engineHeight = h.coerceIn(1, 8192)
+                }
+                r
+            } catch (_: Exception) {
+                false
+            }
+        }
+        if (ok) afterCanvasGeometry()
+        return ok
+    }
+
+    fun cropCanvas(x: Int, y: Int, w: Int, h: Int): Boolean {
+        val ok = synchronized(engineLock) {
+            if (handle == 0L) false
+            else try {
+                val r = EngineHost.nCanvasOp(
+                    handle,
+                    "{\"op\":\"crop\",\"x\":$x,\"y\":$y,\"w\":$w,\"h\":$h}"
+                )
+                if (r) {
+                    engineWidth = w.coerceIn(1, 8192)
+                    engineHeight = h.coerceIn(1, 8192)
+                }
+                r
+            } catch (_: Exception) {
+                false
+            }
+        }
+        if (ok) afterCanvasGeometry()
+        return ok
+    }
+
+    /** Crop the canvas to the selection bounds (no selection = false). */
+    fun cropToSelection(): Boolean {
+        val b = synchronized(selectionLock) { selectionMask?.bounds() } ?: return false
+        return cropCanvas(b[0], b[1], b[2] - b[0] + 1, b[3] - b[1] + 1)
+    }
+
+    /** Physical print size (mm) of the document at its DPI. */
+    fun printSizeMm(): Pair<Double, Double> {
+        val dpi = if (docDpi > 0f) docDpi.toDouble() else 96.0
+        return Pair(engineWidth / dpi * 25.4, engineHeight / dpi * 25.4)
+    }
+
+    fun documentDpi(): Float = docDpi
+
+    /** Post-resize housekeeping (dims were already updated under the
+     *  engine lock): the pixel-bound selection mirror is dropped. */
+    private fun afterCanvasGeometry() {
+        synchronized(selectionLock) { selectionMask = null }
+        selectionUndoStack.clear()
+        needsComposite = true
+        notifySelectionChanged()
+        val cb = onViewChanged
+        if (cb != null) post { cb() }
+    }
+
+    /** Grow / shrink / feather the live selection by N px (engine kernel;
+     *  the mask is uploaded first, then reloaded from the result). */
+    fun refineSelection(op: String, radius: Int, cacheDir: java.io.File): Boolean =
+        applySelectionOp(
+            "{\"op\":\"$op\",\"radius\":${radius.coerceIn(0, 256)}}",
+            cacheDir,
+            upload = true
+        )
+
+    /** Select from a layer's alpha (threshold 0..255). */
+    fun selectFromLayerAlpha(index: Int, threshold: Int, cacheDir: java.io.File): Boolean =
+        applySelectionOp(
+            "{\"op\":\"fromAlpha\",\"index\":$index," +
+                "\"threshold\":${threshold.coerceIn(0, 255)}}",
+            cacheDir,
+            upload = false
+        )
+
+    private fun applySelectionOp(
+        json: String,
+        cacheDir: java.io.File,
+        upload: Boolean
+    ): Boolean {
+        if (handle == 0L) return false
+        if (upload && !hasSelection()) return false
+        val png = try {
+            java.io.File.createTempFile("w1-sel-", ".png", cacheDir)
+        } catch (_: Exception) {
+            return false
+        }
+        if (upload) {
+            if (!selectionToPng(png.absolutePath)) return false
+            if (!setSelectionMask(png.absolutePath)) return false
+        }
+        val ok = synchronized(engineLock) {
+            try {
+                EngineHost.nSelectionOp(handle, json, png.absolutePath)
+            } catch (_: Exception) {
+                false
+            }
+        }
+        if (!ok) return false
+        return loadMaskFromPng(png.absolutePath)
+    }
+
+    /** Reload the Kotlin mask mirror from a white-on-black mask PNG. */
+    private fun loadMaskFromPng(path: String): Boolean {
+        val bmp = try {
+            android.graphics.BitmapFactory.decodeFile(path)
+        } catch (_: Throwable) {
+            null
+        } ?: return false
+        val w = bmp.width
+        val h = bmp.height
+        if (w != engineWidth || h != engineHeight) {
+            bmp.recycle()
+            return false
+        }
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        bmp.recycle()
+        val plane = ByteArray(w * h)
+        for (i in px.indices) {
+            val c = px[i]
+            val g = (((c shr 16) and 0xFF) + ((c shr 8) and 0xFF) + (c and 0xFF) + 1) / 3
+            plane[i] = g.toByte()
+        }
+        synchronized(selectionLock) {
+            var m = selectionMask
+            if (m == null) {
+                m = SelectionMask(engineWidth, engineHeight)
+                selectionMask = m
+            } else {
+                pushSelectionUndoLocked()
+            }
+            m.setAlphaPlane(plane)
+            m.refreshBBoxOutline()
+            if (m.countSelected() == 0) selectionMask = null
+            notifySelectionChanged()
+        }
+        needsComposite = true
+        return true
+    }
+
     fun selectionBlit(json: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nSelectionBlit(handle, json)
             .also {
@@ -1338,6 +1550,7 @@ class EngineSurface @JvmOverloads constructor(
             if (it) {
                 needsComposite = true
                 HistoryLog.popOne()
+                syncCanvasSizeLocked()
             }
         } else false
     }
@@ -1347,8 +1560,34 @@ class EngineSurface @JvmOverloads constructor(
             if (it) {
                 needsComposite = true
                 HistoryLog.push("redo")
+                syncCanvasSizeLocked()
             }
         } else false
+    }
+
+    /**
+     * W1: a structural undo/redo can restore a different canvas size.
+     * nLayerState is the only introspection channel, so the size is read
+     * back from it (no new JNI symbol) and the mask mirror is dropped
+     * when it changed (pixel-bound, ARCHITECTURE.md "W1 additions").
+     */
+    private fun syncCanvasSizeLocked() {
+        if (handle == 0L) return
+        val st = try {
+            EngineHost.nLayerState(handle)
+        } catch (_: Exception) {
+            return
+        }
+        val w = Regex("\"width\":(\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull()
+        val h = Regex("\"height\":(\\d+)").find(st)?.groupValues?.get(1)?.toIntOrNull()
+        if (w == null || h == null) return
+        if (w == engineWidth && h == engineHeight) return
+        engineWidth = w.coerceIn(1, 8192)
+        engineHeight = h.coerceIn(1, 8192)
+        synchronized(selectionLock) { selectionMask = null }
+        selectionUndoStack.clear()
+        needsComposite = true
+        notifySelectionChanged()
     }
 
     private data class EngineOp(val run: () -> Unit)
@@ -2221,8 +2460,8 @@ class EngineSurface @JvmOverloads constructor(
     }
 
     private fun renderLoop() {
-        val pixels = IntArray(engineWidth * engineHeight)
-        val frame = Bitmap.createBitmap(
+        var pixels = IntArray(engineWidth * engineHeight)
+        var frame = Bitmap.createBitmap(
             engineWidth, engineHeight, Bitmap.Config.ARGB_8888
         )
         val borderPaint = Paint().apply {
@@ -2624,12 +2863,23 @@ class EngineSurface @JvmOverloads constructor(
                 Thread.sleep(4)
                 continue
             }
+            // W1: a canvas resize/crop changed the document size in place.
+            // Snapshot the size ONCE per iteration: mixing an old bitmap
+            // with a new width throws inside setPixels (render thread vs
+            // the thread that performed the resize).
+            val gw = engineWidth
+            val gh = engineHeight
+            if (frame.width != gw || frame.height != gh) {
+                frame.recycle()
+                frame = Bitmap.createBitmap(gw, gh, Bitmap.Config.ARGB_8888)
+                pixels = IntArray(gw * gh)
+            }
             needsComposite = false
 
             synchronized(engineLock) {
-                EngineHost.nCompositeInto(handle, pixels, engineWidth, engineHeight)
+                EngineHost.nCompositeInto(handle, pixels, gw, gh)
             }
-            frame.setPixels(pixels, 0, engineWidth, 0, 0, engineWidth, engineHeight)
+            frame.setPixels(pixels, 0, gw, 0, 0, gw, gh)
             val c = holder.lockCanvas()
             if (c != null) {
                 try {
@@ -2638,6 +2888,9 @@ class EngineSurface @JvmOverloads constructor(
                     val ang = viewAngleDeg
                     c.save()
                     if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+                    if (viewFlipH || viewFlipV) {
+                        c.scale(flipSignX(), flipSignY(), dst.centerX(), dst.centerY())
+                    }
                     c.drawBitmap(frame, null, dst, bitmapPaint)
                     c.drawRect(dst, borderPaint)
                     c.restore()
@@ -2740,8 +2993,8 @@ class EngineSurface @JvmOverloads constructor(
         val (ex, ey) = screenToEngine(hoverX, hoverY)
         val onPaper = ex >= 0f && ex < engineWidth && ey >= 0f && ey < engineHeight
         val barred = !activeLayerVisible()
-        val sx = dst.centerX() + (ex - engineWidth * 0.5f) * s
-        val sy = dst.centerY() + (ey - engineHeight * 0.5f) * s
+        val sx = dst.centerX() + flipSignX() * (ex - engineWidth * 0.5f) * s
+        val sy = dst.centerY() + flipSignY() * (ey - engineHeight * 0.5f) * s
         val dimmed = !onPaper
         val ring = if (brushIsEraser) ringEraserPaint else ringPaint
         val shadow = if (brushIsEraser) ringEraserShadowPaint else ringShadowPaint
@@ -3746,8 +3999,8 @@ class EngineSurface @JvmOverloads constructor(
         val r = Math.toRadians(viewAngleDeg.toDouble())
         val cosA = cos(r).toFloat()
         val sinA = sin(r).toFloat()
-        val lx = (ex - engineWidth * 0.5f) * s
-        val ly = (ey - engineHeight * 0.5f) * s
+        val lx = flipSignX() * (ex - engineWidth * 0.5f) * s
+        val ly = flipSignY() * (ey - engineHeight * 0.5f) * s
         val rx = lx * cosA - ly * sinA
         val ry = lx * sinA + ly * cosA
         val cx = viewW * 0.5f + viewOffX
@@ -3808,6 +4061,30 @@ class EngineSurface @JvmOverloads constructor(
                     needsComposite = true
                 }
             }
+            // W1 (#28): polyline selection — every tap drops a vertex,
+            // a double-tap closes the loop (>= 3 vertices). Never a
+            // drag: move only refreshes the rubber band preview.
+            SelectionTool.POLYLINE -> {
+                if (doubleTap && lassoTrace.size >= 3) {
+                    commitLasso()
+                } else if (doubleTap) {
+                    lassoTrace.clear()
+                    lassoStartView = null
+                    shapePreview = emptyList()
+                    needsComposite = true
+                } else {
+                    if (lassoTrace.isEmpty()) lassoStartView = Pair(vx, vy)
+                    val last = lassoTrace.lastOrNull()
+                    if (last == null ||
+                        kotlin.math.abs(last.first - ex) > 0.5f ||
+                        kotlin.math.abs(last.second - ey) > 0.5f
+                    ) {
+                        lassoTrace.add(Pair(ex, ey))
+                    }
+                    shapePreview = lassoTrace.toList()
+                    needsComposite = true
+                }
+            }
         }
         return true
     }
@@ -3843,6 +4120,13 @@ class EngineSurface @JvmOverloads constructor(
                 if (dx * dx + dy * dy > 16f) {
                     lassoTrace.add(Pair(ex, ey))
                     shapePreview = lassoTrace.toList()
+                    needsComposite = true
+                }
+            }
+            SelectionTool.POLYLINE -> {
+                // Rubber band only: the committed vertices stay put.
+                if (lassoTrace.isNotEmpty()) {
+                    shapePreview = lassoTrace + listOf(Pair(ex, ey))
                     needsComposite = true
                 }
             }
@@ -3901,6 +4185,12 @@ class EngineSurface @JvmOverloads constructor(
                     needsComposite = true
                 }
             }
+            SelectionTool.POLYLINE -> {
+                // The vertex was dropped on DOWN; the lift only keeps
+                // the double-tap clock (the tool stays armed until the
+                // loop is closed).
+                needsComposite = true
+            }
         }
         lastTapUpTime = SystemClock.uptimeMillis()
         lastTapUpXY = Pair(vx, vy)
@@ -3945,8 +4235,8 @@ class EngineSurface @JvmOverloads constructor(
         if (s <= 1e-6f) return
         val path = android.graphics.Path()
         for ((i, e) in outline.withIndex()) {
-            val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
-            val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+            val sx = dst.centerX() + flipSignX() * (e.first - engineWidth * 0.5f) * s
+            val sy = dst.centerY() + flipSignY() * (e.second - engineHeight * 0.5f) * s
             if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
         }
         path.close()
@@ -4001,6 +4291,9 @@ class EngineSurface @JvmOverloads constructor(
         if (s <= 1e-6f) return
         c.save()
         if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
+        if (viewFlipH || viewFlipV) {
+            c.scale(flipSignX(), flipSignY(), dst.centerX(), dst.centerY())
+        }
         c.drawBitmap(bmp, null, dst, null)
         c.restore()
     }
@@ -4053,8 +4346,8 @@ class EngineSurface @JvmOverloads constructor(
             if (poly.size < 2) continue
             val path = android.graphics.Path()
             for ((i, e) in poly.withIndex()) {
-                val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
-                val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+                val sx = dst.centerX() + flipSignX() * (e.first - engineWidth * 0.5f) * s
+                val sy = dst.centerY() + flipSignY() * (e.second - engineHeight * 0.5f) * s
                 if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
             }
             path.close()
@@ -4079,8 +4372,8 @@ class EngineSurface @JvmOverloads constructor(
             if (poly.size < 2) continue
             val path = android.graphics.Path()
             for ((i, e) in poly.withIndex()) {
-                val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
-                val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+                val sx = dst.centerX() + flipSignX() * (e.first - engineWidth * 0.5f) * s
+                val sy = dst.centerY() + flipSignY() * (e.second - engineHeight * 0.5f) * s
                 if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
                 c.drawCircle(sx, sy, 3f, trajDotPaint)
             }
@@ -4103,8 +4396,8 @@ class EngineSurface @JvmOverloads constructor(
         if (ang != 0f) c.rotate(ang, dst.centerX(), dst.centerY())
         val path = android.graphics.Path()
         for ((i, e) in poly.withIndex()) {
-            val sx = dst.centerX() + (e.first - engineWidth * 0.5f) * s
-            val sy = dst.centerY() + (e.second - engineHeight * 0.5f) * s
+            val sx = dst.centerX() + flipSignX() * (e.first - engineWidth * 0.5f) * s
+            val sy = dst.centerY() + flipSignY() * (e.second - engineHeight * 0.5f) * s
             if (i == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
         }
         c.drawPath(path, smartGhostPaint)

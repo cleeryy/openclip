@@ -31,7 +31,10 @@ SRCS = src/raster/surface.cpp \
        src/ref/ref.cpp \
        src/raster/anim.cpp \
        src/raster/tracks.cpp \
-       src/io/apng.cpp
+       src/io/apng.cpp \
+       src/raster/docops.cpp \
+       src/raster/canvas_ops.cpp \
+       src/raster/selection.cpp
 
 TEST_SRCS = tests/main.cpp \
             tests/test_surface.cpp \
@@ -60,7 +63,10 @@ TEST_SRCS = tests/main.cpp \
             tests/test_gif.cpp \
             tests/test_anim.cpp \
             tests/test_tracks.cpp \
-            tests/test_apng.cpp
+            tests/test_apng.cpp \
+            tests/test_docops.cpp \
+            tests/test_canvas_ops.cpp \
+            tests/test_selection.cpp
 
 OBJDIR = obj
 LIB = $(OBJDIR)/libopenclip.a

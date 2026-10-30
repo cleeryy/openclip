@@ -148,4 +148,11 @@ object EngineHost {
     // blit-into-layer machinery, 1 undo step).
     external fun nSetLayerFlags(handle: Long, index: Int, json: String): Boolean
     external fun nSetLayerFill(handle: Long, index: Int, json: String?): Boolean
+
+    // W1 additions (ARCHITECTURE.md "W1 additions"): merge/flatten/
+    // rasterize, canvas geometry (resize/crop) and selection refinement.
+    // All three are ONE undo step per call (whole-document snapshot).
+    external fun nMergeLayers(handle: Long, json: String): Boolean
+    external fun nCanvasOp(handle: Long, json: String): Boolean
+    external fun nSelectionOp(handle: Long, json: String, outPath: String): Boolean
 }

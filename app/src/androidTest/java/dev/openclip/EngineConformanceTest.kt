@@ -11804,4 +11804,300 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             closeFreshDoc(id)
         }
     }
+
+    // ---- W1 (issue #28 slice A): merge / canvas geometry / view flip /
+    // selection refinement / reference photo. Engine calls go through the
+    // exact wrappers the menus and dialogs use; every action is one undo
+    // step and the render must never change.
+
+    private fun w1Ctx(): android.content.Context =
+        InstrumentationRegistry.getInstrumentation().targetContext
+
+    /** Fill the active layer with one solid ink (whole canvas seed). */
+    private fun w1Fill(es: EngineSurface, color: String) {
+        assertTrue("floodFill $color", es.floodFillAt(6, 6, color, "{}"))
+        Thread.sleep(300)
+    }
+
+    @Test
+    fun w1MergeDownPreservesRenderAndUndo() {
+        val id = openFreshDoc("w1-merge")
+        val es = freshSurface(id)
+        try {
+            w1Fill(es, "#CC2222")
+            val top = es.addLayerNamed("top")
+            es.setActiveLayer(top)
+            w1Fill(es, "#2244CC")
+            val n0 = es.layerCount()
+            val before = t5Hash(es)
+            assertTrue("merge down", es.mergeLayers("down", top))
+            Thread.sleep(300)
+            assertEquals(n0 - 1, es.layerCount())
+            assertTrue(
+                "merge down must not change a single pixel",
+                t5Hash(es).contentEquals(before)
+            )
+            assertTrue("one undo step", es.undo())
+            Thread.sleep(300)
+            assertEquals(n0, es.layerCount())
+            assertTrue("undo restores the layers", t5Hash(es).contentEquals(before))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1MergeVisibleAndFlatten() {
+        val id = openFreshDoc("w1-visible")
+        val es = freshSurface(id)
+        try {
+            w1Fill(es, "#EEEEEE")
+            es.addLayerNamed("a")
+            w1Fill(es, "#22AA44")
+            val before = t5Hash(es)
+            assertTrue("merge visible", es.mergeLayers("visible"))
+            Thread.sleep(300)
+            assertTrue(t5Hash(es).contentEquals(before))
+            assertEquals(1, es.layerCount())
+            // Flatten keeps the export render byte-identical too.
+            val export = es.pullExportBitmap()
+            assertNotNull(export)
+            val px = intPixels(export!!)
+            export.recycle()
+            assertTrue("flatten", es.mergeLayers("flatten"))
+            Thread.sleep(300)
+            assertEquals(1, es.layerCount())
+            val after = es.pullExportBitmap()
+            assertNotNull(after)
+            assertTrue(
+                "flatten must not change the export",
+                intPixels(after!!).contentEquals(px)
+            )
+            after.recycle()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1RasterizeFillLayerBakesOnce() {
+        val id = openFreshDoc("w1-rasterize")
+        val es = freshSurface(id)
+        try {
+            val l = es.addLayerNamed("fill")
+            es.setActiveLayer(l)
+            assertTrue(
+                "fill fiche",
+                es.setLayerFill(l, "{\"kind\":\"solid\",\"color\":\"#8844FF\"}")
+            )
+            Thread.sleep(300)
+            val before = t5Hash(es)
+            assertTrue("rasterize", es.mergeLayers("rasterize", l))
+            Thread.sleep(300)
+            assertTrue(t5Hash(es).contentEquals(before))
+            // Second call refuses: the layer is a plain raster now.
+            assertFalse(
+                "already-raster refusal",
+                es.mergeLayers("rasterize", l)
+            )
+            assertTrue("refusal kept the pixels", t5Hash(es).contentEquals(before))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1CanvasResizeCropAndPrintSize() {
+        val id = openFreshDoc("w1-canvas")
+        val es = freshSurface(id)
+        try {
+            w1Fill(es, "#336699")
+            val (w0, h0) = es.canvasDims()
+            assertEquals(256, w0)
+            assertEquals(256, h0)
+            val (mw0, mh0) = es.printSizeMm()
+            assertEquals(256.0 / 160.0 * 25.4, mw0, 0.2)
+            assertTrue("dpi kept", es.documentDpi() >= 150f)
+            assertTrue("anchored resize", es.resizeCanvas(128, 128, "center", false))
+            Thread.sleep(300)
+            val (w1, h1) = es.canvasDims()
+            assertEquals(128, w1)
+            assertEquals(128, h1)
+            val (mw1, _) = es.printSizeMm()
+            assertTrue("print size follows the canvas", mw1 < mw0)
+            // Crop to a 64x64 selection.
+            es.selectRectEngine(16f, 16f, 80f, 80f)
+            Thread.sleep(150)
+            assertTrue(es.hasSelection())
+            assertTrue("crop to selection", es.cropToSelection())
+            Thread.sleep(300)
+            val (w2, h2) = es.canvasDims()
+            assertEquals(64, w2)
+            assertEquals(64, h2)
+            assertFalse("selection is dropped on resize", es.hasSelection())
+            // Undo restores the pre-crop size in one step.
+            assertTrue(es.undo())
+            Thread.sleep(300)
+            assertEquals(128, es.canvasDims().first)
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1ViewFlipIsViewOnly() {
+        val id = openFreshDoc("w1-flip")
+        val es = freshSurface(id)
+        try {
+            w1Fill(es, "#AA3344")
+            val b0 = es.pullExportBitmap()
+            assertNotNull(b0)
+            val px0 = intPixels(b0!!)
+            b0.recycle()
+            // Mirror both axes, then verify the inverse view matrix
+            // round-trips and the export is untouched.
+            assertTrue(es.toggleViewFlipH())
+            assertTrue(es.toggleViewFlipV())
+            Thread.sleep(200)
+            val (sx, sy) = es.engineToScreen(40f, 90f)
+            val (ex, ey) = es.screenToEngine(sx, sy)
+            assertEquals(40f, ex, 0.5f)
+            assertEquals(90f, ey, 0.5f)
+            val b1 = es.pullExportBitmap()
+            assertNotNull(b1)
+            assertTrue(
+                "view flip must not change exported pixels",
+                intPixels(b1!!).contentEquals(px0)
+            )
+            b1.recycle()
+            assertFalse(es.toggleViewFlipH())
+            assertFalse(es.toggleViewFlipV())
+            Thread.sleep(150)
+            val b2 = es.pullExportBitmap()
+            assertNotNull(b2)
+            assertTrue(intPixels(b2!!).contentEquals(px0))
+            b2.recycle()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1SelectionGrowShrinkFeather() {
+        val id = openFreshDoc("w1-sel")
+        val es = freshSurface(id)
+        try {
+            es.selectRectEngine(60f, 60f, 120f, 120f)
+            Thread.sleep(150)
+            val c0 = es.selectionCountForTest()
+            assertTrue("rect selection", c0 > 3000)
+            assertTrue(es.refineSelection("grow", 6, w1Ctx().cacheDir))
+            Thread.sleep(150)
+            val c1 = es.selectionCountForTest()
+            assertTrue("grow expands ($c0 -> $c1)", c1 > c0)
+            assertTrue(es.refineSelection("shrink", 6, w1Ctx().cacheDir))
+            Thread.sleep(150)
+            val c2 = es.selectionCountForTest()
+            assertTrue("shrink contracts ($c1 -> $c2)", c2 < c1)
+            assertTrue(es.refineSelection("feather", 4, w1Ctx().cacheDir))
+            Thread.sleep(150)
+            // Soft edge: the centre stays fully selected, the rim does not.
+            assertEquals(255, es.selectionAlphaForTest(90, 90))
+            val rim = es.selectionAlphaForTest(56, 90)
+            assertTrue("feathered rim is graded (got $rim)", rim in 1..254)
+            // One app-side undo restores the pre-feather plane.
+            assertTrue(es.undoSelection())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1SelectFromLayerAlpha() {
+        val id = openFreshDoc("w1-alpha")
+        val es = freshSurface(id)
+        try {
+            // Fresh doc: one opaque background layer.
+            assertTrue(es.selectFromLayerAlpha(0, 1, w1Ctx().cacheDir))
+            assertTrue("opaque layer selects", es.selectionCountForTest() > 1000)
+            val empty = es.addLayerNamed("empty")
+            assertTrue(es.selectFromLayerAlpha(empty, 1, w1Ctx().cacheDir))
+            assertEquals("empty alpha selects nothing", 0, es.selectionCountForTest())
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1PolylineSelection() {
+        val id = openFreshDoc("w1-poly")
+        val es = freshSurface(id)
+        try {
+            es.selectionTool = dev.openclip.ui.SelectionTool.POLYLINE
+            val pts = listOf(50f to 50f, 150f to 50f, 150f to 150f, 50f to 150f)
+            for ((k, p) in pts.withIndex()) {
+                val (x, y) = es.engineToScreen(p.first, p.second)
+                val t = SystemClock.uptimeMillis() + k * 400L
+                dispatchAll(
+                    es,
+                    simpleDown(t, x, y),
+                    MotionEvent.obtain(
+                        t, t, MotionEvent.ACTION_UP, x, y, 1f, 1f, 0, 1f, 1f, 0, 0
+                    )
+                )
+            }
+            // Double-tap on the last vertex closes the loop.
+            val (lx, ly) = es.engineToScreen(50f, 150f)
+            val t = SystemClock.uptimeMillis() + 40L
+            dispatchAll(
+                es,
+                simpleDown(t, lx, ly),
+                MotionEvent.obtain(
+                    t, t, MotionEvent.ACTION_UP, lx, ly, 1f, 1f, 0, 1f, 1f, 0, 0
+                ),
+                simpleDown(t + 40L, lx, ly),
+                MotionEvent.obtain(
+                    t + 40L, t + 40L, MotionEvent.ACTION_UP, lx, ly,
+                    1f, 1f, 0, 1f, 1f, 0, 0
+                )
+            )
+            Thread.sleep(400)
+            assertTrue("polyline selection exists", es.hasSelection())
+            assertTrue(es.selectionCountForTest() > 5000)
+            assertTrue("inside selected", es.selectionAlphaForTest(100, 100) > 0)
+            assertEquals("outside unselected", 0, es.selectionAlphaForTest(200, 200))
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    @Test
+    fun w1RefPhotoIndependentOfDocument() {
+        val bmp = Bitmap.createBitmap(400, 200, Bitmap.Config.ARGB_8888)
+        dev.openclip.ui.RefPhoto.setPhoto(bmp)
+        try {
+            assertTrue(dev.openclip.ui.RefPhoto.hasPhoto)
+            assertEquals(
+                0.5f,
+                dev.openclip.ui.RefPhotoMath.fitScale(200f, 400f, 400, 200),
+                0.001f
+            )
+            dev.openclip.ui.RefPhoto.fit(800f, 800f)
+            assertEquals(1f, dev.openclip.ui.RefPhoto.scale, 0.001f)
+            dev.openclip.ui.RefPhoto.zoomBy(2f)
+            assertEquals(2f, dev.openclip.ui.RefPhoto.scale, 0.01f)
+            dev.openclip.ui.RefPhoto.panBy(100000f, 0f, 800f, 800f)
+            assertTrue(dev.openclip.ui.RefPhoto.panX <= 800f)
+            dev.openclip.ui.RefPhoto.zoom100()
+            assertEquals(1f, dev.openclip.ui.RefPhoto.scale, 0.001f)
+            // Independent of any document: a fresh doc open/close keeps it.
+            val id = openFreshDoc("w1-ref")
+            closeFreshDoc(id)
+            assertTrue("photo survives document switches", dev.openclip.ui.RefPhoto.hasPhoto)
+        } finally {
+            dev.openclip.ui.RefPhoto.clear()
+            bmp.recycle()
+        }
+    }
+
 }

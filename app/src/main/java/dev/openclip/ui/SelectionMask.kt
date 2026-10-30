@@ -11,7 +11,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package dev.openclip.ui
 
-enum class SelectionTool { RECT, ELLIPSE, LASSO }
+enum class SelectionTool { RECT, ELLIPSE, LASSO, POLYLINE }
 
 class SelectionMask(val w: Int, val h: Int) {
     // T1: soft alpha (0..255). Binary setters write 255; feather,
@@ -264,6 +264,30 @@ class SelectionMask(val w: Int, val h: Int) {
         src.copyInto(bits)
         outline = emptyList()
         return true
+    }
+
+    /**
+     * W1 (#28): inclusive bounding box of the selected pixels
+     * [x0, y0, x1, y1], or null when nothing is selected (crop-to-
+     * selection source). Soft (feathered) pixels count as selected.
+     */
+    fun bounds(): IntArray? {
+        var x0 = w
+        var y0 = h
+        var x1 = -1
+        var y1 = -1
+        for (y in 0 until h) {
+            val base = y * w
+            for (x in 0 until w) {
+                if (bits[base + x] == 0.toByte()) continue
+                if (x < x0) x0 = x
+                if (y < y0) y0 = y
+                if (x > x1) x1 = x
+                if (y > y1) y1 = y
+            }
+        }
+        if (x1 < 0) return null
+        return intArrayOf(x0, y0, x1, y1)
     }
 
     /** FNV-1a hash (tab-switch survival probe). */

@@ -43,6 +43,8 @@
 #include "openclip/brush.h"
 #include "openclip/bubble.h"
 #include "openclip/canvas.h"
+#include "openclip/canvas_ops.h"
+#include "openclip/docops.h"
 #include "openclip/cels.h"
 #include "openclip/filters.h"
 #include "openclip/fill.h"
@@ -52,6 +54,7 @@
 #include "openclip/guides.h"
 #include "openclip/ora.h"
 #include "openclip/ref.h"
+#include "openclip/selection.h"
 #include "openclip/shapes.h"
 #include "openclip/stroke.h"
 #include "openclip/surface.h"
@@ -1068,6 +1071,12 @@ Java_dev_openclip_engine_EngineHost_nLayerState(JNIEnv* env, jclass,
     if (!s) return env->NewStringUTF("{\"active\":0,\"layers\":[]}");
     std::string out = "{\"active\":";
     out += std::to_string(cur(s).activeLayer());
+    // W1: canvas size is introspection (a structural UNDO can restore a
+    // different size, the app must follow it without a new symbol).
+    out += ",\"width\":";
+    out += std::to_string(cur(s).width());
+    out += ",\"height\":";
+    out += std::to_string(cur(s).height());
     out += ",\"maskTarget\":";
     out += std::to_string(s->maskTargetOn ? s->maskTarget : -1);
     out += ",\"layers\":[";
@@ -3871,4 +3880,148 @@ Java_dev_openclip_engine_EngineHost_nVectorPaths(JNIEnv* env, jclass,
     }
     out += "]}";
     return env->NewStringUTF(out.c_str());
+}
+
+// W1 (issue #28 slice A, ARCHITECTURE.md "W1 additions"): merge down /
+// merge visible / flatten / rasterize. The structural change is wrapped
+// in a whole-document snapshot (ONE undo step). False + document intact
+// on refusal (render-preserving verification lives in docops.h).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nMergeLayers(JNIEnv* env, jclass,
+                                                 jlong handle, jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    const std::string op = jsonStr(j, "op");
+    const int index = static_cast<int>(jsonNum(j, "index", -1));
+    std::string err;
+    bool ok = false;
+    if (op != "down" && op != "visible" && op != "flatten" &&
+        op != "rasterize")
+        return JNI_FALSE;
+    hist(s).beginSnapshot(cur(s));
+    if (op == "down") {
+        ok = openclip::mergeDown(cur(s), static_cast<std::size_t>(index), err);
+    } else if (op == "visible") {
+        ok = openclip::mergeVisible(cur(s), err);
+    } else if (op == "flatten") {
+        ok = openclip::flattenDocument(cur(s), err);
+    } else {
+        ok = openclip::rasterizeLayer(cur(s), static_cast<std::size_t>(index),
+                                      err);
+    }
+    if (!ok) {
+        hist(s).cancelSnapshot();  // no undo entry for a refused op
+        return JNI_FALSE;
+    }
+    hist(s).endSnapshot(cur(s));
+    vecs(s).clear();  // structural change: vector stacks are stale
+    return JNI_TRUE;
+}
+
+// W1: canvas geometry (resize with anchor + resample, crop to rect).
+// One whole-document snapshot = one undo step. The selection mask is
+// pixel-bound and is dropped (app re-uploads after a size change).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nCanvasOp(JNIEnv* env, jclass,
+                                              jlong handle, jstring json) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    const std::string op = jsonStr(j, "op");
+    std::string err;
+    bool ok = false;
+    if (op == "resize") {
+        double wd = jsonNum(j, "width", jsonNum(j, "w", -1));
+        double hd = jsonNum(j, "height", jsonNum(j, "h", -1));
+        if (wd < 1 || hd < 1 || wd > 8192 || hd > 8192) return JNI_FALSE;
+        const std::string an = jsonStr(j, "anchor");
+        const openclip::CanvasAnchor a =
+            openclip::anchorFromName(an.empty() ? nullptr : an.c_str());
+        const bool resample = jsonBool(j, "resample", true);
+        hist(s).beginSnapshot(cur(s));
+        ok = openclip::resizeCanvas(cur(s), static_cast<int>(wd),
+                                    static_cast<int>(hd), a, resample, err);
+    } else if (op == "crop") {
+        const int x = static_cast<int>(jsonNum(j, "x", -1));
+        const int y = static_cast<int>(jsonNum(j, "y", -1));
+        const double wd = jsonNum(j, "width", jsonNum(j, "w", -1));
+        const double hd = jsonNum(j, "height", jsonNum(j, "h", -1));
+        if (wd < 1 || hd < 1) return JNI_FALSE;
+        hist(s).beginSnapshot(cur(s));
+        ok = openclip::cropCanvas(cur(s), x, y, static_cast<int>(wd),
+                                  static_cast<int>(hd), err);
+    } else {
+        return JNI_FALSE;
+    }
+    if (!ok) {
+        hist(s).cancelSnapshot();
+        return JNI_FALSE;
+    }
+    hist(s).endSnapshot(cur(s));
+    vecs(s).clear();
+    s->selMask.clear();  // pixel-bound, like the mask target
+    s->selMaskOn = false;
+    return JNI_TRUE;
+}
+
+// W1: selection refinement on the LIVE engine mask (grow/shrink/feather)
+// or built from a layer's alpha ("fromAlpha"). The resulting plane is
+// written as a white-on-black PNG for the app mirror and stays the live
+// engine mask (V+2 contract: engine = authority for engine ops).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSelectionOp(JNIEnv* env, jclass,
+                                                 jlong handle, jstring json,
+                                                 jstring outPath) {
+    Session* s = asSession(handle);
+    if (!s || !outPath) return JNI_FALSE;
+    const int w = cur(s).width();
+    const int h = cur(s).height();
+    if (w <= 0 || h <= 0) return JNI_FALSE;
+    const std::string j = toStd(env, json);
+    const std::string op = jsonStr(j, "op");
+    const std::string out = toStd(env, outPath);
+    if (out.empty()) return JNI_FALSE;
+    openclip::AlphaPlane plane;
+    if (op == "fromAlpha") {
+        const int idx = static_cast<int>(jsonNum(j, "index", -1));
+        if (idx < 0 || idx >= static_cast<int>(cur(s).layerCount()))
+            return JNI_FALSE;
+        const int th = static_cast<int>(jsonNum(j, "threshold", 1));
+        openclip::alphaPlaneFromSurface(cur(s).layer(idx).surface, th, plane);
+    } else if (op == "grow" || op == "shrink" || op == "feather") {
+        if (!s->selMaskOn ||
+            static_cast<int>(s->selMask.size()) != w * h)
+            return JNI_FALSE;  // upload first (nSetSelectionMask)
+        plane.resize(w, h);
+        std::copy(s->selMask.begin(), s->selMask.end(), plane.alpha.begin());
+        const int radius = static_cast<int>(jsonNum(j, "radius", 0));
+        if (op == "grow") {
+            openclip::growPlane(plane, radius);
+        } else if (op == "shrink") {
+            openclip::shrinkPlane(plane, radius);
+        } else {
+            openclip::featherPlane(plane, radius);
+        }
+    } else {
+        return JNI_FALSE;
+    }
+    if (plane.empty() || plane.w != w || plane.h != h) return JNI_FALSE;
+    openclip::Surface img(w, h);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const std::uint8_t a = plane.at(x, y);
+            img.set(x, y, openclip::Pixel{a, a, a, 255});
+        }
+    }
+    std::vector<std::uint8_t> png;
+    if (!openclip::encodePng(img, png) || png.empty()) return JNI_FALSE;
+    std::FILE* f = std::fopen(out.c_str(), "wb");
+    if (!f) return JNI_FALSE;
+    const std::size_t wrote = std::fwrite(png.data(), 1, png.size(), f);
+    std::fclose(f);
+    if (wrote != png.size()) return JNI_FALSE;
+    s->selMask.assign(plane.alpha.begin(), plane.alpha.end());
+    s->selMaskOn = true;
+    return JNI_TRUE;
 }
