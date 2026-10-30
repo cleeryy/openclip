@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -2831,9 +2832,10 @@ class EngineConformanceTest {
             // below the fold — scroll the outer dock so the list
             // viewport is on screen (inner-list scrollTo cannot fix
             // an outer-dock offset).
+            val st = es.layerState()
+            assertEquals("fresh doc must expose both layers (state=$st)",
+                2, org.json.JSONObject(st).optJSONArray("layers")?.length() ?: -1)
             composeRule.onNodeWithTag("layer-list").performScrollTo()
-            composeRule.waitForIdle()
-            composeRule.onNodeWithTag("layer-thumb-0").performClick()
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("layer-blend-$idx").performScrollTo()
             composeRule.onNodeWithTag("layer-blend-$idx").performClick()
@@ -12100,4 +12102,187 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         }
     }
 
+
+    // A2 (#29): the new blend modes are reachable from the searchable
+    // list and change the composite; undoing the paint restores it.
+    // Group pass-through is visible as a badge and toggles the engine
+    // flag through the flags setter (no new JNI symbol).
+    @Test
+    fun a2BlendModesAndPassThrough() {
+        val es = surf()
+        awaitSurface(es)
+        resetSlice3()
+        try {
+            ensureDockOpen()
+            dockTop()
+            // Deterministic history: drain whatever earlier tests left so
+            // the undo below pops OUR stroke.
+            repeat(64) {
+                if (!es.undo()) return@repeat
+            }
+            onUi {
+                it.setActiveLayer(0)
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#808080","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+            }
+            val cx = es.width * 0.5f
+            val cy = es.height * 0.5f
+            val t0 = SystemClock.uptimeMillis()
+            bigStroke(es, cx, cy, t0)
+            Thread.sleep(500)
+            val painted = t5Hash(es)
+            val idx = onUi {
+                val i = it.addLayerNamed("A2Top")
+                it.setActiveLayer(i)
+                it.setBrush(
+                    """{"radius":64,"hardness":1.0,"opaque":1.0,"spacing":0.15,"color":"#404040","stabilize":0.0,"curve":0.0,"mode":"brush"}"""
+                )
+                i
+            }
+            Thread.sleep(300)
+            strokeAcross(es, cy, t0 + 6000, cx)
+            Thread.sleep(500)
+            val normal = t5Hash(es)
+            assertFalse(
+                "the second stroke must paint",
+                painted.contentEquals(normal)
+            )
+            // Pick color-burn through the real UI (searchable dialog).
+            // The fresh stroke bumped refreshKey, so the panel already
+            // lists the new layer; its row stays active (rank 2 visible
+            // even in compact mode).
+            composeRule.onNodeWithTag("layer-list").performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("layer-blend-$idx").performScrollTo()
+            composeRule.onNodeWithTag("layer-blend-$idx").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("blend-search")
+                .performTextInput("color")
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("blend-item-color-burn")
+                .assertIsDisplayed()
+            composeRule.onNodeWithTag("blend-item-color-dodge")
+                .assertExists()
+            // Proof shot: the picker lists the new modes (localized).
+            shot("a2-blends.png")
+            composeRule.onNodeWithTag("blend-item-color-burn").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(500)
+            val blend = try {
+                val arr = org.json.JSONObject(es.layerState())
+                    .optJSONArray("layers")
+                val e = arr!!.optJSONObject(idx)
+                (e.optJSONObject("self") ?: e).optString("blend", "")
+            } catch (_: Exception) {
+                ""
+            }
+            assertEquals("svg:color-burn", blend)
+            val burned = t5Hash(es)
+            assertFalse(
+                "color-burn must change the composite",
+                normal.contentEquals(burned)
+            )
+            // Undo pops the last stroke: the composite comes back to the
+            // pre-stroke state even with the new mode active.
+            assertTrue("undo must have a step", es.undo())
+            Thread.sleep(400)
+            assertTrue(
+                "undo must restore the composite",
+                painted.contentEquals(t5Hash(es))
+            )
+            // Group pass-through badge + toggle (engine flag, 0 symbol).
+            // Move the group to the BOTTOM of the stack so its row is
+            // the first list item and stays inside the window.
+            val gi = onUi {
+                val g = it.addGroup("A2Group")
+                it.moveLayer(g, 0)
+                0
+            }
+            Thread.sleep(500)
+            // addGroup is not a paint op: refresh the panel through a
+            // row select (same pattern as the clip/mask badge test).
+            composeRule.onNodeWithTag("layer-thumb-0").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(800)
+            var ptDesc = ""
+            var isoDesc = ""
+            composeRule.activityRule.scenario.onActivity { act ->
+                ptDesc = act.getString(R.string.layer_pass_through)
+                isoDesc = act.getString(R.string.layer_isolated)
+            }
+            composeRule.onNodeWithTag("layer-list")
+                .performScrollToNode(hasTestTag("layer-row-$gi"))
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("layer-badge-pass-$gi")
+                .performScrollTo()
+            composeRule.waitForIdle()
+            composeRule.onNode(
+                hasTestTag("layer-badge-pass-$gi").and(
+                    hasContentDescription(ptDesc)
+                )
+            ).assertIsDisplayed()
+            // Proof shot: pass-through badge on the group row.
+            shot("a2-pass.png")
+            composeRule.onNodeWithTag("layer-badge-pass-$gi").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(400)
+            assertEquals(
+                "badge tap must isolate the group",
+                false,
+                groupPassFlag(es, gi)
+            )
+            composeRule.onNode(
+                hasTestTag("layer-badge-pass-$gi").and(
+                    hasContentDescription(isoDesc)
+                )
+            ).assertExists()
+            // Proof shot: isolated badge on the group row.
+            shot("a2-isolated.png")
+            composeRule.onNodeWithTag("layer-badge-pass-$gi").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(400)
+            assertEquals(
+                "second tap must restore pass-through",
+                true,
+                groupPassFlag(es, gi)
+            )
+        } finally {
+            resetSlice3()
+            repeat(40) {
+                try {
+                    es.undo()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** A2: best-effort UI screenshot into the app cache (proof shots). */
+    private fun shot(name: String) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val s = InstrumentationRegistry.getInstrumentation()
+                    .uiAutomation.takeScreenshot() ?: return
+                val dst = File(composeRule.activity.cacheDir, name)
+                FileOutputStream(dst).use { o ->
+                    s.compress(Bitmap.CompressFormat.PNG, 100, o)
+                }
+                s.recycle()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** A2: "pass" flag of the top-level group at [i] (null-safe). */
+    private fun groupPassFlag(es: EngineSurface, i: Int): Boolean? {
+        return try {
+            val arr = org.json.JSONObject(es.layerState())
+                .optJSONArray("layers") ?: return null
+            val e = arr.optJSONObject(i) ?: return null
+            (e.optJSONObject("self") ?: e).optBoolean("pass", true)
+        } catch (_: Exception) {
+            null
+        }
+    }
 }

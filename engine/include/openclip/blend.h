@@ -31,7 +31,21 @@ enum class BlendMode : std::uint8_t {
     PinLight,
     Subtract,
     Divide,
-    Exclusion
+    Exclusion,
+    // A2 additions (ARCHITECTURE.md "A2 additions", clean-room, SVG /
+    // PDF blend math). Max is the documented twin of Lighten (same
+    // per-channel maximum, own name for the open nomenclature);
+    // "lighten-2" is accepted as an input alias of Max. AddGlow is the
+    // additive-with-glow family (screen plus one more source
+    // contribution, see blend.cpp).
+    ColorBurn,
+    ColorDodge,
+    AddGlow,
+    Max,
+    DarkerColor,
+    LighterColor,
+    Hue,
+    Saturation
 };
 
 // Parse an OpenRaster / SVG blend name ("svg:multiply", "svg:screen", ...).

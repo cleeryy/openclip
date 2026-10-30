@@ -190,7 +190,7 @@ partiellement, écart précis cité · **ABSENT** = rien dans le code ·
 | 7.5 Trames | FAIT | 6 tones + densité V+2 (emu `panelDensityThins`) ; engine `tone_*` (4 tests) |
 | 7.6 Bord aquarelle | ABSENT | rien |
 | 7.7 Couleur de calque | FAIT | `tagColor` app-side (slice 3, persistance slice 6) |
-| 7.8 Modes de fusion | PARTIEL | 10 modes testés (`blend_*` + `blend_names_v2`) ; **manque** ≈20 modes source (assombrir/éclaircir, densité ±, soustraire, esquive, incrustation partielle, vive/linéaire/ponctuelle, maximal, ± couleur, diviser, traversant…) |
+| 7.8 Modes de fusion | FAIT | 28 modes (20 + A2 : color burn/dodge, add glow, max, darker/lighter color, hue, saturation) testés numériquement (`blend_*`), traversant réel des groupes (masque/clip/imbrication) + isolé byte-identique ; PSD `idiv`/`div `/`lite`/`dkCl`/`lCCl`/`hue `/`sat `, ORA `isolation` + composite-op inconnu préservé |
 | 7.9 Textures | ABSENT | rien (tones ≠ texture de trait) |
 | 7.10 Masques | FAIT | M5 (`mask_multiply_hides`, `mask_undo_restores`) ; emu `maskTargetStrokeHidesAndUndoRestores`, `clipMaskBadges` |
 | 7.11 Lier règle au calque | ABSENT | guides au niveau document, pas par calque |

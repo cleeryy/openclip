@@ -239,6 +239,161 @@ inline bool walkChildAdjustment(
 }
 
 // Composite `layers` (document order, bottom-to-top) onto `out` (w x h).
+void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
+                   int h, const std::vector<LayerAnimSample>* animTop,
+                   bool topLevel, bool forExport);
+
+// A2: clip gate for one group level. `clipped` follows the M5 stencil
+// rule at the level that owns the group (previous sibling when it is a
+// raster layer, else the running accumulator).
+struct GroupClip {
+    const std::vector<Layer>* peers = nullptr;
+    const std::vector<const Surface*>* vec = nullptr;
+    std::size_t index = 0;
+    bool clipped = false;
+    bool ok(const Surface& out, int x, int y) const {
+        if (!clipped) return true;
+        return stencilPainted(*peers, *vec, index, out, x, y);
+    }
+};
+
+// A2: pass-through group painter. Children composite straight onto the
+// parent accumulator `out` (no isolated buffer) with their own blend
+// modes, exactly like top-level layers; nested groups recurse and
+// isolated children buffer first (then blend with their own mode).
+// `opMul` carries the accumulated ancestor pass-through opacity — a
+// pass-through group's opacity applies to each child (the documented
+// approximation, ARCHITECTURE.md "A2 additions"). `mask` is the
+// accumulated ancestor mask; the group's own mask is folded in as the
+// byte product (effective alpha, same truncating multiply as a single
+// mask). The group's own clipped flag is enforced through `clip`.
+void compositePassThroughGroup(const Layer& g, Surface& out, int w, int h,
+                               float opMul, const Surface* mask,
+                               const GroupClip& clip, bool forExport) {
+    std::vector<Surface> vecScratch;
+    const std::vector<const Surface*> vecCache =
+        rasterizeAllVectors(g.children, vecScratch, w, h);
+    std::vector<Surface> fillScratch;
+    const std::vector<const Surface*> fillCache =
+        renderAllFills(g.children, fillScratch, w, h);
+    // Effective mask = ancestor mask x group mask (alpha-only product).
+    Surface combined;
+    const Surface* effMask = mask;
+    if (g.hasMask) {
+        if (!mask) {
+            effMask = &g.mask;
+        } else {
+            combined.resize(w, h);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const int a = static_cast<int>(mask->get(x, y).a) *
+                                  g.mask.get(x, y).a / 255;
+                    combined.set(x, y, Pixel{0, 0, 0,
+                                             static_cast<std::uint8_t>(a)});
+                }
+            effMask = &combined;
+        }
+    }
+    const float groupOp = opMul * g.opacity;
+    for (std::size_t ci = 0; ci < g.children.size(); ++ci) {
+        const auto& child = g.children[ci];
+        if (!child.visible || child.opacity <= 0.0f) continue;
+        const GroupClip childClip{&g.children, &vecCache, ci, child.clipped};
+        if (child.isGroup) {
+            if (child.passThrough) {
+                compositePassThroughGroup(child, out, w, h,
+                                          groupOp * child.opacity, effMask,
+                                          childClip, forExport);
+                continue;
+            }
+            // Isolated child inside a pass-through group: buffer its
+            // children, then blend the buffer with the child's mode.
+            Surface tmp;
+            tmp.resize(w, h);
+            tmp.clear();
+            compositeInto(child.children, tmp, w, h, nullptr, false,
+                          forExport);
+            const float op = groupOp * child.opacity;
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    if (!clip.ok(out, x, y) || !childClip.ok(out, x, y))
+                        continue;
+                    Pixel s = tmp.get(x, y);
+                    if (s.a == 0) continue;
+                    if (effMask) {
+                        const std::uint8_t ma = effMask->get(x, y).a;
+                        if (ma == 0) continue;
+                        if (ma != 255) {
+                            s.r = static_cast<std::uint8_t>((int)s.r * ma /
+                                                           255);
+                            s.g = static_cast<std::uint8_t>((int)s.g * ma /
+                                                           255);
+                            s.b = static_cast<std::uint8_t>((int)s.b * ma /
+                                                           255);
+                            s.a = static_cast<std::uint8_t>((int)s.a * ma /
+                                                           255);
+                        }
+                        if (s.a == 0) continue;
+                    }
+                    s = scalePixel(s, op);
+                    Pixel d = out.get(x, y);
+                    Pixel r;
+                    blendPixel(s, d, child.blend, r);
+                    out.set(x, y, r);
+                }
+            continue;
+        }
+        const Surface* childVec = vecCache[ci];
+        const Surface* childFill = fillCache[ci];
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                if (!clip.ok(out, x, y)) continue;
+                // M8: adjustment children transform the accumulated
+                // output; they paint no pixels.
+                if (walkChildAdjustment(out, g.children, vecCache, ci,
+                                        child, groupOp, x, y))
+                    continue;
+                if (child.clipped &&
+                    !stencilPainted(g.children, vecCache, ci, out, x, y))
+                    continue;
+                // T5: fill children paint their rendered content
+                // (surface ignored while the fiche lives).
+                Pixel s = childFill ? childFill->get(x, y)
+                                    : layerPixel(child, childVec, x, y);
+                if (s.a == 0) continue;
+                if (effMask) {
+                    const std::uint8_t ma = effMask->get(x, y).a;
+                    if (ma == 0) continue;
+                    if (ma != 255) {
+                        s.r = static_cast<std::uint8_t>((int)s.r * ma / 255);
+                        s.g = static_cast<std::uint8_t>((int)s.g * ma / 255);
+                        s.b = static_cast<std::uint8_t>((int)s.b * ma / 255);
+                        s.a = static_cast<std::uint8_t>((int)s.a * ma / 255);
+                    }
+                    if (s.a == 0) continue;
+                }
+                if (child.hasMask) {
+                    const std::uint8_t ma = child.mask.get(x, y).a;
+                    if (ma == 0) continue;
+                    if (ma != 255) {
+                        s.r = static_cast<std::uint8_t>((int)s.r * ma / 255);
+                        s.g = static_cast<std::uint8_t>((int)s.g * ma / 255);
+                        s.b = static_cast<std::uint8_t>((int)s.b * ma / 255);
+                        s.a = static_cast<std::uint8_t>((int)s.a * ma / 255);
+                    }
+                    if (s.a == 0) continue;
+                }
+                s = scalePixel(s, groupOp * child.opacity);
+                Pixel d = out.get(x, y);
+                Pixel r;
+                blendPixel(s, d, child.blend, r);
+                out.set(x, y, r);
+            }
+        }
+    }
+}
+
+// Composite `layers` (document order, bottom-to-top) onto `out` (w x h).
 // M5 rules: a clipped layer skips any pixel where its stencil (above)
 // has zero painted alpha; a layer with a mask multiplies its alpha by
 // mask.a/255.
@@ -270,75 +425,16 @@ void compositeInto(const std::vector<Layer>& layers, Surface& out, int w,
         if (forExport && topLevel && (l.reference || l.draft)) continue;
         if (l.isGroup) {
             if (l.passThrough) {
-                // Children blend directly into the target with their own
-                // modes; the group's opacity multiplies each child note
-                // (OpenRaster pass-through semantics approximation).
-                // M6: pass-through vector children rasterize on demand
-                // into childVec (isolated groups recurse through
-                // compositeInto and are covered by that level's cache).
-                // The stencil below is vector-aware via childVecCache.
-                // T5: fill children of pass-through groups render like
-                // top-level fills (the isolated-group path below
-                // recurses through compositeInto and is covered by
-                // that level's cache).
-                std::vector<Surface> childVecScratch;
-                const std::vector<const Surface*> childVecCache =
-                    rasterizeAllVectors(l.children, childVecScratch, w, h);
-                std::vector<Surface> childFillScratch;
-                const std::vector<const Surface*> childFillCache =
-                    renderAllFills(l.children, childFillScratch, w, h);
-                for (std::size_t ci = 0; ci < l.children.size(); ++ci) {
-                    const auto& child = l.children[ci];
-                    if (!child.visible || child.opacity <= 0.0f) continue;
-                    Surface tmp;
-                    tmp.resize(w, h);
-                    tmp.clear();
-                    const Surface* childTmp = childVecCache[ci];
-                    // Empty workspace for one child's premultiplied data,
-                    // then blend onto out so order stays correct.
-                    for (int y = 0; y < h; ++y) {
-                        for (int x = 0; x < w; ++x) {
-                            // M8: adjustment children transform the
-                            // accumulated output; they paint no pixels.
-                            if (walkChildAdjustment(out, l.children,
-                                                    childVecCache, ci, child,
-                                                    l.opacity, x, y))
-                                continue;
-                            if (child.clipped &&
-                                !stencilPainted(l.children, childVecCache,
-                                                ci, out, x, y))
-                                continue;
-                            // T5: fill children paint their rendered
-                            // content (surface ignored while fiche
-                            // lives, like top-level fills below).
-                            Pixel s = childFillCache[ci]
-                                          ? childFillCache[ci]->get(x, y)
-                                          : layerPixel(child, childTmp, x,
-                                                       y);
-                            if (s.a == 0) continue;
-                            if (child.hasMask) {
-                                const std::uint8_t ma = child.mask.get(x, y).a;
-                                if (ma == 0) continue;
-                                if (ma != 255) {
-                                    s.r = static_cast<std::uint8_t>(
-                                        (int)s.r * ma / 255);
-                                    s.g = static_cast<std::uint8_t>(
-                                        (int)s.g * ma / 255);
-                                    s.b = static_cast<std::uint8_t>(
-                                        (int)s.b * ma / 255);
-                                    s.a = static_cast<std::uint8_t>(
-                                        (int)s.a * ma / 255);
-                                }
-                                if (s.a == 0) continue;
-                            }
-                            s = scalePixel(s, l.opacity * child.opacity);
-                            Pixel d = out.get(x, y);
-                            Pixel r;
-                            blendPixel(s, d, child.blend, r);
-                            out.set(x, y, r);
-                        }
-                    }
-                }
+                // A2: children composite straight onto the parent
+                // accumulator (no isolated buffer); nested groups
+                // recurse, the group's mask/clip apply, and the group
+                // opacity multiplies each child (documented
+                // approximation, ARCHITECTURE.md "A2 additions").
+                // The group's own blend mode is inactive while
+                // pass-through (switch to isolated to apply it).
+                compositePassThroughGroup(
+                    l, out, w, h, 1.0f, nullptr,
+                    GroupClip{&layers, &vecCache, li, l.clipped}, forExport);
             } else {
                 // Isolated group: children composite into a clean buffer
                 // with their own modes, then the buffer blends onto out

@@ -93,6 +93,8 @@ internal data class LayerInfo(
     val fillKind: String? = null,
     val animKeys: Int = 0,
     val tagColor: Int? = null,
+    // A2: group isolation (groups only; pass-through by default).
+    val passThrough: Boolean = true,
     val children: List<LayerInfo> = emptyList()
 )
 
@@ -105,11 +107,56 @@ internal val BLEND_NAMES = listOf(
     // T5 §3 additions (engine blend.h, ARCHITECTURE.md "T5 additions").
     "svg:darken", "svg:lighten", "svg:linear-burn",
     "svg:linear-dodge", "svg:vivid-light", "svg:linear-light",
-    "svg:pin-light", "svg:subtract", "svg:divide", "svg:exclusion"
+    "svg:pin-light", "svg:subtract", "svg:divide", "svg:exclusion",
+    // A2 additions (engine blend.h, ARCHITECTURE.md "A2 additions").
+    "svg:color-burn", "svg:color-dodge", "svg:add-glow", "svg:max",
+    "svg:darker-color", "svg:lighter-color", "svg:hue", "svg:saturation"
 )
 
 internal fun blendDisplay(svg: String): String = svg.removePrefix("svg:")
 internal fun blendSvg(display: String): String = "svg:$display"
+
+// A2: localized label for a canonical blend name (FR/EN resources).
+// Unknown names keep their canonical kebab spelling.
+internal fun blendLabelRes(display: String): Int? = when (display) {
+    "normal" -> R.string.blend_normal
+    "multiply" -> R.string.blend_multiply
+    "screen" -> R.string.blend_screen
+    "overlay" -> R.string.blend_overlay
+    "plus" -> R.string.blend_plus
+    "soft-light" -> R.string.blend_soft_light
+    "hard-light" -> R.string.blend_hard_light
+    "difference" -> R.string.blend_difference
+    "color" -> R.string.blend_color
+    "luminosity" -> R.string.blend_luminosity
+    "darken" -> R.string.blend_darken
+    "lighten" -> R.string.blend_lighten
+    "linear-burn" -> R.string.blend_linear_burn
+    "linear-dodge" -> R.string.blend_linear_dodge
+    "vivid-light" -> R.string.blend_vivid_light
+    "linear-light" -> R.string.blend_linear_light
+    "pin-light" -> R.string.blend_pin_light
+    "subtract" -> R.string.blend_subtract
+    "divide" -> R.string.blend_divide
+    "exclusion" -> R.string.blend_exclusion
+    "color-burn" -> R.string.blend_color_burn
+    "color-dodge" -> R.string.blend_color_dodge
+    "add-glow" -> R.string.blend_add_glow
+    "max" -> R.string.blend_max
+    "darker-color" -> R.string.blend_darker_color
+    "lighter-color" -> R.string.blend_lighter_color
+    "hue" -> R.string.blend_hue
+    "saturation" -> R.string.blend_saturation
+    else -> null
+}
+
+/** Localized picker label, canonical kebab fallback. */
+@Composable
+internal fun blendLabel(svg: String): String {
+    val display = blendDisplay(svg)
+    val res = blendLabelRes(display) ?: return display
+    return stringResource(res)
+}
 
 // M8 — adjustment descriptor types (engine contract: "gradientMap"
 // carries stops; amount is ignored for it; V+2 "curves" carries the
@@ -213,6 +260,7 @@ private fun parseLayer(o: JSONObject, index: Int): LayerInfo {
         fillKind = (s.optJSONObject("fill") ?: o.optJSONObject("fill"))
             ?.optString("kind"),
         animKeys = s.optInt("anim", 0),
+        passThrough = s.optBoolean("pass", true),
         children = kids
     )
 }
@@ -497,6 +545,19 @@ fun LayerPanel(
                         menuIndex = null
                         refresh()
                     },
+                    onTogglePassThrough = {
+                        // A2: same setter as the lock flags, 0 new symbol.
+                        surface.layerOp {
+                            setLayerFlags(
+                                info.index,
+                                if (info.passThrough)
+                                    "{\"passThrough\":false}"
+                                else "{\"passThrough\":true}"
+                            )
+                        }
+                        menuIndex = null
+                        refresh()
+                    },
                     onTag = { c ->
                         if (c == null) tagColors.remove(info.index)
                         else tagColors[info.index] = c
@@ -687,6 +748,7 @@ private fun LayerRow(
     onClipped: () -> Unit,
     onAddChild: () -> Unit,
     onTag: (Int?) -> Unit,
+    onTogglePassThrough: () -> Unit = {},
     // T5 §1: flag toggles (locked/alphaLock/reference/draft) + §7
     // align multi-selection (session-only, read by AlignPanel).
     onToggleFlag: (String) -> Unit = {},
@@ -754,6 +816,23 @@ private fun LayerRow(
                     )
             )
             // Badges (visual 24dp, reached via the long-press menu).
+            // A2: group isolation badge (tap = toggle pass-through).
+            if (info.isGroup) {
+                val ptDesc = stringResource(
+                    if (info.passThrough) R.string.layer_pass_through
+                    else R.string.layer_isolated
+                )
+                Text(
+                    if (info.passThrough) "\u21E2" else "\u25A3",
+                    color = if (info.passThrough) Color(0xFF7FD4A8)
+                    else Color(0xFFB8B8C8),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("layer-badge-pass-${info.index}")
+                        .semantics { contentDescription = ptDesc }
+                        .clickable { onTogglePassThrough() }
+                )
+            }
             if (info.clipped) {
                 val clipDesc = stringResource(R.string.layer_clipped_on)
                 Text(
@@ -1087,6 +1166,19 @@ private fun LayerRow(
                     text = { Text(stringResource(R.string.layer_children)) },
                     onClick = onAddChild
                 )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            stringResource(
+                                if (info.passThrough) R.string.layer_isolated
+                                else R.string.layer_pass_through
+                            )
+                        )
+                    },
+                    onClick = onTogglePassThrough,
+                    modifier = Modifier
+                        .testTag("layer-menu-pass-${info.index}")
+                )
             }
             DropdownMenuItem(
                 text = {
@@ -1201,11 +1293,15 @@ private fun BlendDialog(
     onDismiss: () -> Unit
 ) {
     var query by remember { mutableStateOf("") }
-    val items = remember(query) {
+    // A2: localized labels (FR/EN resources) while search still matches
+    // the canonical kebab name and the label.
+    val labeled = BLEND_NAMES.map { it to blendLabel(it) }
+    val items = remember(query, labeled) {
         val q = query.trim().lowercase()
-        BLEND_NAMES.filter {
-            q.isEmpty() || blendDisplay(it).lowercase().contains(q)
-        }
+        labeled.filter { (svg, label) ->
+            q.isEmpty() || blendDisplay(svg).lowercase().contains(q) ||
+                label.lowercase().contains(q)
+        }.map { it.first }
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1240,7 +1336,7 @@ private fun BlendDialog(
                         ) {
                             BlendDot(mode = blendDisplay(b))
                             Text(
-                                blendDisplay(b),
+                                blendLabel(b),
                                 style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,
                                 modifier = Modifier.weight(1f)

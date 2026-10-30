@@ -100,6 +100,36 @@ bool decodePng(const std::vector<std::uint8_t>& png, Surface& s) {
     return true;
 }
 
+std::string blendVectorValue(const std::string& raw) {
+    // Accept "svg:multiply" / "multiply" / "linear_dodge" style names.
+    const std::size_t c = raw.find(':');
+    return c == std::string::npos ? raw : raw.substr(c + 1);
+}
+
+// A2: composite-op load. A known name maps to its mode; an UNKNOWN
+// name (a reader that does not know our addition, or a third-party
+// extension) degrades to Normal for compositing but its exact spelling
+// is kept in the opaque meta fiche (x-openclip-blend), so a re-save
+// writes it back verbatim: unknown modes never corrupt, never get lost
+// (ARCHITECTURE.md "A2 additions").
+void applyBlendName(const std::string& raw, Layer& l) {
+    const std::string v = blendVectorValue(raw);
+    l.blend = blendFromName(v.c_str());
+    if (l.blend == BlendMode::Normal && !v.empty() && v != "normal") {
+        l.meta["x-openclip-blend"] = raw;
+    }
+}
+
+// A2: composite-op write. A preserved unknown name wins over the
+// degraded svg:normal so round trips are lossless.
+std::string compositeOpFor(const Layer& l) {
+    if (l.blend == BlendMode::Normal) {
+        const auto it = l.meta.find("x-openclip-blend");
+        if (it != l.meta.end() && !it->second.empty()) return it->second;
+    }
+    return blendToName(l.blend);
+}
+
 // --- save: recursive stack writer ---
 
 void writeLayerList(std::vector<Layer>& layers, std::ostringstream& xml,
@@ -257,7 +287,7 @@ void writeLayerOne(Layer& l, std::ostringstream& xml,
         xml << pad << "<stack name=\"" << xmlEscape(l.name) << "\" opacity=\""
             << l.opacity << "\" visibility=\""
             << (l.visible ? "visible" : "hidden") << "\" composite-op=\""
-            << blendToName(l.blend) << "\" isolation=\""
+            << compositeOpFor(l) << "\" isolation=\""
             << (l.passThrough ? "auto" : "isolated") << "\"";
         if (!l.adjustType.empty()) {
             xml << " adjust-type=\"" << xmlEscape(l.adjustType) << "\""
@@ -284,7 +314,7 @@ void writeLayerOne(Layer& l, std::ostringstream& xml,
     xml << pad << "<layer name=\"" << xmlEscape(l.name) << "\" src=\"" << src
         << "\" opacity=\"" << l.opacity << "\" visibility=\""
         << (l.visible ? "visible" : "hidden") << "\" composite-op=\""
-        << blendToName(l.blend) << "\"";
+        << compositeOpFor(l) << "\"";
     // M8: adjustment descriptor persists as attrs (round trips through
     // tagAttr/xmlUnescape on load). V+2 curves adds adjust-curve.
     if (!l.adjustType.empty()) {
@@ -779,12 +809,6 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                    Canvas& tmp, std::size_t depth, std::vector<Layer>& out,
                    std::string& error);
 
-std::string blendVectorValue(const std::string& raw) {
-    // Accept "svg:multiply" / "multiply" / "linear_dodge" style names.
-    const std::size_t c = raw.find(':');
-    return c == std::string::npos ? raw : raw.substr(c + 1);
-}
-
 bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                    std::map<std::string, std::vector<std::uint8_t>>& entries,
                    Canvas& tmp, std::size_t depth, std::vector<Layer>& out,
@@ -825,8 +849,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 if (l.opacity < 0) l.opacity = 0;
                 if (l.opacity > 1) l.opacity = 1;
                 l.visible = (vis != "hidden" && vis != "false" && vis != "0");
-                l.blend =
-                    blendFromName(blendVectorValue(comp).c_str());
+                applyBlendName(comp, l);
                 applyAdjustAttrs(xml, lOpen, l);
                 applyTextAttrs(xml, lOpen, l);
                 applyBubbleAttrs(xml, lOpen, l);
@@ -882,8 +905,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
                 if (g.opacity > 1) g.opacity = 1;
                 g.visible =
                     (vis != "hidden" && vis != "false" && vis != "0");
-                g.blend =
-                    blendFromName(blendVectorValue(comp).c_str());
+                applyBlendName(comp, g);
                 g.passThrough = (iso != "isolated");
                 applyAdjustAttrs(xml, lOpen, g);
                 applyTextAttrs(xml, lOpen, g);
@@ -929,7 +951,7 @@ bool loadLayerList(const std::string& xml, std::size_t start, std::size_t end,
             if (g.opacity < 0) g.opacity = 0;
             if (g.opacity > 1) g.opacity = 1;
             g.visible = (vis != "hidden" && vis != "false" && vis != "0");
-            g.blend = blendFromName(blendVectorValue(comp).c_str());
+            applyBlendName(comp, g);
             g.passThrough = (iso != "isolated");
             applyAdjustAttrs(xml, lOpen, g);
             applyTextAttrs(xml, lOpen, g);

@@ -326,3 +326,204 @@ TEST(blend_transparent_src_noop_t5) {
         CHECK_EQ(o.a, d.a);
     }
 }
+
+// A2: color burn reference cases (straight channels, hand-computed):
+//  burn(s,d) = 1 - min(1, (1-d)/s); white dst stays, black src -> 0.
+//  s=128 d=192 -> 1 - (63/255)/(128/255) = 0.5078 -> 129
+//  s=192 d=128 -> 1 - (127/255)/(192/255) = 0.3385 -> 86
+//  s=255 d=192 -> (1-d)/1 = 0.2471 -> 1-0.2471 = 0.7529 -> 192
+TEST(blend_color_burn_numeric) {
+    Pixel o;
+    blendPixel(Pixel{128, 128, 128, 255}, Pixel{192, 192, 192, 255},
+               BlendMode::ColorBurn, o);
+    CHECK_EQ(o.r, 129);
+    CHECK_EQ(o.a, 255);
+    blendPixel(Pixel{192, 192, 192, 255}, Pixel{128, 128, 128, 255},
+               BlendMode::ColorBurn, o);
+    CHECK_EQ(o.r, 86);
+    blendPixel(Pixel{255, 255, 255, 255}, Pixel{192, 192, 192, 255},
+               BlendMode::ColorBurn, o);
+    CHECK_EQ(o.r, 192);
+    blendPixel(Pixel{128, 0, 0, 255}, Pixel{0, 0, 0, 255},
+               BlendMode::ColorBurn, o);
+    CHECK_EQ(o.r, 0);  // black backdrop burns to black
+    blendPixel(Pixel{0, 0, 0, 255}, Pixel{128, 128, 128, 255},
+               BlendMode::ColorBurn, o);
+    CHECK_EQ(o.r, 0);  // black source burns the backdrop to black
+}
+
+// A2: color dodge reference cases:
+//  dodge(s,d) = min(1, d/(1-s)); black dst stays, black src neutral.
+//  s=64 d=128 -> 0.50196/0.74902 = 0.6702 -> 171
+//  s=128 d=64 -> 0.25098/0.49804 = 0.5040 -> 129
+//  s=64 d=64 -> 0.25098/0.74902 = 0.3351 -> 85
+TEST(blend_color_dodge_numeric) {
+    Pixel o;
+    blendPixel(Pixel{64, 64, 64, 255}, Pixel{128, 128, 128, 255},
+               BlendMode::ColorDodge, o);
+    CHECK_EQ(o.r, 171);
+    blendPixel(Pixel{128, 128, 128, 255}, Pixel{64, 64, 64, 255},
+               BlendMode::ColorDodge, o);
+    CHECK_EQ(o.r, 129);
+    blendPixel(Pixel{64, 64, 64, 255}, Pixel{64, 64, 64, 255},
+               BlendMode::ColorDodge, o);
+    CHECK_EQ(o.r, 85);
+    blendPixel(Pixel{0, 0, 0, 255}, Pixel{128, 128, 128, 255},
+               BlendMode::ColorDodge, o);
+    CHECK_EQ(o.r, 128);  // black source is neutral
+    blendPixel(Pixel{128, 128, 128, 255}, Pixel{0, 0, 0, 255},
+               BlendMode::ColorDodge, o);
+    CHECK_EQ(o.r, 0);  // black backdrop stays black
+}
+
+// A2: add glow = d + 2s - s*d, clamped (screen plus one more source
+// contribution). s=51 d=102 -> 0.4 + 0.4 - 0.08 = 0.72 -> 184;
+// s=d=64 -> 0.251 + 0.502 - 0.063 = 0.6899 -> 176.
+TEST(blend_add_glow_numeric) {
+    Pixel o;
+    blendPixel(Pixel{51, 51, 51, 255}, Pixel{102, 102, 102, 255},
+               BlendMode::AddGlow, o);
+    CHECK_EQ(o.r, 184);
+    blendPixel(Pixel{64, 64, 64, 255}, Pixel{64, 64, 64, 255},
+               BlendMode::AddGlow, o);
+    CHECK_EQ(o.r, 176);
+    blendPixel(Pixel{0, 0, 0, 255}, Pixel{100, 100, 100, 255},
+               BlendMode::AddGlow, o);
+    CHECK_EQ(o.r, 100);  // black source is neutral
+    blendPixel(Pixel{255, 255, 255, 255}, Pixel{100, 100, 100, 255},
+               BlendMode::AddGlow, o);
+    CHECK_EQ(o.r, 255);  // clamped to white
+    // Brighter than the plain sum on the same pair (the glow boost).
+    Pixel sum, glow;
+    blendPixel(Pixel{51, 51, 51, 255}, Pixel{102, 102, 102, 255},
+               BlendMode::Add, sum);
+    blendPixel(Pixel{51, 51, 51, 255}, Pixel{102, 102, 102, 255},
+               BlendMode::AddGlow, glow);
+    CHECK(glow.r > sum.r);
+}
+
+// A2: max is the documented twin of lighten (per-channel maximum).
+TEST(blend_max_twins_lighten) {
+    const int pairs[][6] = {
+        {200, 50, 128, 100, 180, 64},
+        {0, 0, 0, 255, 255, 255},
+        {90, 140, 200, 90, 140, 200},
+    };
+    for (const auto& p : pairs) {
+        Pixel s{static_cast<std::uint8_t>(p[0]),
+                static_cast<std::uint8_t>(p[1]),
+                static_cast<std::uint8_t>(p[2]), 255};
+        Pixel d{static_cast<std::uint8_t>(p[3]),
+                static_cast<std::uint8_t>(p[4]),
+                static_cast<std::uint8_t>(p[5]), 255};
+        Pixel a, b;
+        blendPixel(s, d, BlendMode::Max, a);
+        blendPixel(s, d, BlendMode::Lighten, b);
+        CHECK_EQ(a.r, b.r);
+        CHECK_EQ(a.g, b.g);
+        CHECK_EQ(a.b, b.b);
+    }
+    Pixel o;
+    blendPixel(Pixel{64, 200, 10, 255}, Pixel{192, 20, 10, 255},
+               BlendMode::Max, o);
+    CHECK_EQ(o.r, 192);
+    CHECK_EQ(o.g, 200);
+    CHECK_EQ(o.b, 10);
+}
+
+// A2: hue keeps the source hue over the destination saturation and
+// lightness; saturation keeps the source saturation over the
+// destination hue and lightness (pure witnesses are exact).
+TEST(blend_hue_saturation_numeric) {
+    Pixel red{255, 0, 0, 255}, blue{0, 0, 255, 255}, o;
+    blendPixel(red, blue, BlendMode::Hue, o);
+    CHECK_EQ(o.r, 255);
+    CHECK_EQ(o.g, 0);
+    CHECK_EQ(o.b, 0);
+    blendPixel(blue, red, BlendMode::Hue, o);
+    CHECK_EQ(o.r, 0);
+    CHECK_EQ(o.b, 255);
+    blendPixel(red, blue, BlendMode::Saturation, o);
+    CHECK_EQ(o.r, 0);
+    CHECK_EQ(o.g, 0);
+    CHECK_EQ(o.b, 255);
+    // Achromatic source: destination hue/lightness survive, zero sat.
+    blendPixel(Pixel{128, 128, 128, 255}, blue, BlendMode::Saturation, o);
+    CHECK_EQ(o.r, 128);
+    CHECK_EQ(o.g, 128);
+    CHECK_EQ(o.b, 128);
+}
+
+// A2: darker/lighter color pick the whole source or the whole
+// destination by HSL lightness (commutative pick, ties keep dst).
+TEST(blend_darker_lighter_color_numeric) {
+    Pixel yellow{255, 255, 0, 255};         // HSL lightness 0.5
+    Pixel navy{0, 0, 128, 255};             // HSL lightness ~0.251
+    Pixel o, o2;
+    blendPixel(yellow, navy, BlendMode::DarkerColor, o);
+    blendPixel(navy, yellow, BlendMode::DarkerColor, o2);
+    CHECK_EQ(o.r, 0);
+    CHECK_EQ(o.b, 128);
+    CHECK_EQ(o2.r, 0);
+    CHECK_EQ(o2.b, 128);
+    blendPixel(yellow, navy, BlendMode::LighterColor, o);
+    blendPixel(navy, yellow, BlendMode::LighterColor, o2);
+    CHECK_EQ(o.r, 255);
+    CHECK_EQ(o.g, 255);
+    CHECK_EQ(o.b, 0);
+    CHECK_EQ(o2.r, 255);
+    CHECK_EQ(o2.g, 255);
+    CHECK_EQ(o2.b, 0);
+}
+
+// A2: the eight new modes — names (bare + svg: + aliases) and the
+// canonical kebab-case output.
+TEST(blend_names_a2) {
+    CHECK(blendFromName("color-burn") == BlendMode::ColorBurn);
+    CHECK(blendFromName("svg:color-burn") == BlendMode::ColorBurn);
+    CHECK(blendFromName("color_burn") == BlendMode::ColorBurn);
+    CHECK(blendFromName("color-dodge") == BlendMode::ColorDodge);
+    CHECK(blendFromName("svg:color-dodge") == BlendMode::ColorDodge);
+    CHECK(blendFromName("add-glow") == BlendMode::AddGlow);
+    CHECK(blendFromName("svg:add-glow") == BlendMode::AddGlow);
+    CHECK(blendFromName("max") == BlendMode::Max);
+    CHECK(blendFromName("svg:max") == BlendMode::Max);
+    CHECK(blendFromName("lighten-2") == BlendMode::Max);
+    CHECK(blendFromName("maximum") == BlendMode::Max);
+    CHECK(blendFromName("darker-color") == BlendMode::DarkerColor);
+    CHECK(blendFromName("svg:darker-color") == BlendMode::DarkerColor);
+    CHECK(blendFromName("lighter-color") == BlendMode::LighterColor);
+    CHECK(blendFromName("svg:lighter-color") == BlendMode::LighterColor);
+    CHECK(blendFromName("hue") == BlendMode::Hue);
+    CHECK(blendFromName("svg:hue") == BlendMode::Hue);
+    CHECK(blendFromName("saturation") == BlendMode::Saturation);
+    CHECK(blendFromName("svg:saturation") == BlendMode::Saturation);
+    CHECK(std::string(blendToName(BlendMode::ColorBurn)) ==
+          "svg:color-burn");
+    CHECK(std::string(blendToName(BlendMode::ColorDodge)) ==
+          "svg:color-dodge");
+    CHECK(std::string(blendToName(BlendMode::AddGlow)) == "svg:add-glow");
+    CHECK(std::string(blendToName(BlendMode::Max)) == "svg:max");
+    CHECK(std::string(blendToName(BlendMode::DarkerColor)) ==
+          "svg:darker-color");
+    CHECK(std::string(blendToName(BlendMode::LighterColor)) ==
+          "svg:lighter-color");
+    CHECK(std::string(blendToName(BlendMode::Hue)) == "svg:hue");
+    CHECK(std::string(blendToName(BlendMode::Saturation)) ==
+          "svg:saturation");
+}
+
+// A2: transparent source stays a no-op for every new mode.
+TEST(blend_transparent_src_noop_a2) {
+    Pixel s{0, 0, 0, 0}, d{10, 20, 30, 200}, o;
+    for (auto m : {BlendMode::ColorBurn, BlendMode::ColorDodge,
+                   BlendMode::AddGlow, BlendMode::Max,
+                   BlendMode::DarkerColor, BlendMode::LighterColor,
+                   BlendMode::Hue, BlendMode::Saturation}) {
+        blendPixel(s, d, m, o);
+        CHECK_EQ(o.r, d.r);
+        CHECK_EQ(o.g, d.g);
+        CHECK_EQ(o.b, d.b);
+        CHECK_EQ(o.a, d.a);
+    }
+}
