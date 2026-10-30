@@ -50,6 +50,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.openclip.engine.EngineHost
+import dev.openclip.doc.CrashRecovery
 import dev.openclip.media.AiUpscaler
 import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
@@ -143,6 +144,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -7589,6 +7591,226 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             "open stroke gates the tick",
             AutosavePolicy.shouldSave(true, 1, 0L, 60 * 60_000L, true)
         )
+    }
+
+    // ---- Issue #32 §2: crash recovery ----
+
+    private fun autosaveDir(): File = File(
+        InstrumentationRegistry.getInstrumentation().targetContext.filesDir,
+        CrashRecovery.DIR
+    )
+
+    /**
+     * Test isolation for the recovery prompt.
+     *
+     * Every test process ends by closing its activity; a test that left the
+     * boot document dirty therefore writes one legitimate ON_PAUSE snapshot
+     * (issue #32 §2), and the NEXT process would open on the Restore /
+     * Ignore dialog instead of the canvas. That is correct product
+     * behaviour for a real user (unsaved work from a dead session), so the
+     * suite isolates itself instead of weakening the app: dismiss the
+     * prompt if one is up, then drop the snapshots so later tests boot on a
+     * clean canvas. The prompt itself is covered by
+     * crashRecoveryPromptRestoresSnapshot / crashRecoveryIgnoreDropsSnapshots.
+     */
+    @Before
+    fun dismissCrashRecoveryPrompt() {
+        composeRule.waitForIdle()
+        val discard = composeRule.onAllNodesWithTag("crash-recovery-discard")
+            .fetchSemanticsNodes()
+        if (discard.isNotEmpty()) {
+            composeRule.onNodeWithTag("crash-recovery-discard").performClick()
+            composeRule.waitForIdle()
+        }
+        autosaveDir().deleteRecursively()
+        // Ignore re-opens the boot document from a composition callback:
+        // wait for an attached surface so the first `surf()` of the test
+        // cannot race it.
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < 15000) {
+            var attached = false
+            composeRule.activityRule.scenario.onActivity { act ->
+                attached = findActiveEngineSurface(act.window.decorView) != null
+            }
+            if (attached) break
+            Thread.sleep(100)
+        }
+    }
+
+    /** Boot doc id (doc-1): the id a restart reuses, so restore is in place. */
+    private fun bootDocId(): String {
+        var id = ""
+        composeRule.activityRule.scenario.onActivity { act ->
+            id = act.activityTestHooks.activeDocId?.invoke() ?: ""
+        }
+        assertTrue("boot doc must be active", id.isNotEmpty())
+        return id
+    }
+
+    /** Mark the boot doc dirty and enqueue one timestamped snapshot. */
+    private fun writeBootSnapshot(): String {
+        val id = bootDocId()
+        var queued = false
+        composeRule.activityRule.scenario.onActivity { act ->
+            val h = act.activityTestHooks
+            h.markDirty?.invoke(id, true)
+            queued = h.snapshotDoc?.invoke(id) == true
+        }
+        assertTrue("snapshot write must be enqueued", queued)
+        composeRule.waitUntil(20000) {
+            var n = 0
+            composeRule.activityRule.scenario.onActivity { act ->
+                n = act.activityTestHooks.pendingSnapshots?.invoke() ?: 0
+            }
+            n >= 1
+        }
+        val oras = autosaveDir().listFiles { f -> f.name.endsWith(".ora") }
+            ?.sortedByDescending { it.name } ?: emptyList()
+        assertTrue("snapshot file must exist on disk", oras.isNotEmpty())
+        assertTrue("snapshot must not be empty", oras.first().length() > 1024)
+        assertTrue("snapshot must be indexed", CrashRecovery.pending(
+            InstrumentationRegistry.getInstrumentation()
+                .targetContext.filesDir
+        ).any { it.docId == id })
+        return id
+    }
+
+    // A snapshot written before the process dies is offered at next launch
+    // (recreate) and Restore loads it into a tab marked dirty.
+    @Test
+    fun crashRecoveryPromptRestoresSnapshot() {
+        autosaveDir().deleteRecursively()
+        var id = ""
+        try {
+            id = writeBootSnapshot()
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitUntil(30000) {
+                composeRule.onAllNodesWithTag("crash-recovery-restore")
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeRule.onNodeWithTag("crash-recovery-dialog").assertIsDisplayed()
+            composeRule.onNodeWithTag("crash-recovery-restore").performClick()
+            composeRule.waitForIdle()
+            // Restore runs through the engine doc queue: poll the tab state.
+            composeRule.waitUntil(30000) {
+                var dirty = false
+                composeRule.activityRule.scenario.onActivity { act ->
+                    dirty = act.activityTestHooks.dirtyOf?.invoke(id) == true
+                }
+                dirty
+            }
+            composeRule.waitUntil(20000) {
+                composeRule.onAllNodesWithTag("crash-recovery-restore")
+                    .fetchSemanticsNodes().isEmpty()
+            }
+            val filesDir = InstrumentationRegistry.getInstrumentation()
+                .targetContext.filesDir
+            assertEquals(
+                "restored snapshot is consumed",
+                0, CrashRecovery.pending(filesDir).size
+            )
+            assertFalse(
+                "restored snapshot file is deleted",
+                autosaveDir().listFiles { f -> f.name.endsWith(".ora") }
+                    ?.any { it.name.startsWith("$id-") } == true
+            )
+            V2TestHooks.lastAutosave = "recovered"
+        } finally {
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.markDirty?.invoke(id, false)
+                act.activityTestHooks.discardSnapshots?.invoke()
+            }
+            autosaveDir().deleteRecursively()
+        }
+    }
+
+    // Ignore discards every generation of the offered snapshots, so the
+    // prompt never comes back on the following launch.
+    @Test
+    fun crashRecoveryIgnoreDropsSnapshots() {        autosaveDir().deleteRecursively()
+        val filesDir = InstrumentationRegistry.getInstrumentation()
+            .targetContext.filesDir
+        try {
+            writeBootSnapshot()
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitUntil(30000) {
+                composeRule.onAllNodesWithTag("crash-recovery-discard")
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeRule.onNodeWithTag("crash-recovery-discard").performClick()
+            composeRule.waitForIdle()
+            composeRule.waitUntil(20000) {
+                composeRule.onAllNodesWithTag("crash-recovery-discard")
+                    .fetchSemanticsNodes().isEmpty()
+            }
+            assertEquals(
+                "no snapshot must survive Ignore",
+                0, CrashRecovery.pending(filesDir).size
+            )
+            val oras = autosaveDir().listFiles { f -> f.name.endsWith(".ora") }
+            assertTrue(
+                "snapshot files must be deleted",
+                oras == null || oras.isEmpty()
+            )
+            // A restart right after Ignore must not prompt again.
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            composeRule.waitUntil(20000) {
+                composeRule.onAllNodesWithTag("crash-recovery-dialog")
+                    .fetchSemanticsNodes().isEmpty()
+            }
+        } finally {
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.discardSnapshots?.invoke()
+            }
+            autosaveDir().deleteRecursively()
+        }
+    }
+
+    // A snapshot older than an explicit save must never raise the prompt:
+    // the watermark wins over the file timestamp.
+    @Test
+    fun crashRecoverySilentAfterExplicitSave() {
+        autosaveDir().deleteRecursively()
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val saved = File(ctx.cacheDir, "c1-explicit-save.ora")
+        var id = ""
+        try {
+            id = writeBootSnapshot()
+            composeRule.activityRule.scenario.onActivity { act ->
+                val h = act.activityTestHooks
+                h.setSavePath?.invoke(id, saved.absolutePath)
+                h.saveDoc?.invoke(id)
+            }
+            composeRule.waitUntil(30000) {
+                var clean = false
+                composeRule.activityRule.scenario.onActivity { act ->
+                    clean = act.activityTestHooks.dirtyOf?.invoke(id) == false
+                }
+                clean
+            }
+            assertTrue("explicit save must write a file", saved.isFile)
+            assertEquals(
+                "explicit save must clear the snapshot",
+                0, CrashRecovery.pending(ctx.filesDir).size
+            )
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            // Give the composition a beat, then assert no prompt came back.
+            Thread.sleep(800)
+            composeRule.onAllNodesWithTag("crash-recovery-dialog")
+                .assertCountEquals(0)
+            assertEquals(0, CrashRecovery.pending(ctx.filesDir).size)
+        } finally {
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.discardSnapshots?.invoke()
+            }
+            autosaveDir().deleteRecursively()
+            try {
+                saved.delete()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     // V+2-35 §5.5: layered PSD opens (8BPS + >1 layer records).

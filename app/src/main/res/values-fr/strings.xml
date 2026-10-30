@@ -400,7 +400,16 @@
     <string name="v2_off">Off</string>
     <string name="v2_autosave_min">%1$d min</string>
     <string name="v2_autosave_never">Jamais enregistré.</string>
-    <string name="v2_autosave_saved">Enregistré %1$s.</string>
+    <string name="v2_autosave_saved">Instantané %1$s.</string>
+    <string name="v2_autosave_recovery">Récupération après plantage activée : les instantanés restent sur cet appareil et le plus récent est proposé au prochain lancement s\'il est plus récent que votre dernier enregistrement.</string>
+    <string name="recovery_title">Récupérer le travail non enregistré ?</string>
+    <string name="recovery_body">%1$s a été modifié après son dernier enregistrement. Un instantané de %2$s est disponible.</string>
+    <string name="recovery_more">%1$d autre(s) document(s) peuvent aussi être restaurés.</string>
+    <string name="recovery_restore">Restaurer</string>
+    <string name="recovery_discard">Ignorer</string>
+    <string name="recovery_restored_count">%1$d document(s) restauré(s).</string>
+    <string name="recovery_failed">L\'instantané n\'a pas pu être restauré.</string>
+    <string name="recovery_discarded">Instantané ignoré.</string>
     <string name="v2_curves_title">Courbes de tons</string>
     <string name="v2_bd_tab">BD</string>
     <string name="v2_psd_approx">PSD enregistré avec %1$d approximations (calques masqués/groupes aplatis).</string>

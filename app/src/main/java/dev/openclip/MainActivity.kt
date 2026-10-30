@@ -69,7 +69,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -80,6 +83,7 @@ import dev.openclip.media.ClipAudio
 import dev.openclip.media.ExportWebm
 import dev.openclip.media.Timelapse
 import dev.openclip.media.WebdavClient
+import dev.openclip.doc.CrashRecovery
 import dev.openclip.doc.DocClip
 import dev.openclip.doc.DocOra
 import dev.openclip.doc.DocRegistry
@@ -236,6 +240,13 @@ class MainActivity : ComponentActivity() {
         var requestActivate: ((String) -> Unit)? = null
         // B2 §1: open the transform handles for a text layer (test hook).
         var openTextTransform: ((Int, TextSpec) -> Unit)? = null
+        // Issue #32 §2: crash-recovery probes (snapshot write/restore).
+        var markDirty: ((String, Boolean) -> Unit)? = null
+        var snapshotDoc: ((String) -> Boolean)? = null
+        var pendingSnapshots: (() -> Int)? = null
+        var recoveryPromptVisible: (() -> Boolean)? = null
+        var discardSnapshots: (() -> Unit)? = null
+        var docNameOf: ((String) -> String?)? = null
     }
     val activityTestHooks = ActivityTestHooks()
 
@@ -1141,11 +1152,27 @@ class MainActivity : ComponentActivity() {
         }
 
 
-        // V+2 autosave (opt-in, local only, never mid-stroke).
-        val autosaveOn = remember { mutableStateOf(false) }
+        // Issue #32 §2 crash recovery: autosave is ON by default and writes
+        // timestamped OpenRaster snapshots (local only, filesDir/autosave)
+        // every N minutes and whenever the app goes to the background. At
+        // launch, a snapshot newer than the last explicit save of a document
+        // raises a Restore / Ignore prompt.
+        val autosaveOn = remember { mutableStateOf(true) }
         val autosaveMin = remember { mutableStateOf(5) }
         val autosaveLast = remember { mutableStateOf("") }
-        val autosaveLastMs = remember { mutableStateOf(0L) }
+        // Session start counts as the last autosave point: the first
+        // periodic snapshot lands one full interval after launch, never 15 s
+        // in (that would snapshot half-drawn test/opening states).
+        val autosaveLastMs = remember { mutableStateOf(SystemClock.uptimeMillis()) }
+        val lastSnapshotAt = remember { mutableStateMapOf<String, Long>() }
+        // Computed once per composition root: after `recreate()` this reads
+        // the snapshots the dead process left behind.
+        val recoveryPending = remember {
+            mutableStateListOf<CrashRecovery.RecoverySnapshot>().apply {
+                addAll(CrashRecovery.pending(ctx.filesDir))
+            }
+        }
+        val showRecovery = remember { mutableStateOf(recoveryPending.isNotEmpty()) }
 
         fun currentPose(): WorkspacePose = WorkspacePose(
             dockOpen = dockOpen.value,
@@ -1432,7 +1459,9 @@ class MainActivity : ComponentActivity() {
             w: Int,
             h: Int,
             dpi: Float,
-            bgArgb: Int?
+            bgArgb: Int?,
+            loadPath: String? = null,
+            onLoaded: ((Boolean) -> Unit)? = null
         ): String? {
             if (!docRegistry.canOpen()) {
                 docsFullShow.value = true
@@ -1448,11 +1477,59 @@ class MainActivity : ComponentActivity() {
             docs.add(DocTab(id, name, w, h, dpi))
             docRegistry.open(id, name)
             cv.setBrush(brushPrefs.currentJson())
-            if (bgArgb == -1) {
+            if (bgArgb == -1 && loadPath == null) {
                 // Engine default base is already opaque white: loading a
                 // white paper would be a no-op that races user strokes, so
                 // skip the ORA round trip entirely.
                 paperDone[id] = true
+            } else if (loadPath != null) {
+                // Issue #32 §2 crash recovery: the snapshot already carries
+                // the pixels, so no paper fill is queued (it could land
+                // after the restore and wipe it). The tab is marked dirty
+                // once the load lands: that content is not on disk in any
+                // document file yet.
+                paperDone[id] = true
+                Thread {
+                    var restored = false
+                    try {
+                        for (k in 0 until 100) {
+                            if (cv.isReady()) break
+                            Thread.sleep(100)
+                        }
+                        val lock = Object()
+                        var done = false
+                        var res = false
+                        cv.loadFrom(loadPath) { r ->
+                            synchronized(lock) {
+                                done = true
+                                res = r
+                                lock.notifyAll()
+                            }
+                        }
+                        synchronized(lock) {
+                            var waits = 0
+                            while (!done && waits < 200) {
+                                lock.wait(100)
+                                waits++
+                            }
+                        }
+                        restored = res
+                    } catch (_: Exception) {
+                        restored = false
+                    }
+                    val ok = restored
+                    mainHandler.post {
+                        if (ok) {
+                            docRegistry.markDirty(id, true)
+                            try {
+                                java.io.File(loadPath).delete()
+                            } catch (_: Exception) {
+                            }
+                        }
+                        onLoaded?.invoke(ok)
+                        refreshKey.value++
+                    }
+                }.start()
             } else {
                 paperDone[id] = false
                 val dst = java.io.File(ctx.cacheDir, "paper-$id.ora")
@@ -1563,6 +1640,12 @@ class MainActivity : ComponentActivity() {
                     }
                     if (wrote) {
                         docRegistry.markDirty(id, false)
+                        // Issue #32 §2: an explicit save supersedes every
+                        // recovery snapshot of this document.
+                        CrashRecovery.markExplicitSave(
+                            ctx.filesDir, id, System.currentTimeMillis()
+                        )
+                        CrashRecovery.clearDoc(ctx.filesDir, id)
                         // T3 §3.5 : persiste le sidecar avec le doc.
                         pullSidecar(surf, id)
                         status.value = if (savePersistFailed.value &&
@@ -1596,6 +1679,11 @@ class MainActivity : ComponentActivity() {
                 surf.saveTo(path, "ora") { ok ->
                     if (ok) {
                         docRegistry.markDirty(id, false)
+                        // Issue #32 §2: explicit save clears the watermark.
+                        CrashRecovery.markExplicitSave(
+                            ctx.filesDir, id, System.currentTimeMillis()
+                        )
+                        CrashRecovery.clearDoc(ctx.filesDir, id)
                         // T3 §3.5 : persiste le sidecar avec le doc.
                         pullSidecar(surf, id)
                     }
@@ -1623,45 +1711,160 @@ class MainActivity : ComponentActivity() {
             savePickRef.value?.invoke(tab.name + ".ora")
         }
 
-        // V+2 autosave tick (15 s poll, opt-in, local only): writes the
-        // active doc (ORA) when the policy passes — enabled, interval
-        // elapsed, no open stroke. Multipage projects piggyback on the
-        // PagesPanel project.json writes (same tick, same gate).
+        // ---- Issue #32 §2: crash-recovery snapshots ----
+        // Enqueue a timestamped ORA snapshot of one DIRTY document into
+        // filesDir/autosave. Never runs mid-stroke, never prompts for a
+        // destination (local only) and drops duplicate writes inside
+        // [minIntervalMs]. The engine write is async: this only enqueues.
+        fun writeSnapshot(id: String, minIntervalMs: Long = 0L): Boolean {
+            val surf = surfaces[id] ?: return false
+            val tab = docs.firstOrNull { it.docId == id } ?: return false
+            val entry = docRegistry.all().firstOrNull { it.docId == id } ?: return false
+            if (!entry.dirty) return false
+            if (surf.isDrawingNow()) return false
+            val now = System.currentTimeMillis()
+            val prev = lastSnapshotAt[id] ?: 0L
+            if (minIntervalMs > 0L && now - prev < minIntervalMs) return false
+            lastSnapshotAt[id] = now
+            val dst = CrashRecovery.snapshotFile(ctx.filesDir, id, now)
+            CrashRecovery.recordDoc(ctx.filesDir, id, tab.name, tab.w, tab.h, tab.dpi)
+            surf.saveTo(dst.absolutePath, "ora") { ok ->
+                mainHandler.post {
+                    if (ok) {
+                        CrashRecovery.prune(ctx.filesDir)
+                        autosaveLastMs.value = SystemClock.uptimeMillis()
+                        val stamp = java.text.SimpleDateFormat(
+                            "HH:mm", java.util.Locale.getDefault()
+                        ).format(java.util.Date())
+                        autosaveLast.value =
+                            ctx.getString(R.string.v2_autosave_saved, stamp)
+                        dev.openclip.ui.V2TestHooks.lastAutosave = "wrote"
+                    } else {
+                        try {
+                            dst.delete()
+                        } catch (_: Exception) {
+                        }
+                        dev.openclip.ui.V2TestHooks.lastAutosave = "failed"
+                    }
+                }
+            }
+            return true
+        }
+
+        /** Background pass: every dirty document, de-duplicated per pause. */
+        fun snapshotAllDirty(minIntervalMs: Long) {
+            for (tab in docs.toList()) writeSnapshot(tab.docId, minIntervalMs)
+        }
+
+        // Restore one snapshot. When the crashed document id maps to a
+        // still-empty tab of the same geometry (the usual single-document
+        // case after a restart), the pixels are loaded in place instead of
+        // stacking a duplicate tab; otherwise a new tab is opened.
+        fun restoreSnapshot(snap: CrashRecovery.RecoverySnapshot): Boolean {
+            if (!java.io.File(snap.path).isFile) return false
+            val existing = docs.firstOrNull { it.docId == snap.docId }
+            if (existing != null && existing.w == snap.w && existing.h == snap.h) {
+                val surf = surfaces[snap.docId] ?: return false
+                paperDone[snap.docId] = true
+                surf.loadFrom(snap.path) { ok ->
+                    mainHandler.post {
+                        if (ok) {
+                            existing.name = snap.name
+                            docRegistry.all()
+                                .firstOrNull { it.docId == snap.docId }
+                                ?.name = snap.name
+                            docRegistry.markDirty(snap.docId, true)
+                            try {
+                                java.io.File(snap.path).delete()
+                            } catch (_: Exception) {
+                            }
+                            // Consumed: never offer this file again even if
+                            // the delete above failed.
+                            CrashRecovery.markExplicitSave(
+                                ctx.filesDir, snap.docId,
+                                maxOf(
+                                    System.currentTimeMillis(),
+                                    snap.savedAtMs + 1
+                                )
+                            )
+                        }
+                        refreshKey.value++
+                    }
+                }
+                return true
+            }
+            return openDocTab(
+                snap.name, snap.w, snap.h, snap.dpi, null, snap.path
+            ) { ok ->
+                if (ok) {
+                    // Consumed: never offer this snapshot again, even if
+                    // the file delete inside openDocTab failed.
+                    CrashRecovery.markExplicitSave(
+                        ctx.filesDir, snap.docId,
+                        maxOf(System.currentTimeMillis(), snap.savedAtMs + 1)
+                    )
+                }
+            } != null
+        }
+
+        // Autosave tick (15 s poll): writes a timestamped snapshot of the
+        // active document when the policy passes — enabled, interval
+        // elapsed, no open stroke, document dirty. Never touches the user's
+        // saved file: that stays an explicit action.
         androidx.compose.runtime.LaunchedEffect(autosaveOn.value, autosaveMin.value) {
             while (true) {
                 kotlinx.coroutines.delay(15_000)
                 try {
                     val id = activeDocId.value ?: continue
                     if (!autosaveOn.value) continue
-                    val surf = surfaces[id] ?: continue
-                    if (surf.isDrawingNow()) continue
+                    if (surfaces[id] == null) continue
                     val now = SystemClock.uptimeMillis()
                     if (!dev.openclip.ui.AutosavePolicy.shouldSave(
                             autosaveOn.value, autosaveMin.value,
                             autosaveLastMs.value, now, false
                         )
                     ) continue
-                    saveDoc(id) { ok ->
-                        if (ok) {
-                            autosaveLastMs.value = SystemClock.uptimeMillis()
-                            val stamp = java.text.SimpleDateFormat(
-                                "HH:mm", java.util.Locale.getDefault()
-                            ).format(java.util.Date())
-                            autosaveLast.value =
-                                ctx.getString(R.string.v2_autosave_saved, stamp)
-                            dev.openclip.ui.V2TestHooks.lastAutosave = "wrote"
-                        } else {
-                            dev.openclip.ui.V2TestHooks.lastAutosave = "failed"
-                        }
-                    }
+                    if (!writeSnapshot(id)) continue
+                    // Back off one interval even if the async write fails.
+                    autosaveLastMs.value = now
                 } catch (_: Exception) {
                 }
             }
         }
 
+        // Issue #32 §2 background pass: ON_PAUSE + ON_STOP snapshot every
+        // dirty document. The 5 s gate makes the second event a no-op so a
+        // single background transition writes each document once. A
+        // configuration change (rotation, recreate) is NOT a background
+        // transition: it would snapshot on every rotation for nothing.
+        val lifecycleOwner = LocalLifecycleOwner.current
+        val hostActivity = LocalContext.current as? android.app.Activity
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event != Lifecycle.Event.ON_PAUSE &&
+                    event != Lifecycle.Event.ON_STOP
+                ) return@LifecycleEventObserver
+                if (hostActivity?.isChangingConfigurations == true) {
+                    return@LifecycleEventObserver
+                }
+                snapshotAllDirty(5_000L)
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+
         fun closeNow(id: String) {
             if (pendingTabId.value == id) pendingTabId.value = null
             if (preselectId.value == id) preselectId.value = null
+            // Issue #32 §2: a tab closed on purpose (saved, or discarded by
+            // the user) must not resurface as a crash snapshot next launch.
+            try {
+                CrashRecovery.clearDoc(ctx.filesDir, id)
+                CrashRecovery.markExplicitSave(
+                    ctx.filesDir, id, System.currentTimeMillis()
+                )
+            } catch (_: Exception) {
+            }
             try {
                 surfaces[id]?.pause()
             } catch (_: Exception) {
@@ -1745,10 +1948,12 @@ class MainActivity : ComponentActivity() {
         // Slice 6 first doc: opened synchronously on first composition so
         // the shell (and the instrumented gate) always has a live surface,
         // like the old factory-created canvas. Later docs go through +.
+        // Issue #32 §2: when a crash snapshot is waiting, the workspace
+        // stays empty until the recovery prompt is answered.
         val booted = remember { mutableStateOf(false) }
         if (!booted.value) {
             booted.value = true
-            if (docs.isEmpty()) {
+            if (docs.isEmpty() && recoveryPending.isEmpty()) {
                 openDocTab(defaultDocName(), 2048, 1536, dpi, -1)
             }
         }
@@ -1770,7 +1975,7 @@ class MainActivity : ComponentActivity() {
                 val pose = workspaceStore.spaces[last]
                 if (pose != null) applyPose(last, pose)
             }
-            if (docs.isEmpty()) {
+            if (docs.isEmpty() && recoveryPending.isEmpty()) {
                 openDocTab(defaultDocName(), 2048, 1536, dpi, -1)
             }
             activityTestHooks.openDoc =
@@ -1849,6 +2054,27 @@ class MainActivity : ComponentActivity() {
                 commandStore.setVisible(a, v)
             }
             activityTestHooks.commandOrder = { commandStore.order.toList() }
+            // Issue #32 §2: crash-recovery probes.
+            activityTestHooks.markDirty = { id: String, d: Boolean ->
+                docRegistry.markDirty(id, d)
+                refreshKey.value++
+                poke()
+            }
+            activityTestHooks.snapshotDoc = { id: String -> writeSnapshot(id) }
+            activityTestHooks.pendingSnapshots = {
+                CrashRecovery.pending(ctx.filesDir).size
+            }
+            activityTestHooks.recoveryPromptVisible = { showRecovery.value }
+            activityTestHooks.discardSnapshots = {
+                CrashRecovery.discardPending(ctx.filesDir)
+                recoveryPending.clear()
+                showRecovery.value = false
+                refreshKey.value++
+                poke()
+            }
+            activityTestHooks.docNameOf = { id: String ->
+                docs.firstOrNull { it.docId == id }?.name
+            }
         }
 
         // V16: short viewports (landscape phones) can't stack 8 chrome
@@ -3726,6 +3952,99 @@ class MainActivity : ComponentActivity() {
                                 .testTag("docs-full-ok")
                         ) {
                             Text(stringResource(R.string.ok))
+                        }
+                    }
+                )
+            }
+            // Issue #32 §2: crash-recovery prompt. Modal on purpose — a
+            // stray scrim tap must not throw away the only copy of unsaved
+            // work; the two buttons are the only exits.
+            if (showRecovery.value && recoveryPending.isNotEmpty()) {
+                val first = recoveryPending.first()
+                val whenText = java.text.SimpleDateFormat(
+                    "HH:mm", java.util.Locale.getDefault()
+                ).format(java.util.Date(first.savedAtMs))
+                AlertDialog(
+                    onDismissRequest = { },
+                    title = {
+                        Text(
+                            stringResource(R.string.recovery_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 2,
+                            modifier = Modifier.testTag("crash-recovery-dialog")
+                        )
+                    },
+                    text = {
+                        Column {
+                            Text(
+                                ctx.getString(
+                                    R.string.recovery_body, first.name, whenText
+                                ),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            if (recoveryPending.size > 1) {
+                                Text(
+                                    ctx.getString(
+                                        R.string.recovery_more,
+                                        recoveryPending.size - 1
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                var restored = 0
+                                for (snap in recoveryPending.toList()) {
+                                    if (restoreSnapshot(snap)) restored++
+                                }
+                                recoveryPending.clear()
+                                showRecovery.value = false
+                                if (docs.isEmpty()) {
+                                    openDocTab(
+                                        defaultDocName(), 2048, 1536, dpi, -1
+                                    )
+                                }
+                                status.value = if (restored > 0) {
+                                    ctx.getString(
+                                        R.string.recovery_restored_count, restored
+                                    )
+                                } else {
+                                    ctx.getString(R.string.recovery_failed)
+                                }
+                                refreshKey.value++
+                                poke()
+                            },
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("crash-recovery-restore")
+                        ) {
+                            Text(stringResource(R.string.recovery_restore))
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                CrashRecovery.discardPending(ctx.filesDir)
+                                recoveryPending.clear()
+                                showRecovery.value = false
+                                if (docs.isEmpty()) {
+                                    openDocTab(
+                                        defaultDocName(), 2048, 1536, dpi, -1
+                                    )
+                                }
+                                status.value =
+                                    ctx.getString(R.string.recovery_discarded)
+                                refreshKey.value++
+                                poke()
+                            },
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("crash-recovery-discard")
+                        ) {
+                            Text(stringResource(R.string.recovery_discard))
                         }
                     }
                 )

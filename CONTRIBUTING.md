@@ -56,6 +56,15 @@ Rules:
 - If a gate cannot run (no KVM, no SDK), say so explicitly in the PR and
   list what a maintainer must run.
 
+## Release signing
+
+Published APKs are signed with the Calque release key stored in the repository
+Actions secrets; a fork or pull request builds a debug-signed release APK
+instead of failing. Never commit a keystore, a password or a base64 blob.
+Where the secrets live, how the CI job verifies the signer, and how to rotate
+the key (and why losing it blocks updates for every existing install) are in
+[docs/release-signing.md](docs/release-signing.md).
+
 ## Commit conventions
 
 - Imperative subject line, ≤ 72 characters, no trailing period:

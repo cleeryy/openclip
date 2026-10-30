@@ -10,6 +10,31 @@ plugins {
 // libonnxruntime.so alone is ~34 MB (arm64-v8a) / ~40 MB (x86_64).
 val localAbi: String = (project.findProperty("ciAbi") as String?)?.trim().orEmpty()
 
+// Issue #32 §1 — release signing.
+// The keystore never enters the repository. CI decodes the
+// CALQUE_KEYSTORE_BASE64 secret into $RUNNER_TEMP/calque.jks and exports
+// CALQUE_KEYSTORE_FILE / CALQUE_KEYSTORE_PASSWORD / CALQUE_KEY_ALIAS /
+// CALQUE_KEY_PASSWORD; a maintainer points the same variables at the local
+// copy. Without them (forks, pull requests, plain `assembleDebug`) the
+// release variant falls back to the debug key so builds stay installable
+// and CI never fails for a stranger. See docs/release-signing.md.
+val releaseKeystorePath: String =
+    System.getenv("CALQUE_KEYSTORE_FILE")?.trim().orEmpty()
+val releaseKeystorePassword: String =
+    System.getenv("CALQUE_KEYSTORE_PASSWORD")?.trim().orEmpty()
+val releaseKeystoreFile: java.io.File? = releaseKeystorePath.takeIf { it.isNotEmpty() }
+    ?.let { file(it) }
+val hasReleaseSigning: Boolean = releaseKeystoreFile?.isFile == true &&
+    releaseKeystorePassword.isNotEmpty()
+
+if (releaseKeystorePath.isNotEmpty() && !hasReleaseSigning) {
+    logger.warn(
+        "CALQUE_KEYSTORE_FILE is set ($releaseKeystorePath) but the file " +
+            "or CALQUE_KEYSTORE_PASSWORD is unusable — the release variant " +
+            "falls back to debug signing."
+    )
+}
+
 android {
     namespace = "dev.openclip"
     compileSdk = 34
@@ -49,8 +74,20 @@ android {
     }
 
     signingConfigs {
-        // Release APKs are debug-signed so headless CI produces installable builds.
+        // Release APKs fall back to debug signing so headless CI and forks
+        // without the keystore still produce installable builds.
         getByName("debug") {}
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
+                keyAlias = System.getenv("CALQUE_KEY_ALIAS")
+                    ?.trim()?.takeIf { it.isNotEmpty() } ?: "calque"
+                keyPassword = System.getenv("CALQUE_KEY_PASSWORD")
+                    ?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: releaseKeystorePassword
+            }
+        }
     }
 
     buildTypes {
@@ -65,7 +102,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            // Issue #32 §1: the real key when the environment provides it
+            // (CI tag build / maintainer), debug key otherwise.
+            signingConfig = signingConfigs.getByName(
+                if (hasReleaseSigning) "release" else "debug"
+            )
         }
     }
 
