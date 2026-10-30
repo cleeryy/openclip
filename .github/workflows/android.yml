@@ -39,6 +39,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       - name: Build debug APK + instrumented test APK
         run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --build-cache
+      # Issue #32 §1: the release variant must keep building for forks and
+      # pull requests, where the signing secrets are absent — the Gradle
+      # config then falls back to the debug key instead of failing.
+      - name: Release build with signing fallback
+        run: |
+          set -euo pipefail
+          ./gradlew :app:assembleRelease -PciAbi=x86_64 --build-cache
+          apk="$(ls app/build/outputs/apk/release/*.apk | head -1)"
+          tool="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          "$tool" verify --print-certs "$apk"
       - name: JNI symbols cross-check (built libraries)
         run: bash scripts/check_jni_symbols.sh
       - name: Upload APK
@@ -65,8 +75,54 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v6
-      - name: Build release APKs (debug-signed, installable)
+      # Issue #32 §1: decode the release keystore from the repository
+      # secrets into $RUNNER_TEMP (never the workspace, never logged).
+      # Missing secrets (fork, dry run) leave the variables unset and the
+      # build falls back to debug signing instead of failing.
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.CALQUE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.CALQUE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.CALQUE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.CALQUE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "${KEYSTORE_PASSWORD:-}" ]; then
+            echo "::warning title=Release signing skipped::CALQUE_KEYSTORE_BASE64 missing — falling back to debug signing."
+            exit 0
+          fi
+          ks="$RUNNER_TEMP/calque.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ks"
+          chmod 600 "$ks"
+          {
+            echo "CALQUE_KEYSTORE_FILE=$ks"
+            echo "CALQUE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "CALQUE_KEY_ALIAS=${KEY_ALIAS:-calque}"
+            echo "CALQUE_KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          } >> "$GITHUB_ENV"
+          echo "Release keystore decoded into \$RUNNER_TEMP (contents never logged)."
+      - name: Build release APKs (release key, debug fallback)
         run: ./gradlew :app:assembleRelease
+      # Fail loudly if a tag build silently shipped a debug-signed APK:
+      # the whole point of issue #32 is that an installed alpha keeps
+      # updating in place.
+      - name: Verify release signature
+        run: |
+          set -euo pipefail
+          apk="$(ls app/build/outputs/apk/release/*-universal.apk)"
+          tool="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          "$tool" verify --print-certs "$apk" | tee /tmp/apksigner.txt
+          if [ -z "${CALQUE_KEYSTORE_FILE:-}" ]; then
+            echo "No keystore in this run: debug fallback accepted."
+            exit 0
+          fi
+          fp="$(sed -n 's/.*certificate SHA-256 digest: //p' /tmp/apksigner.txt | head -1)"
+          norm="$(printf '%s' "$fp" | tr -d ':' | tr 'A-F' 'a-f')"
+          expected=613809b314777147a8730d23162de36b438b2a2b47a1b0468530b8e186fa21f3
+          if [ "$norm" != "$expected" ]; then
+            echo "unexpected signer digest: $fp (expected the Calque release key)" >&2
+            exit 1
+          fi
       - name: Package artifacts (per-ABI + universal, sha256 each)
         # Gradle emits calque-<version>-<abi>.apk / -universal.apk (issue #2).
         # Release assets use the Calque brand: calque-<tag>.apk for the
@@ -102,6 +158,9 @@ jobs:
           fail_on_unmatched_files: true
           # Tags like v0.1.0-alpha / -beta / -rc are marked prerelease.
           prerelease: ${{ contains(github.ref_name, '-') }}
+      - name: Remove decoded keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/calque.jks"
 
   # GitHub Packages entry point: APKs cannot live in the npm/Maven/NuGet/
   # RubyGems registries, but the container registry stores arbitrary OCI
