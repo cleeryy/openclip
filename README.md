@@ -160,6 +160,19 @@ Release tags publish three APKs — `calque-<tag>-arm64-v8a.apk`
 (tablets, ~38 MB), `calque-<tag>-x86_64.apk` (emulators, ~45 MB) and
 `calque-<tag>.apk` (universal) — each with a `.sha256` companion.
 
+### Release signing
+
+Release artifacts are signed with the Calque release key. The first
+release-signed build cannot install over a debug-signed alpha (Android
+rejects a different signature), so uninstall once:
+
+```bash
+adb uninstall dev.openclip
+```
+
+Fingerprint (SHA-256): `61:38:09:B3:14:77:71:47:A8:73:0D:23:16:2D:E3:6B:43:8B:2A:2B:47:A1:B0:46:85:30:B8:E1:86:FA:21:F3`.
+Key handling and rotation: [docs/release-signing.md](docs/release-signing.md).
+
 ### Distribution channels
 
 - **Releases** are the app's distribution channel: per-ABI APKs plus
@@ -211,11 +224,11 @@ bash scripts/check_jni_symbols.sh --source-mode
 
 - **Engine** — `cd engine && make test`. Headerless assert harness in
   `engine/tests/`, one test file per public header; must stay green
-  (currently **238/238 tests, 78 809 checks**).
+  (currently **331/331 tests**, engine gates include i18n parity).
 - **App conformance** — `bash scripts/emutest.sh` on the dev box. It
   boots or reuses the x86_64 AVD (`openclip-emu`), builds the x86_64-only
   APKs, installs them and runs the instrumented suite directly with
-  `am instrument`, ending with `OK (N tests)`. Currently **248/248** on
+  `am instrument`, ending with `OK (N tests)`. Currently **289** on
   the phone AVD; the tablet AVD reports 247/248 with one known gesture
   flake that passes in isolation. Never run heavy Gradle builds in
   parallel with the emulator on the 8 GB dev box.
