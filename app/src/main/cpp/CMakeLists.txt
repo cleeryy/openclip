@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.22)
 set(ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../engine)
 set(ENGINE_SRC_DIR ${ENGINE_DIR}/src)
 
-file(GLOB ENGINE_SOURCES
+file(GLOB ENGINE_SOURCES CONFIGURE_DEPENDS
      ${ENGINE_SRC_DIR}/blend/*.cpp
      ${ENGINE_SRC_DIR}/brush/*.cpp
      ${ENGINE_SRC_DIR}/filters/*.cpp
