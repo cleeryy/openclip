@@ -9,6 +9,8 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
 
 ## [Unreleased]
 
+## [0.3.0-beta] — 2026-10-31
+
 ### Added
 
 - Blend coverage (issue #29 A2): 8 new engine modes — color burn,
@@ -40,6 +42,45 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
   ORA persists the texture fiche. 3 new JNI symbols
   (`nSetCloneSource`, `nSetPatternBrush`, `nSetLayerTexture`); the
   bucket and brush entry points grow JSON keys only. FR/EN strings.
+- Workflow completeness (issue #28): layer merge down / merge visible /
+  flatten / rasterize with render-preservation verification and single-step
+  undo; 9-anchor canvas resize with optional resample, crop to selection,
+  print size from DPI; view-only mirror H/V proven export-identical;
+  selection grow/shrink/feather, polyline selection and select-from-layer-alpha;
+  floating reference photo panel.
+- Lettering and timing (issue #31): text rotate/scale/skew handles with an
+  atomic commit (one undo, and undoing a new text layer removes it), glyph
+  palette, multi-paragraph story editor with runs, installable `.abr` brush
+  tips with preview, audio scrubbing on the timeline, and a session timelapse
+  recorder exported as WebM.
+
+### Changed
+
+- Performance (issue #32): stroke frames no longer re-composite the whole
+  stack. `compositeRange` caches the layers below the active stroke and a
+  raw-bytes source-over fast path is byte-identical to the generic path.
+  Measured on the emulator: composite 4096² × 12 layers 4 609 → 704 ms (×6.1),
+  stroke frame 4 683 → 429 ms (×11), 2048×1536 × 8 layers 699 → 79 ms (×8.8).
+- Memory is bounded rather than hoped for: explicit undo budget with
+  oldest-first eviction, per-document budget guards on init/resize/child
+  layers, and a polite refusal at the tested limits (4096² × 50 layers would
+  need 3.36 GB and is refused at 12 layers / 768 MB instead of OOM).
+- Accessibility: content descriptions on every icon-only action, logical
+  focus order, 200 % font-scale pass with 48 dp targets.
+- `scripts/check_i18n.sh` is now part of the pre-push gate and enforces EN/FR
+  key parity, duplicate keys and identical placeholders (826 keys).
+
+### Fixed
+
+- Crash recovery (issue #32): autosave is on by default (5 min, active doc,
+  never mid-stroke) with timestamped snapshots on background; launch offers
+  Restore / Ignore for a snapshot newer than the last explicit save, consumes
+  it on restore and stamps a watermark on ignore so the prompt cannot loop.
+- Release builds are signed with the Calque release key when the keystore is
+  provided (`CALQUE_KEYSTORE_*`, CI decodes a secret and verifies the signer
+  digest), and fall back to debug signing for forks and pull requests. The
+  first release-signed build requires one uninstall from a debug-signed alpha
+  because the signature changes.
 
 ## [0.2.0-alpha] — 2026-10-29
 

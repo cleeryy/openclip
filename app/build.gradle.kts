@@ -43,8 +43,8 @@ android {
         applicationId = "dev.openclip"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.0-alpha"
+        versionCode = 4
+        versionName = "0.3.0-beta"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // Device builds keep arm64 phones + x86_64 emulators. When ABI
