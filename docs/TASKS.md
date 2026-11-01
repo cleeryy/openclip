@@ -245,3 +245,25 @@ Repro : `scripts/emutest.sh` puis
 `adb logcat -d -s OPENCLIP_PERF` (les tests `MemoryPerfTest` impriment
 toutes les lignes ci-dessus). Mesures « avant » capturées sur le même
 émulateur avant le commit d'optimisation.
+
+- 2026-11-01 (2): Issue #22 « montée de toolchain » CLOSE — Gradle
+  wrapper 8.14.3 → 9.8.2, AGP 8.10.1 → 9.5.0, Kotlin 2.1.20 → 2.4.21,
+  Compose BOM 2024.05.00 → 2026.09.00 (UI 1.12.1, M3 1.4.0). Le lot
+  AGP+Kotlin n'a pas pu être séparé : AGP 9 refuse le DSL historique
+  (`android.newDsl`) et le KGP 2.1.20 caste l'extension Android en
+  `BaseExtension` supprimé (crash de configuration), donc Gradle, AGP et
+  Kotlin montent ensemble, Compose BOM reste la 2ᵉ tranche validée à
+  part. Migration : `applicationVariants` → `androidComponents.onVariants`
+  (nom d'APK `calque-<version>-<abi>.apk` inchangé), `kotlinOptions` →
+  `kotlin.compilerOptions`, `compileSdk` 34 → 37 (exigence Compose 1.12 ;
+  `targetSdk` reste 34), NDK épinglé r27.0.12077973 (AGP 9.5 prendrait
+  r28 par défaut), `android.builtInKotlin=false` + `android.newDsl=false`
+  documentés comme dette AGP 10. Tests : Compose 1.12 diffère le
+  `onClick` des `combinedClickable` sur l'horloge de test (waitForIdle ne
+  suffit plus) — helper `tapLayerThumb0()` ; 0 changement moteur/JNI.
+  Gates : engine 339/339, prepush vert (i18n 865 clés, JNI PASS, Kotlin,
+  NDK), émulateur local 295/295 KVM, release R8 OK, coquille identique
+  (Material3 1.4 restyle seulement les Slider), preuve
+  `/tmp/opencode/openclip-22.png` relue. Dependabot : ignores majeurs
+  conservés (le gate émulateur reste hors CI, donc les majeures restent
+  manuelles) — commentaire daté.

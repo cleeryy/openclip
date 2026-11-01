@@ -1,6 +1,12 @@
 # Dependabot — automated dependency updates.
 # Grouped weekly so the local emulator gate (which is not on CI) is run
 # once per batch and not per PR.
+#
+# Baseline after issue #22 (2026-11-01): Gradle 9.8.2, AGP 9.5.0,
+# Kotlin 2.4.21, Compose BOM 2026.09.00, NDK r27.0.12077973,
+# compileSdk 37. Every major below is still ignored on purpose: the
+# migration needs a hand-driven `scripts/emutest.sh` run and, for AGP 10,
+# dropping `android.newDsl=false` in favour of built-in Kotlin.
 version: 2
 updates:
   - package-ecosystem: "gradle"

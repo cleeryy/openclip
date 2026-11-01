@@ -21,6 +21,30 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
   multi-image SAF import, preview, cancel and "open as document".
   Translation only (rotation/scale/parallax not estimated).
 
+### Changed
+
+- Toolchain round (issue #22): Gradle wrapper 8.14.3 → 9.8.2, Android
+  Gradle Plugin 8.10.1 → 9.5.0, Kotlin 2.1.20 → 2.4.21 and Compose BOM
+  2024.05.00 → 2026.09.00 (Compose UI 1.12.1, Material3 1.4.0).
+  `compileSdk` 34 → 37 (required by Compose 1.12; `targetSdk` stays 34,
+  so no runtime behaviour change) and the NDK stays pinned to r27.0.12077973
+  instead of following AGP 9.5's r28 default.
+- AGP 9 migration: artifact naming moved from the removed
+  `applicationVariants` hook to `androidComponents.onVariants`, and
+  `kotlinOptions.jvmTarget` to the `kotlin.compilerOptions` DSL. AGP 9's
+  built-in Kotlin stays disabled (`android.builtInKotlin=false` +
+  `android.newDsl=false`) so the Kotlin version remains the external,
+  explicitly pinned KGP; migrating to built-in Kotlin is the AGP 10
+  deadline (documented in `gradle.properties`).
+- Instrumented suite: Compose 1.12 changed the `combinedClickable`
+  single-tap timing under the test clock — `waitForIdle()` can return
+  before `onClick` runs. Layer-row selection in the tests now flushes the
+  double-tap window explicitly. Material3 1.4 also restyles `Slider`
+  (bar thumb, track dot): appearance only, interactions unchanged.
+- No JNI change: engine 339/339, `scripts/prepush.sh` green (i18n, JNI
+  contract, Kotlin, NDK) and the local emulator gate 295/295 with the
+  release APK still built through R8.
+
 ## [0.3.0-beta] — 2026-10-31
 
 ### Added

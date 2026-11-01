@@ -2536,6 +2536,16 @@ class EngineConformanceTest {
         composeRule.waitForIdle()
     }
 
+    // Compose 1.12 (BOM 2026.09.00): combinedClickable's single-tap
+    // callback now waits out the double-tap window on the *test* clock, so
+    // waitForIdle() can return before onClick runs and a panel refresh is
+    // silently skipped. Flush the window whenever a tap must land.
+    private fun tapLayerThumb0() {
+        composeRule.onNodeWithTag("layer-thumb-0").performClick()
+        composeRule.mainClock.advanceTimeBy(500)
+        composeRule.waitForIdle()
+    }
+
     private fun <T> onUi(op: (EngineSurface) -> T): T {
         var out: T? = null
         composeRule.activityRule.scenario.onActivity { act ->
@@ -2681,8 +2691,7 @@ class EngineConformanceTest {
             // an outer-dock offset).
             composeRule.onNodeWithTag("layer-list").performScrollTo()
             composeRule.waitForIdle()
-            composeRule.onNodeWithTag("layer-thumb-0").performClick()
-            composeRule.waitForIdle()
+            tapLayerThumb0()
             var tries = 0
             while (LayerPanelTestHooks.thumbSnapshot().isEmpty() && tries < 10) {
                 Thread.sleep(500)
@@ -2756,8 +2765,7 @@ class EngineConformanceTest {
             // an outer-dock offset).
             composeRule.onNodeWithTag("layer-list").performScrollTo()
             composeRule.waitForIdle()
-            composeRule.onNodeWithTag("layer-thumb-0").performClick()
-            composeRule.waitForIdle()
+            tapLayerThumb0()
             val from = n - 2
             val to = n - 1
             val hook = LayerPanelTestHooks.moveOnce
@@ -3007,8 +3015,7 @@ class EngineConformanceTest {
                 for (i in start until 50) it.addLayerNamed("Layer $i")
             }
             // Refresh the panel, then prove the counter.
-            composeRule.onNodeWithTag("layer-thumb-0").performClick()
-            composeRule.waitForIdle()
+            tapLayerThumb0()
             Thread.sleep(800)
             composeRule.onNodeWithTag("layer-count").performScrollTo()
             composeRule.waitForIdle()
@@ -3086,8 +3093,7 @@ class EngineConformanceTest {
             // Refresh the panel through the UI, then prove the badges.
             // Scroll the OUTER dock column (rows live in a nested lazy
             // list: scrolling them directly leaves the dock unmoved).
-            composeRule.onNodeWithTag("layer-thumb-0").performClick()
-            composeRule.waitForIdle()
+            tapLayerThumb0()
             Thread.sleep(800)
             composeRule.onNodeWithTag("layer-search").performScrollTo()
             composeRule.waitForIdle()
@@ -12652,8 +12658,7 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             Thread.sleep(500)
             // addGroup is not a paint op: refresh the panel through a
             // row select (same pattern as the clip/mask badge test).
-            composeRule.onNodeWithTag("layer-thumb-0").performClick()
-            composeRule.waitForIdle()
+            tapLayerThumb0()
             Thread.sleep(800)
             var ptDesc = ""
             var isoDesc = ""

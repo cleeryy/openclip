@@ -37,7 +37,14 @@ if (releaseKeystorePath.isNotEmpty() && !hasReleaseSigning) {
 
 android {
     namespace = "dev.openclip"
-    compileSdk = 34
+    // Compose 1.12 (BOM 2026.09.00) requires compileSdk 37. targetSdk stays
+    // at 34 on purpose: this is a build-time bump only, no runtime
+    // behaviour change for the device/emulator gate.
+    compileSdk = 37
+    // AGP 9.5 defaults to NDK 28.2; the shipped native contract (JNI
+    // surface + engine build) was validated on r27, so keep it pinned
+    // instead of silently moving the C++ toolchain with the plugin.
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "dev.openclip"
@@ -114,9 +121,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     buildFeatures {
         compose = true
     }
@@ -140,20 +144,40 @@ android {
     // calque-<version>-universal.apk for the unsplit fallback. The local
     // single-ABI gate keeps AGP's default app-debug.apk on purpose:
     // scripts/emutest.sh installs it by that exact path.
+    // AGP 9 removed the old `applicationVariants` hook; naming now goes
+    // through the stable `androidComponents.onVariants` API.
     if (localAbi.isEmpty()) {
-        applicationVariants.all {
-            val variantVersion = versionName ?: "0"
-            outputs.all {
-                val out = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-                val abi = out.getFilter("ABI") ?: "universal"
-                out.outputFileName = "calque-$variantVersion-$abi.apk"
+        androidComponents {
+            onVariants { variant ->
+                variant.outputs.forEach { output ->
+                    val abi = output.filters
+                        .firstOrNull {
+                            it.filterType ==
+                                com.android.build.api.variant.FilterConfiguration
+                                    .FilterType.ABI
+                        }
+                        ?.identifier
+                        ?: "universal"
+                    output.outputFileName.set(
+                        output.versionName.orElse("0")
+                            .map { "calque-$it-$abi.apk" }
+                    )
+                }
             }
         }
     }
 }
 
+// Kotlin 2.4 (KGP 2.3+) removed the `android.kotlinOptions` block; the
+// compiler options now live in the Kotlin extension.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.05.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
     implementation("androidx.activity:activity-compose:1.9.1")
     implementation("androidx.compose.material3:material3")
