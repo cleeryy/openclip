@@ -62,11 +62,59 @@ private fun dotColor(hex: String): Color = try {
 @Composable
 fun HarmonyPanel(
     store: ColorStore,
+    surface: EngineSurface,
+    state: HarmonyState,
+    selectionVersion: Int,
+    onStatus: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val ctx = LocalContext.current
     var mode by remember { mutableStateOf("complement") }
-    val base = Harmony.hexToHsv(store.inkHex)
+    // Read the version so a selection edit re-labels the action ("sample
+    // the selection" vs "sample a zone"); the read itself is the gate.
+    val hasSel = remember(selectionVersion) { surface.hasSelection() }
+    val sample = state.sample
+    // Issue #15: the harmony base follows the sampled zone when one
+    // exists, and the ink colour otherwise (documented fallback).
+    val base = Harmony.hexToHsv(sample?.dominant ?: store.inkHex)
     val hues = Harmony.huesFor(base[0], mode)
+    // Status is DERIVED from the hoisted state so a zone committed while
+    // the canvas had focus (or another tab was open) still reports.
+    val message = when {
+        state.outcome == HarmonyRegion.REASON_FALLBACK ->
+            stringResource(R.string.harmony_sample_fallback)
+        state.outcome == HarmonyRegion.REASON_EMPTY ||
+            state.outcome == HarmonyRegion.REASON_NO_REGION ->
+            stringResource(R.string.harmony_sample_empty)
+        sample != null ->
+            stringResource(R.string.harmony_sample_done, sample.dominant)
+        state.armed -> stringResource(R.string.harmony_sample_region_hint)
+        else -> ""
+    }
+
+    fun runSample(rect: HarmonyRegion.Rect?) {
+        sampleHarmonyRegionAsync(surface, rect) { s, reason ->
+            state.sample = s ?: state.sample
+            state.outcome = reason
+            if (s != null) onStatus(ctx.getString(R.string.harmony_sample_done, s.dominant))
+        }
+    }
+
+    fun armZone() {
+        state.armed = true
+        state.outcome = null
+        surface.armRegion()
+        onStatus(ctx.getString(R.string.harmony_sample_region_hint))
+    }
+
+    fun clearSample() {
+        state.armed = false
+        state.sample = null
+        state.outcome = null
+        surface.disarmRegion()
+        surface.clearRegionZone()
+    }
+
     Column(
         modifier = modifier.fillMaxWidth().testTag("v3-harmony")
     ) {
@@ -123,6 +171,119 @@ fun HarmonyPanel(
                         .testTag("v3-harmony-dot-$i")
                 )
             }
+        }
+        // Issue #15: zone source. A selection narrows the sample; without
+        // one the canvas drags a rectangle (engine coordinates, so the
+        // palette is stable across zoom/rotation).
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .testTag("harmony-source-row")
+        ) {
+            Button(
+                onClick = {
+                    when {
+                        state.armed -> {
+                            state.armed = false
+                            state.outcome = null
+                            surface.disarmRegion()
+                        }
+                        hasSel -> runSample(null)
+                        else -> armZone()
+                    }
+                },
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("harmony-sample-region")
+            ) {
+                Text(
+                    stringResource(
+                        when {
+                            state.armed -> R.string.harmony_sample_cancel
+                            hasSel -> R.string.harmony_sample_selection
+                            else -> R.string.harmony_sample_region
+                        }
+                    ),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (hasSel && !state.armed) {
+                TextButton(
+                    onClick = { armZone() },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("harmony-sample-drag")
+                ) {
+                    Text(
+                        stringResource(R.string.harmony_sample_region),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            if (sample != null || state.armed) {
+                TextButton(
+                    onClick = { clearSample() },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("harmony-sample-clear")
+                ) {
+                    Text(stringResource(R.string.harmony_sample_clear))
+                }
+            }
+        }
+        if (sample != null) {
+            Text(
+                stringResource(
+                    R.string.harmony_sample_zone,
+                    sample.rect.w,
+                    sample.rect.h,
+                    sample.pixels
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("harmony-zone-label")
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .padding(vertical = 4.dp)
+                    .horizontalScroll(rememberScrollState())
+                    .testTag("harmony-palette")
+            ) {
+                sample.swatches.forEachIndexed { i, sw ->
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(dotColor(sw.hex))
+                            .clickable {
+                                store.pick(sw.hex)
+                                store.pushRecent(sw.hex)
+                            }
+                            .testTag("harmony-palette-$i")
+                    )
+                }
+            }
+            if (sample.masked) {
+                Text(
+                    stringResource(R.string.harmony_sample_masked),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("harmony-zone-masked")
+                )
+            }
+        }
+        if (message.isNotEmpty()) {
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("harmony-sample-status")
+            )
         }
         Text(
             stringResource(R.string.harmony_hint),

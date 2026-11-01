@@ -434,6 +434,16 @@
     <string name="harmony_triadic">Triade</string>
     <string name="harmony_square">Carré</string>
     <string name="harmony_hint">Touchez un point pour adopter la teinte.</string>
+    <string name="harmony_sample_region">Prélever une zone</string>
+    <string name="harmony_sample_selection">Prélever la sélection</string>
+    <string name="harmony_sample_cancel">Annuler</string>
+    <string name="harmony_sample_clear">Effacer</string>
+    <string name="harmony_sample_region_hint">Tracez un rectangle sur le canevas.</string>
+    <string name="harmony_sample_done">Zone prélevée : %1$s</string>
+    <string name="harmony_sample_empty">Rien à prélever dans cette zone.</string>
+    <string name="harmony_sample_fallback">Composite indisponible — teinte d’encre conservée.</string>
+    <string name="harmony_sample_zone">Zone %1$d×%2$d px, %3$d pixels</string>
+    <string name="harmony_sample_masked">Limitée à la sélection active.</string>
     <string name="snap_title">Accrochage</string>
     <string name="snap_grid_off">Off</string>
     <string name="snap_paths">Tracés</string>

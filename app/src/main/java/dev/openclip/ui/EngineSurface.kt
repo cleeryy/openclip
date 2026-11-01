@@ -431,6 +431,17 @@ class EngineSurface @JvmOverloads constructor(
     var onPipetteUp: (() -> Unit)? = null
     @Volatile private var currentFrameIdx = 0
 
+    // ---- Issue #15 harmony region (app-side only, no JNI): while armed,
+    // a drag traces a rectangle instead of drawing. The gesture is stored
+    // in ENGINE pixels (screenToEngine at down/move), so the committed
+    // zone is identical whatever the zoom/rotation; the overlay only
+    // re-projects it for display. One-shot like the pipette: the lift
+    // disarms and hands the zone to the host.
+    @Volatile var regionArmed = false
+    var onRegionCommit: ((x0: Int, y0: Int, x1: Int, y1: Int) -> Unit)? = null
+    @Volatile private var regionDraft: FloatArray? = null // x0,y0,x1,y1 engine
+    @Volatile private var regionCommitted: IntArray? = null // l,t,r,b exclusive
+
     @Volatile var onGestureUndo: (() -> Unit)? = null
     @Volatile var onGestureRedo: (() -> Unit)? = null
     @Volatile var onEdgeSwipe: ((edge: Int) -> Unit)? = null
@@ -657,6 +668,33 @@ class EngineSurface @JvmOverloads constructor(
         val cb = onViewChanged
         if (cb != null) post { cb() }
     }
+
+    /** Issue #15: arm the one-shot region drag (harmony sampling). */
+    fun armRegion() {
+        regionArmed = true
+        regionDraft = null
+        needsComposite = true
+    }
+
+    /** Issue #15: leave region mode without committing anything. */
+    fun disarmRegion() {
+        regionArmed = false
+        regionDraft = null
+        needsComposite = true
+    }
+
+    /** Issue #15: drop the committed zone outline (sample cleared). */
+    fun clearRegionZone() {
+        regionCommitted = null
+        regionDraft = null
+        needsComposite = true
+    }
+
+    /** Issue #15 test/probe: last committed engine zone [l,t,r,b] exclusive. */
+    fun regionZoneForTest(): IntArray? = regionCommitted?.copyOf()
+
+    /** Issue #15 test/probe: live drag corners in engine pixels. */
+    fun regionDraftForTest(): FloatArray? = regionDraft?.copyOf()
 
     private fun panBy(dx: Float, dy: Float) {
         viewOffX += dx
@@ -1933,6 +1971,13 @@ class EngineSurface @JvmOverloads constructor(
                         requestParentDisallowInterceptTouchEvent()
                         return true
                     }
+                    // Issue #15: an armed harmony zone consumes the stylus
+                    // drag (no parasite ink), like the pipette tap.
+                    if (regionArmed) {
+                        routeRegionDown(event.getX(stylusIdx), event.getY(stylusIdx))
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     // V+1: armed selection/text tools consume the stylus
                     // like the pipette (no parasite ink).
                     if (selectionTool != null) {
@@ -1987,6 +2032,12 @@ class EngineSurface @JvmOverloads constructor(
                         requestParentDisallowInterceptTouchEvent()
                         return true
                     }
+                    // Issue #15: the harmony zone follows the stylus drag.
+                    if (regionArmed) {
+                        routeRegionMove(event.getX(stylusIdx), event.getY(stylusIdx))
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
                     // V+1: selection trace follows the stylus drag
                     // (no ink while a shape tool is armed).
                     if (selectionTool != null) {
@@ -2005,6 +2056,15 @@ class EngineSurface @JvmOverloads constructor(
                 MotionEvent.ACTION_CANCEL -> {
                     if (pipetteArmed) {
                         onPipetteUp?.invoke()
+                        requestParentDisallowInterceptTouchEvent()
+                        return true
+                    }
+                    // Issue #15: the lift commits the harmony zone.
+                    if (regionArmed || regionDraft != null) {
+                        routeRegionUp(
+                            event.getX(stylusIdx), event.getY(stylusIdx),
+                            action != MotionEvent.ACTION_CANCEL
+                        )
                         requestParentDisallowInterceptTouchEvent()
                         return true
                     }
@@ -2159,6 +2219,12 @@ class EngineSurface @JvmOverloads constructor(
                     requestParentDisallowInterceptTouchEvent()
                     return true
                 }
+                // Issue #15: armed harmony zone drags a rectangle (no ink).
+                if (regionArmed) {
+                    routeRegionDown(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 // V+1: armed selection/text tools consume the tap
                 // (no parasite ink), like the armed pipette.
                 if (selectionTool != null && !navigateMode && !mousePan) {
@@ -2225,6 +2291,12 @@ class EngineSurface @JvmOverloads constructor(
                     requestParentDisallowInterceptTouchEvent()
                     return true
                 }
+                // Issue #15: the harmony zone preview follows the drag.
+                if (regionArmed) {
+                    routeRegionMove(x, y)
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
                 // V+1: shape trace wins over the edge detector (the DOWN
                 // already bypassed edge arming, so no ink is queued).
                 if (selectionTool != null && !navigateMode && !mousePan &&
@@ -2273,6 +2345,22 @@ class EngineSurface @JvmOverloads constructor(
                 // after a tap sample already disarmed); never draws.
                 if (pipetteArmed) {
                     onPipetteUp?.invoke()
+                    edgeArmed = -1
+                    pendingStroke = false
+                    edgeFired = false
+                    requestParentDisallowInterceptTouchEvent()
+                    return true
+                }
+                // Issue #15: the lift commits the harmony zone (no ink).
+                if (regionArmed || regionDraft != null) {
+                    if (event.pointerCount > 0) {
+                        routeRegionUp(
+                            event.getX(0), event.getY(0),
+                            action != MotionEvent.ACTION_CANCEL
+                        )
+                    } else {
+                        routeRegionUp(0f, 0f, false)
+                    }
                     edgeArmed = -1
                     pendingStroke = false
                     edgeFired = false
@@ -2963,6 +3051,7 @@ class EngineSurface @JvmOverloads constructor(
                     }
                     drawCursorRing(c, dst, ang)
                     drawSelectionOverlay(c, dst, ang)
+                    drawRegionOverlay(c)
                     drawV2Overlays(c, dst, ang)
                     drawTrajectories(c, dst, ang)
                     drawSmartGhost(c, dst, ang)
@@ -4345,6 +4434,55 @@ class EngineSurface @JvmOverloads constructor(
         needsComposite = true
     }
 
+    // ---- Issue #15 harmony region drag (engine coordinates only) ----
+    // The draft is stored in ENGINE pixels the moment the finger moves:
+    // a later zoom/rotate/flip would only change the overlay projection,
+    // never the sampled zone.
+
+    private fun regionClamp(ex: Float, ey: Float): Pair<Float, Float> = Pair(
+        ex.coerceIn(0f, (engineWidth - 1).toFloat()),
+        ey.coerceIn(0f, (engineHeight - 1).toFloat())
+    )
+
+    private fun routeRegionDown(vx: Float, vy: Float): Boolean {
+        // A drag that starts off the paper never opens a zone (no
+        // accidental edge-to-edge sample).
+        if (!isOnPaper(vx, vy)) return true
+        val (ex, ey) = screenToEngine(vx, vy)
+        val (cx, cy) = regionClamp(ex, ey)
+        regionDraft = floatArrayOf(cx, cy, cx, cy)
+        needsComposite = true
+        return true
+    }
+
+    private fun routeRegionMove(vx: Float, vy: Float): Boolean {
+        val d = regionDraft ?: return false
+        val (ex, ey) = screenToEngine(vx, vy)
+        val (cx, cy) = regionClamp(ex, ey)
+        d[2] = cx
+        d[3] = cy
+        needsComposite = true
+        return true
+    }
+
+    private fun routeRegionUp(vx: Float, vy: Float, commit: Boolean): Boolean {
+        val d = regionDraft
+        regionDraft = null
+        // One-shot (like the pipette): the host re-arms to sample again.
+        regionArmed = false
+        needsComposite = true
+        if (!commit || d == null) return true
+        val (ex, ey) = screenToEngine(vx, vy)
+        val (cx, cy) = regionClamp(ex, ey)
+        val rect = HarmonyRegion.rectFromDrag(
+            d[0], d[1], cx, cy, engineWidth, engineHeight
+        ) ?: return true
+        regionCommitted = intArrayOf(rect.x, rect.y, rect.right, rect.bottom)
+        val cb = onRegionCommit
+        post { cb?.invoke(rect.x, rect.y, rect.right, rect.bottom) }
+        return true
+    }
+
     // ---- V+1 marching ants (overlay-only, never engine pixels) ----
     private val antsPaint = Paint().apply {
         style = Paint.Style.STROKE
@@ -4385,6 +4523,62 @@ class EngineSurface @JvmOverloads constructor(
         c.drawPath(path, antsShadowPaint)
         c.drawPath(path, antsPaint)
         c.restore()
+    }
+
+    // ---- Issue #15 harmony region overlay (draw-only, no engine pixels) ----
+    private val regionStrokePaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = 0xFF7FD1FF.toInt()
+        isAntiAlias = true
+    }
+    private val regionFillPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = 0x2E7FD1FF
+        isAntiAlias = true
+    }
+
+    /**
+     * Project the engine-space draft/committed zone through the current
+     * view matrix. Drawing only: the sampled bytes come from the engine
+     * rect, so rotating or zooming after the gesture cannot move it.
+     */
+    private fun drawRegionOverlay(c: android.graphics.Canvas) {
+        val draft = regionDraft
+        val committed = regionCommitted
+        val l: Float
+        val t: Float
+        val r: Float
+        val b: Float
+        if (draft != null) {
+            l = minOf(draft[0], draft[2])
+            t = minOf(draft[1], draft[3])
+            r = maxOf(draft[0], draft[2])
+            b = maxOf(draft[1], draft[3])
+        } else if (committed != null) {
+            l = committed[0].toFloat()
+            t = committed[1].toFloat()
+            r = committed[2].toFloat()
+            b = committed[3].toFloat()
+        } else {
+            return
+        }
+        // A tap yields a 1 px zone: grow it visually so it reads as a dot.
+        val rr = if (r - l < 1f) l + 1f else r
+        val bb = if (b - t < 1f) t + 1f else b
+        val p0 = engineToScreen(l, t)
+        val p1 = engineToScreen(rr, t)
+        val p2 = engineToScreen(rr, bb)
+        val p3 = engineToScreen(l, bb)
+        val path = android.graphics.Path()
+        path.moveTo(p0.first, p0.second)
+        path.lineTo(p1.first, p1.second)
+        path.lineTo(p2.first, p2.second)
+        path.lineTo(p3.first, p3.second)
+        path.close()
+        if (draft != null) c.drawPath(path, regionFillPaint)
+        regionStrokePaint.pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
+        c.drawPath(path, regionStrokePaint)
     }
 
     // T1 quick mask veil (overlay-only, cached per mask content).

@@ -171,6 +171,9 @@ import dev.openclip.ui.WebdavDialog
 // V+3 confort pro (§1.2, §1.3, §3, §4, §5, §6, §7): panels + pure units.
 import dev.openclip.ui.ChannelsPanel
 import dev.openclip.ui.HarmonyPanel
+import dev.openclip.ui.HarmonyRegion
+import dev.openclip.ui.HarmonyState
+import dev.openclip.ui.sampleHarmonyRegionAsync
 import dev.openclip.ui.ImportPanel
 import dev.openclip.ui.PdfImport
 import dev.openclip.ui.PosePanel
@@ -213,6 +216,10 @@ class MainActivity : ComponentActivity() {
     // Slice 6 stores (app-side only, filesDir JSON, single writers).
     lateinit var commandStore: CommandBarStore
     lateinit var workspaceStore: WorkspaceStore
+
+    // Issue #15: harmony sample session state (hoisted so a dock tab
+    // switch does not throw the sampled zone away; never persisted).
+    val harmonyState = HarmonyState()
 
     // Slice 6 test-only hooks: wired by OpenClipScreen to the hoisted doc
     // state (all calls must run on the UI thread, e.g. via
@@ -1377,6 +1384,37 @@ class MainActivity : ComponentActivity() {
                 store.disarmPipette()
                 cv.pipetteArmed = false
                 cv.pipetteLoupe = false
+            }
+            // Issue #15: a committed harmony zone samples the COMPOSITE in
+            // engine coordinates (zoom/rotation independent). The panel
+            // shows the palette; the ink colour is a documented fallback.
+            cv.onRegionCommit = { x0, y0, x1, y1 ->
+                harmonyState.armed = false
+                val zone = HarmonyRegion.Rect(
+                    x0.coerceAtLeast(0),
+                    y0.coerceAtLeast(0),
+                    (x1 - x0).coerceAtLeast(1),
+                    (y1 - y0).coerceAtLeast(1)
+                )
+                sampleHarmonyRegionAsync(cv, zone) { sample, reason ->
+                    harmonyState.outcome = reason
+                    if (sample != null) {
+                        harmonyState.sample = sample
+                        status.value = ctx.getString(
+                            R.string.harmony_sample_done, sample.dominant
+                        )
+                    } else {
+                        status.value = ctx.getString(
+                            when (reason) {
+                                HarmonyRegion.REASON_EMPTY ->
+                                    R.string.harmony_sample_empty
+                                HarmonyRegion.REASON_NO_REGION ->
+                                    R.string.harmony_sample_empty
+                                else -> R.string.harmony_sample_fallback
+                            }
+                        )
+                    }
+                }
             }
         }
 
@@ -3348,6 +3386,10 @@ class MainActivity : ComponentActivity() {
                                 val v3key = activeDocId.value ?: "solo"
                                 HarmonyPanel(
                                     store = store,
+                                    surface = surface,
+                                    state = harmonyState,
+                                    selectionVersion = selectionTick.value,
+                                    onStatus = { status.value = it },
                                     modifier = Modifier.fillMaxWidth()
                                 )
                                 ChannelsPanel(

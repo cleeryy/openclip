@@ -446,6 +446,16 @@
     <string name="harmony_triadic">Triadic</string>
     <string name="harmony_square">Square</string>
     <string name="harmony_hint">Tap a dot to adopt the hue.</string>
+    <string name="harmony_sample_region">Sample a zone</string>
+    <string name="harmony_sample_selection">Sample the selection</string>
+    <string name="harmony_sample_cancel">Cancel</string>
+    <string name="harmony_sample_clear">Clear</string>
+    <string name="harmony_sample_region_hint">Drag a rectangle on the canvas.</string>
+    <string name="harmony_sample_done">Zone sampled: %1$s</string>
+    <string name="harmony_sample_empty">Nothing to sample in this zone.</string>
+    <string name="harmony_sample_fallback">Composite unavailable — keeping the ink colour.</string>
+    <string name="harmony_sample_zone">Zone %1$d×%2$d px, %3$d pixels</string>
+    <string name="harmony_sample_masked">Limited to the active selection.</string>
     <string name="snap_title">Snap</string>
     <string name="snap_grid_off">Off</string>
     <string name="snap_paths">Paths</string>

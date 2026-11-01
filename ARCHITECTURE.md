@@ -862,6 +862,34 @@ symbols):
   §8.2/§8.3 stay CONDITIONAL (no permissive <5 Mo ONNX weight
   confirmed — same gate as M8); only classic §8.1 ships.
 
+Issue #15 additions (colour harmony: sample a region — app-side, 0 JNI):
+
+- NO new symbol and no JNI change: the zone is entirely app-side
+  (`HarmonyRegion.kt`) and reads the COMPOSITE through the existing
+  `nFrameCompositeInto` pull the pipette already uses
+  (`EngineSurface.pullFrameFull`).
+- Source of truth is the ENGINE pixel grid: the drag is converted with
+  `screenToEngine` at DOWN/MOVE, clamped to paper, and committed as an
+  integer engine rect (`regionCommitted`). The overlay is only a
+  projection of that rect through the live view matrix, so zoom,
+  rotation, flip and pan cannot change the sampled bytes. A committed
+  zone survives a view change unchanged.
+- Selection: when a mask exists it weights the sample (soft alpha
+  0..255 gates the pixels; alpha 0 never contributes) and, when no
+  rectangle was dragged, its bounding box IS the zone. The composite
+  outside the mask is ignored, exactly like the fill/filter paths.
+- Palette = weighted 5-bit-per-channel histogram of the zone; the
+  heaviest entry (deterministic tie-break on hex) becomes the harmony
+  base hue, the top 6 are shown as adoptable swatches. Transparent
+  composite pixels are skipped.
+- Fallback (documented, no silent whole-layer sample): when the
+  composite cannot be pulled (no handle, empty frame, size mismatch)
+  the panel keeps the ink colour and reports "Composite unavailable —
+  keeping the ink colour.". A zone with no contributing pixel reports
+  "Nothing to sample in this zone.".
+- Undo: none needed — sampling reads pixels and writes session UI state
+  only (no document mutation, no engine state).
+
 T3 additions (decided 2026-10-22, animation productive round —
 spec docs/t3-animation.md; delivery order §3a -> §1 -> §2 -> §3b
 -> §4; EXACTLY 15 new symbols, this section documents all of them
