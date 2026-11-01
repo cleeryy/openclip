@@ -179,4 +179,12 @@ object EngineHost {
     // live JSON accounting used by the settings panel and the tests.
     external fun nSetBudget(handle: Long, docBytes: Long, undoBytes: Long): Boolean
     external fun nBudgetState(handle: Long): String
+
+    // Issue #16 additions (ARCHITECTURE.md "Issue #16 additions"):
+    // blocking multi-frame panorama stitch (worker thread), atomic
+    // progress for UI polling and a cooperative cancel flag. Returns a
+    // JSON report; the engine document is never mutated.
+    external fun nPanoramaStitch(handle: Long, json: String): String
+    external fun nPanoramaProgress(handle: Long): Float
+    external fun nPanoramaCancel(handle: Long): Boolean
 }

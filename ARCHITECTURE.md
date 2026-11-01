@@ -1666,3 +1666,77 @@ Enforcement, in the engine:
   see `docs/TASKS.md` "Issue #32 §3 — memory/perf budget". Tests:
   `engine/tests/test_undo.cpp` (`undo_budget_*`) and the instrumented
   `perfBudget` / `budget*` cases.
+
+## Issue #16 additions — multi-frame panorama stitching
+
+Feature-based stitching (no neural network, no new third party) for
+2..32 overlapping images into one wide canvas. Engine module
+`openclip/panorama.h` is pure and host-testable; the shim only moves
+files and JSON. Translation is recovered; **rotation and scale are
+NOT estimated** (announced limit — the app UI says so). Alignment is
+chained pairwise (image *i* against *i-1*), so long strips can drift;
+each pair is scored and a weak pair refuses the whole job.
+
+Three JNI symbols (documented here BEFORE the code):
+
+- `nPanoramaStitch(handle: Long, json: String): String` — runs one
+  blocking stitch on the calling thread (the app calls it from a
+  worker). JSON in:
+  `{"images":["/abs/a.png",…] (2..32, stb-decodable: PNG/JPEG/BMP/
+  TGA/GIF/PNM/PSD-flat), "outPath":"/abs/out.png",
+  "feather":48 (0..512), "exposure":true, "maxPixels":16777216,
+  "minOverlap":16, "maxInputDim":4096, "maxInputPixels":33554432}`.
+  Missing keys take the documented defaults. JSON out on success:
+  `{"ok":true,"path":…,"width":W,"height":H,"images":N,
+  "offsets":[{"x":…,"y":…,"dx":…,"dy":…,"score":0..1,
+  "gain":…},…],"meanScore":…}` — `x/y` = placement of each image in
+  the output, `dx/dy` = offset relative to the previous image.
+  Failure: `{"ok":false,"cancelled":false,"error":"…"}`; cancellation:
+  `{"ok":false,"cancelled":true}`. Output is RGBA8 PNG (straight
+  alpha) written at `outPath`; the document/canvas is never touched
+  and no undo entry is created (the app opens the PNG through the
+  existing `nLoadDocument` when the user accepts the preview).
+- `nPanoramaProgress(handle: Long): Float` — 0..1 monotonic progress
+  of the current/last stitch (atomic; polled by the UI at ~8 Hz).
+- `nPanoramaCancel(handle: Long): Boolean` — raises the cancel flag;
+  the running stitch observes it at the next alignment row / blend
+  row and returns the cancelled JSON, deleting the partial output.
+  Returns true when a stitch was in flight.
+
+Pipeline in `panorama.h`:
+
+- `alignPanoramaPair(a,b,params,dx,dy,score,error)` — luma → Sobel
+  gradient magnitude, coarse-to-fine normalized cross-correlation of
+  zero-mean gradients (cosine mapped to 0..1). Bounded analysis maps
+  (longest side 192 coarse, full res refinement) with deterministic
+  strided sampling; no FFT and no RNG. Refuses when the best score
+  `< minScore` (default 0.62), when either overlap axis is
+  `< minOverlap` px, when the shared area is `< 5%` of the smaller
+  image, or when both gradient maps are flat (featureless input —
+  honest: such an overlap carries no alignment information).
+- `stitchPanorama(images,params,progress)` — validates 2..32 images,
+  dimensions `1..8192` and a max/min linear ratio of 4, computes the
+  placement chain, refuses before allocating when
+  `W×H > maxPixels` (default 16 M px = 64 MiB RGBA; allocator
+  `bad_alloc` is also caught and reported), then blends left-to-right:
+  the first image is copied, each next one gets a border feather ramp
+  (`feather` px, smoothstep) applied only in the already-covered
+  overlap (outside it the pixels are copied), and an optional mean
+  luma gain (`dst/src`, clamped 0.5..2.0) equalises exposure. The
+  blend is a weighted average in premultiplied RGBA, so an exact
+  alignment over a smooth gradient is seam-free (locked by test).
+  `progress` is called with monotonic 0..1 and returns false to cancel.
+- Refusals are explicit: unknown/undecodable file, <2 or >32 images,
+  zero/oversized dimensions, degenerate aspect ratio, too little
+  overlap, weak score, canvas past `maxPixels`, cancellation. The
+  output PNG is only written on success.
+- Honest limits: translation only (no rotation/scale/parallax),
+  pairwise chaining drifts on long strips, transparent inputs are
+  averaged in premultiplied space (approximation), JPEG/PNG input is
+  downscaled by the loader when past `maxInputDim`/`maxInputPixels`.
+- Tests: `engine/tests/test_panorama.cpp` (one per header) locks
+  known-offset recovery ±1 px on synthetic textured gradients, seam
+  invisibility, exposure gain, every refusal (weak overlap, flat
+  texture, dimensions, budget) and cancellation. Instrumented:
+  end-to-end JNI stitch of two generated PNGs (offset, seam pixels,
+  output loaded into a document) plus the app dialog preview/cancel.

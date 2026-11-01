@@ -1679,6 +1679,32 @@ class EngineSurface @JvmOverloads constructor(
     )
     private val docQueue = ArrayDeque<DocRequest>()
 
+    // Issue #16: panorama stitch. The JNI call is blocking and does not
+    // touch the document, so it deliberately does NOT hold engineLock
+    // (the render thread stays responsive); the dialog runs it on a
+    // worker and polls progress/cancel through atomics shim-side.
+    fun stitchPanorama(json: String): String {
+        val h = handle
+        if (h == 0L) return "{\"ok\":false,\"cancelled\":false," +
+            "\"error\":\"panorama: surface not ready\"}"
+        return try {
+            EngineHost.nPanoramaStitch(h, json)
+        } catch (_: Exception) {
+            "{\"ok\":false,\"cancelled\":false," +
+                "\"error\":\"panorama: native call failed\"}"
+        }
+    }
+
+    fun panoramaProgress(): Float {
+        val h = handle
+        return if (h == 0L) 0f else EngineHost.nPanoramaProgress(h)
+    }
+
+    fun panoramaCancel(): Boolean {
+        val h = handle
+        return if (h == 0L) false else EngineHost.nPanoramaCancel(h)
+    }
+
     fun loadFrom(path: String, onResult: (Boolean) -> Unit) {
         if (handle == 0L || !running.get()) { post { onResult(false) }; return }
         synchronized(docQueue) { docQueue.add(DocRequest("load", path, "", onResult)) }
@@ -1705,6 +1731,8 @@ class EngineSurface @JvmOverloads constructor(
                         // document closed = history emptied).
                         if (b) HistoryLog.clear()
                         if (b) needsComposite = true
+                        // Issue #16: a stitched PNG can change the size.
+                        if (b) syncCanvasSizeLocked()
                         b
                     }
                     "save" -> EngineHost.nSaveDocument(handle, r.path, r.format)
