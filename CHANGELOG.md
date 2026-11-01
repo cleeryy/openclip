@@ -9,6 +9,18 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
 
 ## [Unreleased]
 
+### Added
+
+- Panorama stitching (issue #16): align and blend 2..32 overlapping
+  images into one wide canvas with an engine module built from scratch
+  (`panorama.h`) — Sobel gradient coarse-to-fine correlation for
+  translation alignment (no neural network), smoothstep feather in the
+  overlap, mean-luma exposure equalisation, bounded memory and explicit
+  refusals (weak/flat overlap, inconsistent dimensions, pixel budget).
+  Cancellable progress via three documented JNI symbols; the app adds
+  multi-image SAF import, preview, cancel and "open as document".
+  Translation only (rotation/scale/parallax not estimated).
+
 ## [0.3.0-beta] — 2026-10-31
 
 ### Added

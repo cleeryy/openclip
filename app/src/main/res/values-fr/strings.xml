@@ -841,4 +841,34 @@
     <string name="a11y_add">Ajouter</string>
     <string name="a11y_prev">Précédent</string>
     <string name="a11y_next">Suivant</string>
+    <!-- Issue #16 : assemblage panorama -->
+    <string name="pano_title">Assemblage panorama</string>
+    <string name="pano_limit_note">Alignement en translation uniquement (sans rotation ni échelle). Les images doivent se chevaucher d’au moins 5 %.</string>
+    <string name="pano_add">Ajouter des images…</string>
+    <string name="pano_count">%1$d images</string>
+    <string name="pano_image_n">Image %1$d</string>
+    <string name="pano_bad_thumb">Aperçu indisponible</string>
+    <string name="pano_remove">Retirer</string>
+    <string name="pano_feather">Fondu de jointure : %1$d px</string>
+    <string name="pano_exposure">Égaliser l’exposition</string>
+    <string name="pano_stitch">Assembler</string>
+    <string name="pano_need_two">Choisissez au moins deux images qui se chevauchent.</string>
+    <string name="pano_preview">Aperçu</string>
+    <string name="pano_preview_desc">Aperçu du panorama assemblé</string>
+    <string name="pano_working">Assemblage… %1$d %%</string>
+    <string name="pano_cancelling">Annulation…</string>
+    <string name="pano_cancelled">Assemblage annulé.</string>
+    <string name="pano_done">%1$d images · %2$d×%3$d px · score moyen %4$d %%</string>
+    <string name="pano_done_short">Panorama assemblé.</string>
+    <string name="pano_offset">Image %1$d : +%2$d, %3$d px (score %4$d %%)</string>
+    <string name="pano_open">Ouvrir comme document</string>
+    <string name="pano_opened">Panorama ouvert comme document courant.</string>
+    <string name="pano_failed">Échec du panorama.</string>
+    <string name="pano_err_overlap">Chevauchement trop faible ou trop pauvre pour aligner. Choisissez des images plus communes.</string>
+    <string name="pano_err_flat">Le chevauchement n’a aucune texture (aplat) : l’alignement est impossible.</string>
+    <string name="pano_err_dimensions">Les images ont des dimensions ou des ratios incohérents.</string>
+    <string name="pano_err_memory">Mémoire insuffisante pour ce panorama. Utilisez moins d’images ou des images plus petites.</string>
+    <string name="pano_err_image">Une image n’a pas pu être décodée (PNG, JPEG, BMP, TGA, GIF, PNM).</string>
+    <string name="pano_err_count">Choisissez entre 2 et 32 images.</string>
+    <string name="pano_err_unknown">Échec de l’assemblage : %1$s</string>
 </resources>

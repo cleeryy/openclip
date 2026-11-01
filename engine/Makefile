@@ -19,6 +19,7 @@ SRCS = src/raster/surface.cpp \
        src/io/tiff.cpp \
        src/io/document.cpp \
        src/filters/filters.cpp \
+       src/filters/panorama.cpp \
        src/raster/vector.cpp \
        src/raster/transform.cpp \
        src/raster/warp.cpp \
@@ -48,6 +49,7 @@ TEST_SRCS = tests/main.cpp \
             tests/test_undo.cpp \
             tests/test_ora.cpp \
             tests/test_filters.cpp \
+            tests/test_panorama.cpp \
             tests/test_document.cpp \
             tests/test_layers.cpp \
             tests/test_vector.cpp \

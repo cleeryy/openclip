@@ -841,4 +841,34 @@
     <string name="a11y_add">Add</string>
     <string name="a11y_prev">Previous</string>
     <string name="a11y_next">Next</string>
+    <!-- Issue #16: panorama stitching -->
+    <string name="pano_title">Panorama stitch</string>
+    <string name="pano_limit_note">Translation-only alignment (no rotation/scale). Frames must overlap by at least 5%.</string>
+    <string name="pano_add">Add images…</string>
+    <string name="pano_count">%1$d images</string>
+    <string name="pano_image_n">Image %1$d</string>
+    <string name="pano_bad_thumb">Preview unavailable</string>
+    <string name="pano_remove">Remove</string>
+    <string name="pano_feather">Seam feather: %1$d px</string>
+    <string name="pano_exposure">Equalise exposure</string>
+    <string name="pano_stitch">Stitch</string>
+    <string name="pano_need_two">Choose at least two overlapping images.</string>
+    <string name="pano_preview">Preview</string>
+    <string name="pano_preview_desc">Stitched panorama preview</string>
+    <string name="pano_working">Stitching… %1$d%%</string>
+    <string name="pano_cancelling">Cancelling…</string>
+    <string name="pano_cancelled">Stitch cancelled.</string>
+    <string name="pano_done">%1$d images · %2$d×%3$d px · mean score %4$d%%</string>
+    <string name="pano_done_short">Panorama stitched.</string>
+    <string name="pano_offset">Image %1$d: +%2$d, %3$d px (score %4$d%%)</string>
+    <string name="pano_open">Open as document</string>
+    <string name="pano_opened">Panorama opened as the current document.</string>
+    <string name="pano_failed">Panorama failed.</string>
+    <string name="pano_err_overlap">Overlap too small or too weak to align. Pick frames with more shared content.</string>
+    <string name="pano_err_flat">The overlap has no texture (flat colour): alignment is impossible.</string>
+    <string name="pano_err_dimensions">Images have inconsistent dimensions or aspect ratios.</string>
+    <string name="pano_err_memory">Not enough memory for this panorama. Use fewer or smaller images.</string>
+    <string name="pano_err_image">One image could not be decoded (PNG, JPEG, BMP, TGA, GIF, PNM).</string>
+    <string name="pano_err_count">Choose between 2 and 32 images.</string>
+    <string name="pano_err_unknown">Stitch failed: %1$s</string>
 </resources>

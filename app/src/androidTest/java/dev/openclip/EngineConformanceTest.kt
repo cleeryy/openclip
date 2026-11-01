@@ -13499,6 +13499,183 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         }
     }
 
+    // ---- Issue #16: panorama stitching ----
+
+    /** Synthetic textured gradient, same recipe as the engine test, so a
+     *  wrong stitch is visible to the eye and to the pixel checks. */
+    private fun panoBase(w: Int, h: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val r = 16 + x * 200 / (w - 1)
+                val g = 20 + y * 180 / (h - 1)
+                val b = 40 + (x * 13 + y * 7) % 60
+                px[y * w + x] = if (x >= w * 45 / 100 && x < w * 52 / 100) {
+                    (255 shl 24) or (250 shl 16) or (200 shl 8) or 80
+                } else {
+                    (255 shl 24) or (r shl 16) or (g shl 8) or b
+                }
+            }
+        }
+        bmp.setPixels(px, 0, w, 0, 0, w, h)
+        return bmp
+    }
+
+    private fun panoCrop(src: Bitmap, x0: Int, y0: Int, w: Int, h: Int): Bitmap =
+        Bitmap.createBitmap(src, x0, y0, w, h)
+
+    private fun savePng(dir: File, name: String, bmp: Bitmap): File {
+        dir.mkdirs()
+        val f = File(dir, name)
+        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        return f
+    }
+
+    // JNI end-to-end: two overlapping PNGs -> known translation, seam
+    // pixels equal to the analytic source, output loads into a document.
+    @Test
+    fun panoramaStitchJniEndToEnd() {
+        val dir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "pano-jni"
+        )
+        val base = panoBase(340, 180)
+        val a = savePng(dir, "a.png", panoCrop(base, 0, 0, 220, 180))
+        val b = savePng(dir, "b.png", panoCrop(base, 120, 0, 220, 180))
+        val out = File(dir, "out.png")
+        val handle = EngineHost.nInit(64, 64, 160f)
+        assertTrue("stitch handle", handle != 0L)
+        try {
+            val json = org.json.JSONObject()
+                .put("images", org.json.JSONArray(listOf(a.absolutePath, b.absolutePath)))
+                .put("outPath", out.absolutePath)
+                .put("feather", 48)
+                .put("exposure", true)
+                .toString()
+            val report = org.json.JSONObject(EngineHost.nPanoramaStitch(handle, json))
+            assertTrue(
+                "stitch must succeed: $report",
+                report.optBoolean("ok")
+            )
+            assertEquals(340, report.optInt("width"))
+            assertEquals(180, report.optInt("height"))
+            val off = report.optJSONArray("offsets")!!.optJSONObject(1)!!
+            assertEquals(120, off.optInt("dx"))
+            assertEquals(0, off.optInt("dy"))
+            assertTrue("score ${off.optDouble("score")}", off.optDouble("score") > 0.8)
+            assertTrue("PNG written", out.isFile && out.length() > 100)
+            assertEquals(1.0f, EngineHost.nPanoramaProgress(handle), 0.001f)
+            assertFalse(
+                "idle cancel must report no job",
+                EngineHost.nPanoramaCancel(handle)
+            )
+            // Seam pixels equal the source gradient (invisible seam).
+            val stitched = BitmapFactory.decodeFile(out.absolutePath)
+            assertNotNull("stitched PNG decodes", stitched)
+            try {
+                assertEquals(340, stitched!!.width)
+                assertEquals(180, stitched.height)
+                for (x in intArrayOf(130, 160, 200, 260, 330)) {
+                    val got = stitched.getPixel(x, 90)
+                    val want = base.getPixel(x, 90)
+                    for (shift in intArrayOf(16, 8, 0)) {
+                        val d = kotlin.math.abs(
+                            ((got shr shift) and 0xFF) - ((want shr shift) and 0xFF)
+                        )
+                        assertTrue("seam x=$x shift=$shift delta=$d", d <= 1)
+                    }
+                    assertEquals(255, (got ushr 24) and 0xFF)
+                }
+            } finally {
+                stitched?.recycle()
+            }
+            // The PNG opens as a document through the existing bridge.
+            assertTrue(
+                "stitched PNG must load as a document",
+                EngineHost.nLoadDocument(handle, out.absolutePath)
+            )
+            val px = IntArray(340 * 180)
+            assertEquals(340 * 180, EngineHost.nCompositeInto(handle, px, 340, 180))
+            val got = px[90 * 340 + 180]
+            val want = base.getPixel(180, 90)
+            for (shift in intArrayOf(16, 8, 0)) {
+                val d = kotlin.math.abs(
+                    ((got shr shift) and 0xFF) - ((want shr shift) and 0xFF)
+                )
+                assertTrue("document pixel shift=$shift delta=$d", d <= 2)
+            }
+        } finally {
+            EngineHost.nDispose(handle)
+            base.recycle()
+            a.delete()
+            b.delete()
+            out.delete()
+            dir.deleteRecursively()
+        }
+    }
+
+    // UI end-to-end: seeded SAF-equivalent images -> stitch -> preview ->
+    // open as document. Also the mission screenshot (openclip-16.png).
+    @Test
+    fun panoramaDialogPreviewAndOpen() {
+        val id = openFreshDoc("pano-ui", 256)
+        val es = freshSurface(id)
+        val dir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "pano-ui"
+        )
+        try {
+            val base = panoBase(340, 180)
+            val a = savePng(dir, "ua.png", panoCrop(base, 0, 0, 220, 180))
+            val b = savePng(dir, "ub.png", panoCrop(base, 120, 0, 220, 180))
+            base.recycle()
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.openPanorama?.invoke(
+                    listOf(a.absolutePath, b.absolutePath)
+                )
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("pano-stitch").assertIsDisplayed()
+            composeRule.onNodeWithTag("pano-stitch").performClick()
+            val t0 = SystemClock.uptimeMillis()
+            var ready = false
+            while (SystemClock.uptimeMillis() - t0 < 30000) {
+                composeRule.waitForIdle()
+                ready = composeRule.onAllNodesWithTag("pano-preview")
+                    .fetchSemanticsNodes().isNotEmpty()
+                if (ready) break
+                Thread.sleep(150)
+            }
+            assertTrue("preview must appear", ready)
+            composeRule.onNodeWithTag("pano-report").performScrollTo()
+            composeRule.onNodeWithTag("pano-report").assertIsDisplayed()
+            composeRule.onNodeWithTag("pano-preview").performScrollTo()
+            composeRule.onNodeWithTag("pano-preview").assertIsDisplayed()
+            shot("openclip-16.png")
+            composeRule.onNodeWithTag("pano-open").assertIsDisplayed()
+            composeRule.onNodeWithTag("pano-open").performClick()
+            composeRule.waitForIdle()
+            // The document swaps to the stitched canvas (async doc queue).
+            val t1 = SystemClock.uptimeMillis()
+            var dims = 0 to 0
+            while (SystemClock.uptimeMillis() - t1 < 20000) {
+                dims = es.canvasDims()
+                if (dims.first == 340 && dims.second == 180) break
+                Thread.sleep(150)
+            }
+            assertEquals("stitched canvas width", 340, dims.first)
+            assertEquals("stitched canvas height", 180, dims.second)
+        } finally {
+            composeRule.activityRule.scenario.onActivity { act ->
+                act.activityTestHooks.closePanorama?.invoke()
+            }
+            composeRule.waitForIdle()
+            dir.deleteRecursively()
+            closeFreshDoc(id)
+        }
+    }
+
     /** A2: best-effort UI screenshot into the app cache (proof shots). */
 
     private fun shot(name: String) {

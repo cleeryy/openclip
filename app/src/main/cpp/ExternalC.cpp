@@ -28,6 +28,7 @@
  */
 #include <jni.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -71,6 +72,7 @@
 #include "openclip/vector.h"
 #include "openclip/warp.h"
 #include "openclip/puppet.h"
+#include "openclip/panorama.h"
 
 // M4: optional engine document API. When the parallel engine lane lands
 // engine/include/openclip/document.h, the shim prefers loadDocument /
@@ -172,6 +174,11 @@ struct Session {
     // target; cleared on frame structural ops and loads.
     std::vector<std::uint8_t> selMask;
     bool selMaskOn = false;
+    // Issue #16: panorama stitch progress/cancel (atomics because the
+    // blocking stitch runs on a worker thread while the UI polls).
+    std::atomic<float> panoProgress{0.0f};
+    std::atomic<bool> panoCancel{false};
+    std::atomic<bool> panoRunning{false};
     // T3: per-layer animation tracks (session-global, sampled at the
     // requested cel — ARCHITECTURE.md "T3 additions" §1). Meta hors
     // undo (like holds/bubbles).
@@ -328,6 +335,91 @@ std::string jsonStr(const std::string& json, const char* key) {
     const std::size_t q2 = json.find('"', q1 + 1);
     if (q2 == std::string::npos) return {};
     return json.substr(q1 + 1, q2 - q1 - 1);
+}
+
+// Issue #16: minimal JSON string-array reader for the panorama paths.
+// Handles the escapes JSONObject produces for file names; unknown
+// escapes are kept verbatim (paths stay best-effort, malformed JSON is
+// refused by the caller when the array is empty).
+std::vector<std::string> jsonStrArray(const std::string& json,
+                                      const char* key) {
+    std::vector<std::string> out;
+    const std::string pat = "\"" + std::string(key) + "\"";
+    std::size_t at = json.find(pat);
+    if (at == std::string::npos) return out;
+    std::size_t p = json.find('[', at + pat.size());
+    if (p == std::string::npos) return out;
+    ++p;
+    while (p < json.size()) {
+        while (p < json.size() &&
+               (json[p] == ' ' || json[p] == '\t' || json[p] == '\n' ||
+                json[p] == '\r' || json[p] == ','))
+            ++p;
+        if (p >= json.size() || json[p] == ']') break;
+        if (json[p] != '"') break;  // malformed: stop, caller refuses
+        ++p;
+        std::string item;
+        while (p < json.size() && json[p] != '"') {
+            if (json[p] == '\\' && p + 1 < json.size()) {
+                const char e = json[p + 1];
+                p += 2;
+                switch (e) {
+                    case 'n': item += '\n'; break;
+                    case 't': item += '\t'; break;
+                    case 'r': item += '\r'; break;
+                    case 'b': item += '\b'; break;
+                    case 'f': item += '\f'; break;
+                    case '"': item += '"'; break;
+                    case '\\': item += '\\'; break;
+                    case '/': item += '/'; break;
+                    default: item += e; break;
+                }
+            } else {
+                item += json[p++];
+            }
+        }
+        if (p < json.size() && json[p] == '"') ++p;
+        out.push_back(item);
+    }
+    return out;
+}
+
+std::string jsonUnescape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            const char e = s[++i];
+            switch (e) {
+                case 'n': o += '\n'; break;
+                case 't': o += '\t'; break;
+                case 'r': o += '\r'; break;
+                case '"': o += '"'; break;
+                case '\\': o += '\\'; break;
+                case '/': o += '/'; break;
+                default: o += e; break;
+            }
+        } else {
+            o += s[i];
+        }
+    }
+    return o;
+}
+
+std::string jsonEscape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"': o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            default: o += c; break;
+        }
+    }
+    return o;
 }
 
 int hexVal(char c) {
@@ -4564,4 +4656,147 @@ Java_dev_openclip_engine_EngineHost_nSelectionOp(JNIEnv* env, jclass,
     s->selMask.assign(plane.alpha.begin(), plane.alpha.end());
     s->selMaskOn = true;
     return JNI_TRUE;
+}
+
+// ---- Issue #16: panorama stitching (ARCHITECTURE.md additions) ----
+//
+// nPanoramaStitch is a blocking worker-thread call. Progress and cancel
+// live in Session atomics so the UI can poll and cancel without
+// touching the engine lock. The document is never mutated: the shim
+// decodes the source images, runs the pure engine module, writes a PNG
+// and returns the placements. The app opens that PNG through the
+// existing nLoadDocument when the user accepts the preview.
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_openclip_engine_EngineHost_nPanoramaStitch(JNIEnv* env, jclass,
+                                                    jlong handle,
+                                                    jstring json) {
+    Session* s = asSession(handle);
+    if (!s)
+        return env->NewStringUTF(
+            "{\"ok\":false,\"cancelled\":false,\"error\":\"invalid handle\"}");
+    const std::string j = toStd(env, json);
+    const std::vector<std::string> paths = jsonStrArray(j, "images");
+    // Android's JSONObject escapes '/' as '\/': unescape the path.
+    const std::string outPath = jsonUnescape(jsonStr(j, "outPath"));
+    if (s->panoRunning.exchange(true, std::memory_order_relaxed))
+        return env->NewStringUTF(
+            "{\"ok\":false,\"cancelled\":false,"
+            "\"error\":\"panorama: another stitch is already running\"}");
+    s->panoCancel.store(false, std::memory_order_relaxed);
+    s->panoProgress.store(0.0f, std::memory_order_relaxed);
+    auto fail = [&](const std::string& msg, bool cancelled) -> jstring {
+        s->panoRunning.store(false, std::memory_order_relaxed);
+        if (cancelled) {
+            if (!outPath.empty()) std::remove(outPath.c_str());
+            return env->NewStringUTF(
+                "{\"ok\":false,\"cancelled\":true}");
+        }
+        return env->NewStringUTF(
+            ("{\"ok\":false,\"cancelled\":false,\"error\":\"" +
+             jsonEscape(msg) + "\"}")
+                .c_str());
+    };
+    if (paths.size() < 2)
+        return fail("panorama: at least two images are required", false);
+    if (paths.size() > 32)
+        return fail("panorama: at most 32 images per stitch", false);
+    if (outPath.empty())
+        return fail("panorama: missing outPath", false);
+    const int maxInputDim =
+        static_cast<int>(jsonNum(j, "maxInputDim", 4096));
+    const int maxInputPixels =
+        static_cast<int>(jsonNum(j, "maxInputPixels", 33554432));
+    std::vector<openclip::PanoImage> images;
+    images.reserve(paths.size());
+    long long totalPixels = 0;
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        openclip::PanoImage img;
+        std::string err;
+        if (!openclip::loadPanoramaImage(paths[i], maxInputDim,
+                                         maxInputPixels, img, err))
+            return fail(err, false);
+        totalPixels += static_cast<long long>(img.width) * img.height;
+        if (maxInputPixels > 0 && totalPixels > maxInputPixels)
+            return fail("panorama: input images exceed maxInputPixels "
+                        "(bounded memory)", false);
+        images.push_back(std::move(img));
+        s->panoProgress.store(
+            0.01f + 0.08f * static_cast<float>(i + 1) / paths.size(),
+            std::memory_order_relaxed);
+        if (s->panoCancel.load(std::memory_order_relaxed))
+            return fail("", true);
+    }
+    openclip::PanoParams params;
+    params.feather = static_cast<int>(jsonNum(j, "feather", params.feather));
+    params.compensateExposure = jsonBool(j, "exposure", true);
+    params.maxPixels =
+        static_cast<int>(jsonNum(j, "maxPixels", params.maxPixels));
+    params.minOverlap =
+        static_cast<int>(jsonNum(j, "minOverlap", params.minOverlap));
+    params.minScore =
+        static_cast<float>(jsonNum(j, "minScore", params.minScore));
+    openclip::PanoResult result;
+    try {
+        result = openclip::stitchPanorama(
+            images, params, [&](float t) {
+                s->panoProgress.store(
+                    0.09f + 0.91f * std::max(0.0f, std::min(1.0f, t)),
+                    std::memory_order_relaxed);
+                return !s->panoCancel.load(std::memory_order_relaxed);
+            });
+    } catch (const std::bad_alloc&) {
+        return fail("panorama: not enough memory", false);
+    } catch (...) {
+        return fail("panorama: stitch failed", false);
+    }
+    if (result.cancelled) return fail("", true);
+    if (!result.ok()) return fail(result.error, false);
+    openclip::PanoImage png;
+    png.width = result.width;
+    png.height = result.height;
+    png.rgba = std::move(result.rgba);
+    std::string err;
+    if (!openclip::writePanoramaPng(outPath, png, err))
+        return fail(err, false);
+    std::string out = "{\"ok\":true,\"path\":\"" + jsonEscape(outPath) +
+                      "\",\"width\":" + std::to_string(result.width) +
+                      ",\"height\":" + std::to_string(result.height) +
+                      ",\"images\":" + std::to_string(result.offsets.size()) +
+                      ",\"offsets\":[";
+    char num[96];
+    for (std::size_t i = 0; i < result.offsets.size(); ++i) {
+        const auto& o = result.offsets[i];
+        if (i) out += ",";
+        std::snprintf(num, sizeof num,
+                      "{\"x\":%d,\"y\":%d,\"dx\":%d,\"dy\":%d,"
+                      "\"score\":%.4f,\"gain\":%.4f}",
+                      o.x, o.y, o.dx, o.dy,
+                      static_cast<double>(o.score),
+                      static_cast<double>(o.gain));
+        out += num;
+    }
+    std::snprintf(num, sizeof num, "],\"meanScore\":%.4f}",
+                  static_cast<double>(result.meanScore));
+    out += num;
+    s->panoProgress.store(1.0f, std::memory_order_relaxed);
+    s->panoRunning.store(false, std::memory_order_relaxed);
+    return env->NewStringUTF(out.c_str());
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_dev_openclip_engine_EngineHost_nPanoramaProgress(JNIEnv*, jclass,
+                                                      jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return 0.0f;
+    return s->panoProgress.load(std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nPanoramaCancel(JNIEnv*, jclass,
+                                                    jlong handle) {
+    Session* s = asSession(handle);
+    if (!s) return JNI_FALSE;
+    const bool running = s->panoRunning.load(std::memory_order_relaxed);
+    s->panoCancel.store(true, std::memory_order_relaxed);
+    return running ? JNI_TRUE : JNI_FALSE;
 }

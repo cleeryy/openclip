@@ -95,6 +95,7 @@ import dev.openclip.ui.CommandBar
 import dev.openclip.ui.CommandBarCollapsed
 import dev.openclip.ui.CommandBarStore
 import dev.openclip.ui.DocTabs
+import dev.openclip.ui.PanoramaDialog
 import dev.openclip.ui.DocTitleBar
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.NewCanvasBg
@@ -254,6 +255,10 @@ class MainActivity : ComponentActivity() {
         var recoveryPromptVisible: (() -> Boolean)? = null
         var discardSnapshots: (() -> Unit)? = null
         var docNameOf: ((String) -> String?)? = null
+        // Issue #16: open the panorama dialog with pre-seeded cache paths
+        // (SAF cannot be driven by instrumentation).
+        var openPanorama: ((List<String>) -> Unit)? = null
+        var closePanorama: (() -> Unit)? = null
     }
     val activityTestHooks = ActivityTestHooks()
 
@@ -339,6 +344,10 @@ class MainActivity : ComponentActivity() {
         val showT5Export = remember { mutableStateOf(false) }
         val showT5Macro = remember { mutableStateOf(false) }
         val showT5Align = remember { mutableStateOf(false) }
+        // Issue #16: panorama stitch dialog + seed paths (test hook only;
+        // the real flow always starts empty and uses the SAF picker).
+        val showPanorama = remember { mutableStateOf(false) }
+        val panoramaSeed = remember { mutableStateOf<List<String>>(emptyList()) }
         val showT5History = remember { mutableStateOf(false) }
         val showT5Info = remember { mutableStateOf(false) }
         val exchangePick = remember { mutableStateOf<((java.io.File?) -> Unit)?>(null) }
@@ -2122,6 +2131,14 @@ class MainActivity : ComponentActivity() {
                 refreshKey.value++
                 poke()
             }
+            activityTestHooks.openPanorama = { paths: List<String> ->
+                panoramaSeed.value = paths
+                showPanorama.value = true
+            }
+            activityTestHooks.closePanorama = {
+                showPanorama.value = false
+                panoramaSeed.value = emptyList()
+            }
             activityTestHooks.docNameOf = { id: String ->
                 docs.firstOrNull { it.docId == id }?.name
             }
@@ -2326,6 +2343,10 @@ class MainActivity : ComponentActivity() {
                                         val aid = activeDocId.value
                                         if (aid != null) requestClose(aid)
                                     }
+                                ),
+                                StudioMenuItem(
+                                    label = stringResource(R.string.pano_title),
+                                    onClick = { showPanorama.value = true }
                                 )
                             )
                         ),
@@ -3930,6 +3951,44 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     } ?: run { showT5Align.value = false }
+                }
+                if (showPanorama.value) {
+                    activeSurface()?.let { s ->
+                        PanoramaDialog(
+                            surface = s,
+                            cacheDir = ctx.cacheDir,
+                            initialImages = panoramaSeed.value,
+                            onDismiss = {
+                                showPanorama.value = false
+                                panoramaSeed.value = emptyList()
+                            },
+                            onStatus = { status.value = it },
+                            onOpenDocument = { path ->
+                                showPanorama.value = false
+                                panoramaSeed.value = emptyList()
+                                val name = java.io.File(path).name
+                                s.loadFrom(path) { ok ->
+                                    if (ok) {
+                                        val id = activeDocId.value
+                                        if (id != null) {
+                                            docRegistry.open(id, name)
+                                            docs.firstOrNull { it.docId == id }
+                                                ?.name = name
+                                            docRegistry.markDirty(id, false)
+                                        }
+                                    }
+                                    status.value = ctx.getString(
+                                        if (ok) R.string.pano_opened
+                                        else R.string.pano_failed
+                                    )
+                                    refreshKey.value++
+                                }
+                            }
+                        )
+                    } ?: run {
+                        showPanorama.value = false
+                        panoramaSeed.value = emptyList()
+                    }
                 }
                 if (showT5History.value) {
                     HistoryPanel(
