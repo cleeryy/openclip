@@ -115,6 +115,8 @@ import dev.openclip.ui.ChannelOps
 import dev.openclip.ui.ChannelStore
 import dev.openclip.ui.CmykProof
 import dev.openclip.ui.Harmony
+import dev.openclip.ui.HarmonyRegion
+import dev.openclip.ui.sampleHarmonyRegionAsync
 import dev.openclip.ui.PdfImport
 import dev.openclip.ui.PoseStore
 import dev.openclip.ui.Rdp
@@ -8096,6 +8098,220 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
         assertTrue("adopted hue must be ~180°, got $h in $adopted", h > 178f || h < 2f)
         assertEquals(3, Harmony.huesFor(30f, "triadic").size)
         assertEquals(4, Harmony.huesFor(30f, "square").size)
+    }
+
+    // ---- Issue #15: colour harmony samples a REGION, not a whole layer ----
+    // A two-tone layer (red left / blue right) makes the zone the only
+    // variable: each half yields its own base colour, while no single
+    // "whole layer" answer could explain both results.
+
+    private fun blitTwoTone(es: EngineSurface) {
+        val w = es.canvasWidth()
+        val h = es.canvasHeight()
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                bmp.setPixel(
+                    x, y,
+                    if (x < w / 2) 0xFFFF0000.toInt() else 0xFF0000FF.toInt()
+                )
+            }
+        }
+        val png = File(composeRule.activity.cacheDir, "harmony-two-tone.png")
+        png.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        bmp.recycle()
+        assertTrue(
+            "two-tone blob must commit to layer 0",
+            es.blitPngIntoLayer(0, png.absolutePath)
+        )
+        png.delete()
+        Thread.sleep(250)
+    }
+
+    private fun sampleZone(
+        es: EngineSurface,
+        rect: HarmonyRegion.Rect?
+    ): Pair<HarmonyRegion.Sample?, String?> {
+        var sample: HarmonyRegion.Sample? = null
+        var reason: String? = null
+        var done = false
+        val lock = Object()
+        sampleHarmonyRegionAsync(es, rect) { s, r ->
+            synchronized(lock) {
+                sample = s
+                reason = r
+                done = true
+                lock.notifyAll()
+            }
+        }
+        synchronized(lock) {
+            val end = SystemClock.uptimeMillis() + 15000
+            while (!done && SystemClock.uptimeMillis() < end) lock.wait(500)
+        }
+        return Pair(sample, reason)
+    }
+
+    // #15 pure math: drag normalisation, engine clamping, 1 px tap zone
+    // and mask weighting (a masked-out pixel never contributes).
+    @Test
+    fun harmonyRegionRectAndMaskMath() {
+        assertEquals(
+            HarmonyRegion.Rect(10, 20, 80, 60),
+            HarmonyRegion.rectFromDrag(90f, 80f, 10f, 20f, 100, 100)
+        )
+        assertEquals(
+            HarmonyRegion.Rect(5, 6, 1, 1),
+            HarmonyRegion.rectFromDrag(5.4f, 6.4f, 5.4f, 6.4f, 100, 100)
+        )
+        assertNull(HarmonyRegion.rectFromDrag(0f, 0f, 10f, 10f, 0, 0))
+        val px = intArrayOf(0xFFFF0000.toInt(), 0xFF0000FF.toInt())
+        val maskedOut = byteArrayOf(0, 255.toByte())
+        val s = HarmonyRegion.palette(
+            px, HarmonyRegion.Rect(0, 0, 2, 1), maskedOut, 2, 1, 4
+        )
+        assertNotNull(s)
+        assertEquals("#0000FF", s!!.dominant)
+        assertEquals(1, s.pixels)
+        assertTrue(s.masked)
+    }
+
+    // #15 zone: the composite's left half drives red, the right half blue.
+    @Test
+    fun harmonyRegionFollowsZoneNotLayer() {
+        val id = openFreshDoc("harmony-zone")
+        val es = freshSurface(id)
+        try {
+            blitTwoTone(es)
+            val w = es.canvasWidth()
+            val h = es.canvasHeight()
+            val left = sampleZone(es, HarmonyRegion.Rect(0, 0, w / 2, h))
+            val right = sampleZone(es, HarmonyRegion.Rect(w / 2, 0, w - w / 2, h))
+            assertNull("left zone must succeed (reason=${left.second})", left.second)
+            assertNull("right zone must succeed (reason=${right.second})", right.second)
+            assertEquals("#FF0000", left.first!!.dominant)
+            assertEquals("#0000FF", right.first!!.dominant)
+            // The whole layer holds BOTH colours: sampling it cannot be
+            // mistaken for either zone result.
+            val whole = sampleZone(es, HarmonyRegion.Rect(0, 0, w, h)).first!!
+            assertEquals(2, whole.swatches.size)
+            // The harmony base hue follows the zone, not the ink.
+            assertEquals(
+                2,
+                Harmony.huesFor(
+                    Harmony.hexToHsv(right.first!!.dominant)[0], "complement"
+                ).size
+            )
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // #15 selection + view: the mask gates the zone, and a drag expressed
+    // in SCREEN pixels under zoom + rotation lands on the same engine zone.
+    @Test
+    fun harmonyRegionMaskAndViewStable() {
+        val id = openFreshDoc("harmony-mask")
+        val es = freshSurface(id)
+        try {
+            blitTwoTone(es)
+            val w = es.canvasWidth()
+            val h = es.canvasHeight()
+            // 1. Right-half selection, whole-canvas zone: only blue counts.
+            es.selectRectEngine(w / 2f, 0f, w.toFloat(), h.toFloat())
+            val masked = sampleZone(es, HarmonyRegion.Rect(0, 0, w, h)).first
+            assertNotNull("masked zone must sample", masked)
+            assertEquals("#0000FF", masked!!.dominant)
+            assertTrue("sample must report the mask", masked.masked)
+            assertEquals((w - w / 2) * h, masked.pixels)
+            es.clearSelection()
+            // 2. Zoom 190 % + 27°: the gesture is dispatched in view
+            // coordinates, so only the engine-space commit can be right.
+            es.setViewForTest(1.9f, 27f)
+            es.armRegion()
+            viewStrokeEng(es, 12f, 14f, 100f, 90f)
+            val zone = es.regionZoneForTest()
+            assertNotNull("drag must commit an engine zone", zone)
+            assertEquals(12f, zone!![0].toFloat(), 2f)
+            assertEquals(14f, zone[1].toFloat(), 2f)
+            assertEquals(100f, zone[2].toFloat(), 2f)
+            assertEquals(90f, zone[3].toFloat(), 2f)
+            assertFalse("region mode is one-shot", es.regionArmed)
+            val zoned = sampleZone(
+                es,
+                HarmonyRegion.Rect(zone[0], zone[1], zone[2] - zone[0], zone[3] - zone[1])
+            ).first
+            assertEquals("#FF0000", zoned!!.dominant)
+            es.resetView()
+        } finally {
+            closeFreshDoc(id)
+        }
+    }
+
+    // #15 UI: arm from the panel, drag on the canvas, palette follows the
+    // zone; also saves the mission screenshot (openclip-15.png).
+    @Test
+    fun harmonyPanelSamplesZone() {
+        val id = openFreshDoc("harmony-panel")
+        val es = freshSurface(id)
+        try {
+            blitTwoTone(es)
+            ensureDockOpen()
+            composeRule.onNodeWithTag("dock-tab-confort").performScrollTo()
+            composeRule.onNodeWithTag("dock-tab-confort").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("v3-harmony").performScrollTo()
+            composeRule.onNodeWithTag("harmony-sample-region").performScrollTo()
+            composeRule.onNodeWithTag("harmony-sample-region").performClick()
+            composeRule.waitForIdle()
+            assertTrue("panel button must arm the canvas drag", es.regionArmed)
+            // Drag the right half (blue) in engine coordinates.
+            val w = es.canvasWidth()
+            val h = es.canvasHeight()
+            viewStrokeEng(es, w * 0.6f, h * 0.1f, w * 0.95f, h * 0.6f)
+            var found = false
+            val t0 = SystemClock.uptimeMillis()
+            while (!found && SystemClock.uptimeMillis() - t0 < 15000) {
+                composeRule.waitForIdle()
+                found = composeRule.onAllNodesWithTag("harmony-palette")
+                    .fetchSemanticsNodes().isNotEmpty()
+                if (!found) Thread.sleep(200)
+            }
+            assertTrue("sampled palette must show up in the panel", found)
+            composeRule.onNodeWithTag("harmony-palette").performScrollTo()
+            composeRule.onNodeWithTag("harmony-palette-0").assertIsDisplayed()
+            composeRule.onNodeWithTag("harmony-sample-status")
+                .assertTextContains("#0000FF", substring = true)
+            // Mission screenshot (re-read by the orchestrator). The canvas
+            // is a SurfaceView: root.draw() would miss it, so the display
+            // capture comes from UiAutomation (falls back to the view tree).
+            composeRule.waitForIdle()
+            try {
+                var bmp: Bitmap? = try {
+                    InstrumentationRegistry.getInstrumentation()
+                        .uiAutomation.takeScreenshot()
+                } catch (_: Exception) {
+                    null
+                }
+                if (bmp == null) {
+                    val root = composeRule.activity.window.decorView.rootView
+                    val wpx = root.width.coerceAtLeast(1)
+                    val hpx = root.height.coerceAtLeast(1)
+                    bmp = Bitmap.createBitmap(wpx, hpx, Bitmap.Config.ARGB_8888)
+                    root.draw(android.graphics.Canvas(bmp))
+                }
+                val dst = File(
+                    composeRule.activity.getExternalFilesDir(null),
+                    "openclip-15.png"
+                )
+                dst.outputStream().use {
+                    bmp!!.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+                bmp!!.recycle()
+            } catch (_: Exception) {
+            }
+        } finally {
+            closeFreshDoc(id)
+        }
     }
 
     // §2a simplifyReducesPoints: 100-pt sine → < 40, endpoints kept.
