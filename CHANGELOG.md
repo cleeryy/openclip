@@ -9,6 +9,32 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
 
 ## [Unreleased]
 
+## [0.4.0-beta] — 2026-11-01
+
+### Added
+
+- Colour harmony can sample a **region**: the active selection mask, or a
+  rectangle dragged on the canvas, captured in engine coordinates so zoom,
+  rotation and view-flip cannot change the sample. Weighted palette, explicit
+  fallback when the composite is unavailable (issue #15).
+- Panorama stitching: offline gradient-correlation alignment (coarse-to-fine),
+  feathered blend with optional exposure gain, cancellable progress, explicit
+  refusals for insufficient overlap or flat texture, multi-image SAF import
+  (issue #16).
+
+### Changed
+
+- Toolchain upgraded to Gradle 9.8.2, AGP 9.5.0, Kotlin 2.4.21, Compose BOM
+  2026.09.00 and `compileSdk 37`, with NDK pinned to r27 so the native
+  contract does not drift. `applicationVariants` migrated to
+  `androidComponents.onVariants`; APK names unchanged (issue #22).
+
+### Notes
+
+- Research (issue #17): auto-colourisation remains blocked — no permissively
+  licensed ONNX weight ≤5 MB exists, and int8 quantisation of the smallest
+  candidate degrades both quality and latency. Classic denoise already ships.
+
 ### Added
 
 - Panorama stitching (issue #16): align and blend 2..32 overlapping
