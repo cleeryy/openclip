@@ -224,11 +224,11 @@ bash scripts/check_jni_symbols.sh --source-mode
 
 - **Engine** — `cd engine && make test`. Headerless assert harness in
   `engine/tests/`, one test file per public header; must stay green
-  (currently **331/331 tests**, engine gates include i18n parity).
+  (currently **339/339 tests**, engine gates include i18n parity).
 - **App conformance** — `bash scripts/emutest.sh` on the dev box. It
   boots or reuses the x86_64 AVD (`openclip-emu`), builds the x86_64-only
   APKs, installs them and runs the instrumented suite directly with
-  `am instrument`, ending with `OK (N tests)`. Currently **289** on
+  `am instrument`, ending with `OK (N tests)`. Currently **295** on
   the phone AVD; the tablet AVD reports 247/248 with one known gesture
   flake that passes in isolation. Never run heavy Gradle builds in
   parallel with the emulator on the 8 GB dev box.
