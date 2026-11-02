@@ -3,7 +3,7 @@
 ## Supported versions
 
 Calque is pre-1.0 software distributed as alpha pre-releases. Security
-fixes land on `master` and are shipped in the next tagged alpha.
+fixes land on `main` and are shipped in the next tagged alpha.
 
 | Version | Supported |
 |---|---|

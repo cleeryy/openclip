@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+# Reject commits that do not follow Conventional Commits.
+# Installed by scripts/install-git-hooks.sh — see CONTRIBUTING.md §4.
+set -eu
+
+msg_file="$1"
+pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-z0-9._/-]+\))?!?: .{3,}$'
+
+# Merge and revert commits produced by git itself are allowed.
+case "$(head -n1 "$msg_file")" in
+  "Merge "*) exit 0 ;;
+  "Revert "*) exit 0 ;;
+esac
+
+if ! head -n1 "$msg_file" | grep -Eq "$pattern"; then
+  echo "Commit rejected: Conventional Commits format expected." >&2
+  echo "Example: feat(engine): add pass-through groups (#29)" >&2
+  exit 1
+fi
+
+title="$(head -n1 "$msg_file")"
+if [ "${#title}" -gt 72 ]; then
+  echo "Commit rejected: title is ${#title} characters, keep it under 72." >&2
+  exit 1
+fi

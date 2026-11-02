@@ -1,7 +1,7 @@
 name: android
 on:
   push:
-    branches: ["master", "main"]
+    branches: ["main"]
     tags: ["v*"]
   # Backfill the package registry for an already published tag, e.g.
   # release_tag=0.2.0-alpha. The release must already exist.

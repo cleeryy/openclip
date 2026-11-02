@@ -22,7 +22,7 @@ git by project rule (`.gitignore` refuses `*.apk` / `*.xapk`, see
 - Build the debug APK (see [Build](#build)) and install it on a tablet or
   the local emulator — the studio shell (menu bar, tool rail, collapsible
   dock, color panel, layer panel, timeline) is usable immediately.
-- Every CI run on `master` publishes a buildable debug APK and the
+- Every CI run on `main` publishes a buildable debug APK and the
   instrumented test APK as workflow artifacts (`calque-apks`, 7-day
   retention) — the APK itself, not screenshots.
 - Tagged releases (`v*`) publish a debug-signed APK plus its `.sha256`
@@ -178,7 +178,7 @@ Key handling and rotation: [docs/release-signing.md](docs/release-signing.md).
 - **Releases** are the app's distribution channel: per-ABI APKs plus
   `.sha256` companions, published automatically from `v*` tags
   ([releases](https://github.com/cleeryy/openclip/releases)).
-- **Actions artifacts** carry every `master` build (`calque-apks`,
+- **Actions artifacts** carry every `main` build (`calque-apks`,
   7-day retention) for quick testing of unreleased commits.
 - **GitHub Packages** mirrors each release as an OCI artifact, because
   the npm/Maven/NuGet/RubyGems registries cannot host an APK but the
@@ -259,6 +259,30 @@ Interchange uses open formats only: OpenRaster (native), PSD
 and PDF. Commercial package files and extracted content stay out of git
 (see `.gitignore`), and test fixtures are generated in code rather than
 committed as binaries.
+
+## Conventions
+
+The shared working method lives in [CONTRIBUTING.md](CONTRIBUTING.md) and applies
+to humans and automated agents alike: `main` is always green, nothing is pushed
+to it directly, branches are `<type>/<ticket>-<slug>`, commits follow
+[Conventional Commits](https://www.conventionalcommits.org/), one PR covers one
+subject, and merging is **squash-only** (repository setting).
+
+Repository specifics:
+
+| Element | Value |
+| --- | --- |
+| Default branch | `main` |
+| Commit scopes | `engine`, `app`, `ui`, `jni`, `ci`, `deps`, `docs` |
+| Merge strategy | Squash and merge only; source branch deleted |
+| Gates before push | `bash scripts/prepush.sh` (engine, i18n parity, JNI contract, Kotlin, NDK) |
+| Instrumented gate | `bash scripts/emutest.sh` locally — deliberately not on CI |
+| Local commit hook | `bash scripts/install-git-hooks.sh` (enforces the commit format) |
+| Titles | PR titles are CI-checked against Conventional Commits (they become the squash message) |
+
+This repository is maintained by an automated agent acting on the maintainer's
+instructions; that delegation is the documented exception to "do not merge your
+own PR" in §7 of `CONTRIBUTING.md`.
 
 ## Contributing and security
 
