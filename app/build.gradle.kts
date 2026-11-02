@@ -188,7 +188,7 @@ dependencies {
 
     val testRunnerVersion = "1.6.1"
     // M8: ONNX Runtime (MIT) — app-side AI tools (super-resolution).
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
     androidTestImplementation("androidx.test:runner:$testRunnerVersion")
     androidTestImplementation("androidx.test:rules:$testRunnerVersion")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
