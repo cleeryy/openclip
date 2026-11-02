@@ -302,9 +302,10 @@ URL and license; bundled fonts ship their OFL text next to the files.
 
 ## Status and roadmap
 
-Alpha. The complete M1→M10 engine, the STUDIO shell (slices 0→7), the
-read-only `.clip` tiers (a)+(b), the post-v1 tranches V+1→V+3 and the
-parity tranches T1→T5 are delivered and emulator-gated. Reference docs
+Beta (0.4.0-beta). The M1→M10 engine, the STUDIO shell (slices 0→7), the
+read-only `.clip` tiers (a)+(b), the post-v1 tranches V+1→V+3, the parity
+tranches T1→T5 and the pro-beta tranches A/A2/B/B2/C are delivered and
+emulator-gated (engine 339 tests, 295 instrumented tests). Reference docs
 and tracking:
 
 - [docs/ROADMAP.md](docs/ROADMAP.md) — parity plan, delivered history and
@@ -312,8 +313,8 @@ and tracking:
 - [docs/TASKS.md](docs/TASKS.md) — executable log with test counts,
   commits, CI runs and proof screenshot paths.
 - [docs/parity-gap.md](docs/parity-gap.md) — source-vs-code parity
-  inventory (v0 snapshot; deferred gaps tracked in
-  [issue #4](https://github.com/cleeryy/openclip/issues/4)).
+  inventory (v0 snapshot; T1→T5 closed it, remaining gaps are tracked
+  as issues).
 - [docs/post-v1-backlog.md](docs/post-v1-backlog.md) — original DONE /
   FUTURE / EXCLUDED triage that seeded V+1→V+3.
 - Open issues — <https://github.com/cleeryy/openclip/issues> (feature
