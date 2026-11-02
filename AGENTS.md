@@ -1,5 +1,11 @@
-# AGENTS.md — OpenClip working conventions
+# AGENTS.md — Calque working conventions
 
+- **Everyone — humans and agents alike — follows [`CONTRIBUTING.md`](CONTRIBUTING.md):**
+  `main` stays green, never push to `main` directly, `<type>/<ticket>-<slug>`
+  branches, Conventional Commits, one subject per PR, squash merge.
+- Repeated instruction: the same rule applies to every new convention in
+  `CONTRIBUTING.md` — when this file and `CONTRIBUTING.md` differ, the stricter
+  one wins and the difference gets written down here.
 - Language: C++17 in `engine/` (no JNI/Android includes there), Kotlin
   2.x + Jetpack Compose in `app/`.
 - Engine public API only grows through `engine/include/openclip/` —

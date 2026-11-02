@@ -1,0 +1,33 @@
+name: pr-title
+
+# The squash message is the PR title, so the title is what lands on main.
+# Enforce Conventional Commits here rather than relying on memory.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Conventional Commits format
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-z0-9._/-]+\))?!?: .{3,}$'
+          if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            echo "Title rejected: Conventional Commits format expected." >&2
+            echo "Got: $TITLE" >&2
+            echo "Example: feat(engine): add pass-through groups (#29)" >&2
+            exit 1
+          fi
+          if [ "${#TITLE}" -gt 72 ]; then
+            echo "Title is ${#TITLE} characters; keep it under 72." >&2
+            exit 1
+          fi
+          echo "Title OK: $TITLE"
