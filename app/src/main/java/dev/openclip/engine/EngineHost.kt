@@ -74,6 +74,7 @@ object EngineHost {
     // + PNG pixel commit into a layer (exact size match, undoable).
     external fun nSetLayerText(handle: Long, index: Int, json: String?): Boolean
     external fun nBlitPngIntoLayer(handle: Long, index: Int, path: String): Boolean
+    external fun nSaveLayerPng(handle: Long, index: Int, path: String): Boolean
 
     // B2 additions (ARCHITECTURE.md "B2 additions"): atomic text commit
     // (pixels + fiche = ONE undo; index < 0 creates the layer) and

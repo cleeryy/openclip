@@ -1740,3 +1740,27 @@ Pipeline in `panorama.h`:
   texture, dimensions, budget) and cancellation. Instrumented:
   end-to-end JNI stitch of two generated PNGs (offset, seam pixels,
   output loaded into a document) plus the app dialog preview/cancel.
+
+## Issue #17 additions — layer export for app-side AI (scan cleanup)
+
+The AI denoise runs entirely app-side (ONNX Runtime plus a vendored
+MIT model), but it needs the *real layer pixels*, not the composite.
+One symbol is added; everything else reuses existing bridges.
+
+- `nSaveLayerPng(handle, index, path) -> bool` writes one raster
+  layer's surface as a straight-RGBA PNG (the same `encodePng` path
+  the ORA writer uses). Refused with `false` for a group, a fill
+  layer, an out-of-range index, or an unwritable path; the document is
+  never touched.
+- Reading back is the existing `nBlitPngIntoLayer`, so the whole
+  operation is one undo step (full-layer tile snapshots, the filter
+  pattern) and respects the locked/alpha-lock/fill guards.
+- The model is `jere1882/document-image-denoising` (MIT, verified in
+  the upstream repository LICENSE), 1.93 MB fp32, opset 17,
+  `[batch,3,h,w]` float in `[0,1]` with `h,w` multiples of 8. It is
+  trained on **scanned documents**: the UI labels it "Scan cleanup
+  (AI, documents)" and offers a mix factor so it is never silently
+  applied at full strength to artwork.
+- Inference is tiled (512 px tiles, pad to a multiple of 8 then crop),
+  bounded in memory, cancellable, and returns `null` plus a status
+  reason on any failure — never an exception.

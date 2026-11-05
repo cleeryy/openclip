@@ -87,6 +87,8 @@ licence inconnue.
 
 ## 6. Recommandation
 
+**§8.2 débruitage : LIVRÉ** sous le nom « Scan cleanup (AI, documents) » (modèle docden bc16 fp32, 1,93 Mo, MIT, sha256 `93d7eac4…c8659`, facteur de mélange 0–100 %, tuiles 512²).
+
 **§8.3 auto-colorisation : blocage CONFIRMÉ.** Aucun poids ≤ 5 Mo sous licence permissive
 n'existe ; le plus petit candidat crédible est 3× au-dessus du budget, en entrée fixe 256²,
 et la quantization le dégrade massivement tout en le ralentissant. Ce n'est pas un échec de
