@@ -871,4 +871,13 @@
     <string name="pano_err_image">Une image n’a pas pu être décodée (PNG, JPEG, BMP, TGA, GIF, PNM).</string>
     <string name="pano_err_count">Choisissez entre 2 et 32 images.</string>
     <string name="pano_err_unknown">Échec de l’assemblage : %1$s</string>
+    <string name="filter_scan_cleanup">Nettoyage de scan (IA, documents)…</string>
+    <string name="scan_cleanup_title">Nettoyage de scan (IA, documents)</string>
+    <string name="scan_cleanup_hint">Atténue le bruit de numérisation des documents et du line art. Le modèle est entraîné sur des documents scannés, pas sur des peintures — utilisez le facteur de mélange pour conserver la texture d’origine.</string>
+    <string name="scan_cleanup_mix">Mélange : %1$d %%</string>
+    <string name="scan_cleanup_apply">Appliquer</string>
+    <string name="scan_cleanup_cancel">Annuler</string>
+    <string name="scan_cleanup_close">Fermer</string>
+    <string name="scan_cleanup_done">Scan nettoyé</string>
+    <string name="scan_cleanup_failed">Échec du nettoyage de scan</string>
 </resources>

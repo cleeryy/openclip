@@ -871,4 +871,13 @@
     <string name="pano_err_image">One image could not be decoded (PNG, JPEG, BMP, TGA, GIF, PNM).</string>
     <string name="pano_err_count">Choose between 2 and 32 images.</string>
     <string name="pano_err_unknown">Stitch failed: %1$s</string>
+    <string name="filter_scan_cleanup">Scan cleanup (AI, documents)…</string>
+    <string name="scan_cleanup_title">Scan cleanup (AI, documents)</string>
+    <string name="scan_cleanup_hint">Removes scanner noise from document or line-art scans. The model is trained on scanned documents, not paintings — use the mix factor to keep the original texture.</string>
+    <string name="scan_cleanup_mix">Mix: %1$d %%</string>
+    <string name="scan_cleanup_apply">Apply</string>
+    <string name="scan_cleanup_cancel">Cancel</string>
+    <string name="scan_cleanup_close">Close</string>
+    <string name="scan_cleanup_done">Scan cleaned</string>
+    <string name="scan_cleanup_failed">Scan cleanup failed</string>
 </resources>

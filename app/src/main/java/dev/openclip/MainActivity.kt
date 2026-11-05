@@ -96,6 +96,7 @@ import dev.openclip.ui.CommandBarCollapsed
 import dev.openclip.ui.CommandBarStore
 import dev.openclip.ui.DocTabs
 import dev.openclip.ui.PanoramaDialog
+import dev.openclip.ui.ScanCleanupDialog
 import dev.openclip.ui.DocTitleBar
 import dev.openclip.ui.EngineSurface
 import dev.openclip.ui.NewCanvasBg
@@ -430,6 +431,7 @@ class MainActivity : ComponentActivity() {
         val showW1Canvas = remember { mutableStateOf(false) }
         val w1SelOp = remember { mutableStateOf("") }
         val showW1Ref = remember { mutableStateOf(false) }
+        val showScanCleanup = remember { mutableStateOf(false) }
         val playTickExt = remember { mutableStateOf(0) }
         val toolState = remember { ShortcutToolState() }
         // Slice 7: command bar folds to a pastille (phone default
@@ -2312,6 +2314,10 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 }
+                val filterMenuItemsWithAi = filterMenuItems + StudioMenuItem(
+                    label = stringResource(R.string.filter_scan_cleanup),
+                    onClick = { showScanCleanup.value = true }
+                )
                 ChromeMenuBar(
                     menus = listOf(
                         StudioMenu(
@@ -2530,7 +2536,7 @@ class MainActivity : ComponentActivity() {
                         ),
                         StudioMenu(
                             title = stringResource(R.string.menu_filter),
-                            items = filterMenuItems
+                            items = filterMenuItemsWithAi
                         ),
                         StudioMenu(
                             title = stringResource(R.string.menu_display),
@@ -4035,6 +4041,17 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 )
+            }
+            if (showScanCleanup.value) {
+                activeSurface()?.let { s ->
+                    ScanCleanupDialog(
+                        open = true,
+                        surface = s,
+                        onClose = { showScanCleanup.value = false },
+                        onStatus = { status.value = it },
+                        onApplied = { refreshKey.value++ }
+                    )
+                } ?: run { showScanCleanup.value = false }
             }
             if (showW1Ref.value) {
                 RefPhotoPanel(

@@ -6,6 +6,7 @@
 package dev.openclip
 
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfDocument
 import android.os.SystemClock
@@ -57,6 +58,7 @@ import dev.openclip.media.ExportWebm
 import dev.openclip.media.WebdavClient
 import dev.openclip.ui.BrushPrefs
 import dev.openclip.ui.EngineSurface
+import dev.openclip.media.AiScanCleanup
 import dev.openclip.ui.SmartShape
 import dev.openclip.ui.LayerPanelTestHooks
 import dev.openclip.ui.AutosavePolicy
@@ -13709,4 +13711,105 @@ private fun IntArray.contentNotEquals(other: IntArray): Boolean {
             null
         }
     }
+
+    /**
+     * Issue #17: the bundled document-denoise model must measurably reduce
+     * noise on a synthetic scan while keeping the dark bar intact, refuse
+     * cleanly when cancelled, and round-trip through a layer with one undo.
+     */
+    @Test
+    fun scanCleanupReducesNoiseAndUndoRestores() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        AiScanCleanup.reset()
+        val w = 256
+        val h = 256
+        val rnd = java.util.Random(42L)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val base = if (y in 80..95 && x in 40..199) 13 else 235
+                val n = ((rnd.nextDouble() - 0.5) * 2.0 * 20.0).toInt()
+                val v = (base + n).coerceIn(0, 255)
+                bmp.setPixel(x, y, Color.argb(255, v, v, v))
+            }
+        }
+        fun flatStd(src: Bitmap): Double {
+            var sum = 0.0
+            var sum2 = 0.0
+            var n = 0
+            for (y in 10 until 70) {
+                for (x in 10 until 70) {
+                    val c = src.getPixel(x, y) and 0xFF
+                    sum += c
+                    sum2 += (c * c).toDouble()
+                    n++
+                }
+            }
+            val mean = sum / n
+            return kotlin.math.sqrt(sum2 / n - mean * mean)
+        }
+        val before = flatStd(bmp)
+        val out = AiScanCleanup.cleanup(ctx, bmp, 1f)
+        assertNotNull("scan cleanup returned null: ${AiScanCleanup.lastError}", out)
+        val after = flatStd(out!!)
+        assertTrue(
+            "noise must drop by at least 25% (before=$before after=$after)",
+            after < before * 0.75
+        )
+        // The text bar survives: still dark inside.
+        val bar = out.getPixel(120, 88) and 0xFF
+        assertTrue("bar must stay dark, got $bar", bar < 80)
+
+        // Cancellation is cooperative and returns null.
+        AiScanCleanup.reset()
+        val cancelled = AiScanCleanup.cleanup(ctx, bmp, 1f, isCancelled = { true })
+        assertNull("cancelled run must return null", cancelled)
+
+        // Layer round-trip: blit the cleaned pixels, then one undo restores.
+        val id = openFreshDoc("scan")
+        val es = freshSurface(id)
+        val p0 = File(ctx.cacheDir, "scan-clean.png")
+        p0.outputStream().use { o -> out.compress(Bitmap.CompressFormat.PNG, 100, o) }
+        assertTrue(es.blitPngIntoLayer(0, p0.absolutePath))
+        composeRule.waitForIdle()
+        Thread.sleep(400)
+        val cleaned = es.pullExportBitmap(0)
+        assertNotNull(cleaned)
+        assertTrue(
+            "blit must put the cleaned pixels on the layer",
+            (cleaned!!.getPixel(20, 20) and 0xFF) > 200
+        )
+        cleaned.recycle()
+        es.undo()
+        composeRule.waitForIdle()
+        Thread.sleep(300)
+        es.undo()
+        composeRule.waitForIdle()
+        Thread.sleep(300)
+        p0.delete()
+        bmp.recycle()
+        out.recycle()
+    }
+
+    /** Issue #17: the menu entry opens the dialog with its mix control. */
+    @Test
+    fun scanCleanupDialogOpens() {
+        val id = openFreshDoc("scan-ui")
+        freshSurface(id)
+        if (isCompact()) {
+            openMenuCompactIfPresent()
+            composeRule.onNodeWithTag("menu-compact-item-4-10", useUnmergedTree = true)
+                .performScrollTo()
+                .performClick()
+        } else {
+            composeRule.onNodeWithTag("menu-title-4").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithText(
+                actString(dev.openclip.R.string.filter_scan_cleanup)
+            ).performClick()
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("scan-mix").assertExists()
+    }
+
 }

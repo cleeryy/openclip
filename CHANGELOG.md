@@ -9,6 +9,17 @@ Pre-1.0 alpha tags use SemVer pre-release identifiers (`-alpha`, `-alpha.N`);
 
 ## [Unreleased]
 
+### Added
+
+- **Scan cleanup (AI, documents)** (issue #17): the bundled
+  `jere1882/document-image-denoising` model (MIT, 1.9 MB, opset 17) runs
+  app-side on ONNX Runtime, tiled at 512 px with padding to a multiple of 8,
+  bounded memory and cooperative cancellation. The dialog exposes a mix factor
+  so artwork is never silently pushed through a document model; the write-back
+  goes through `nBlitPngIntoLayer`, so the whole operation is one undo step.
+  Classic median/bilateral denoise remains the default path.
+
+
 ## [0.4.0-beta] — 2026-11-01
 
 ### Added

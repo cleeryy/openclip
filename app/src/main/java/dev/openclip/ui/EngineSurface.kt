@@ -4809,6 +4809,11 @@ class EngineSurface @JvmOverloads constructor(
         if (handle != 0L) EngineHost.nSetBrushTip(handle, path) else false
     }
 
+    /** Issue #17: write one raster layer as a straight-RGBA PNG (read-only). */
+    fun saveLayerPng(index: Int, path: String): Boolean = synchronized(engineLock) {
+        if (handle != 0L) EngineHost.nSaveLayerPng(handle, index, path) else false
+    }
+
     fun blitPngIntoLayer(index: Int, path: String): Boolean = synchronized(engineLock) {
         if (handle != 0L) EngineHost.nBlitPngIntoLayer(handle, index, path)
             .also {

@@ -1574,6 +1574,33 @@ Java_dev_openclip_engine_EngineHost_nBlitPngIntoLayer(JNIEnv* env, jclass,
     return JNI_TRUE;
 }
 
+// Issue #17 (ARCHITECTURE.md "Issue #17 additions"): export one
+// raster layer as a straight-RGBA PNG so the app can run the scan
+// cleanup model on real layer pixels. Read-only: the document is never
+// mutated here (write-back goes through nBlitPngIntoLayer, one undo).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_openclip_engine_EngineHost_nSaveLayerPng(JNIEnv* env, jclass,
+                                                  jlong handle,
+                                                  jint index,
+                                                  jstring path) {
+    Session* s = asSession(handle);
+    if (!s || !path) return JNI_FALSE;
+    if (index < 0 || index >= static_cast<jint>(cur(s).layerCount()))
+        return JNI_FALSE;
+    const openclip::Layer& ly = cur(s).layer(static_cast<std::size_t>(index));
+    if (ly.isGroup || ly.hasFill()) return JNI_FALSE;
+    const std::string p = toStd(env, path);
+    if (p.empty()) return JNI_FALSE;
+    std::vector<std::uint8_t> png;
+    if (!openclip::encodePng(ly.surface, png) || png.empty())
+        return JNI_FALSE;
+    std::FILE* f = std::fopen(p.c_str(), "wb");
+    if (!f) return JNI_FALSE;
+    const std::size_t wrote = std::fwrite(png.data(), 1, png.size(), f);
+    std::fclose(f);
+    return wrote == png.size() ? JNI_TRUE : JNI_FALSE;
+}
+
 // B2 §1 (ARCHITECTURE.md "B2 additions"): atomic text commit — create
 // (index < 0) or replace a raster layer's pixels AND apply the text
 // fiche inside ONE document snapshot, so the whole text transform
