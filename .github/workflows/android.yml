@@ -191,7 +191,7 @@ jobs:
           gh release download "v${{ steps.tag.outputs.value }}" \
             --repo "${{ github.repository }}" \
             --pattern 'calque-*.apk' --pattern 'calque-*.apk.sha256'
-      - uses: oras-project/setup-oras@v1
+      - uses: oras-project/setup-oras@v2
       - name: Push OCI artifact
         env:
           GH_TOKEN: ${{ github.token }}
